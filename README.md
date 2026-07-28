@@ -8,12 +8,12 @@ Region `ap-southeast-2` (Sydney). See [CLAUDE.md](CLAUDE.md) for the full stack 
 
 ## Current status
 
-Milestone 1 complete: CDK skeleton, data stack, and the shared credit ledger.
+Milestone 2 complete: Cognito auth, the HTTP API, and the FastAPI Lambda.
 
 | Milestone | Scope | Status |
 |---|---|---|
 | 1 | `infra/` skeleton + `data_stack` | done |
-| 2 | `auth_stack` + `api_stack` | not started |
+| 2 | `auth_stack` + `api_stack` | done |
 | 3 | `pipeline_stack` (Polly placeholder) | not started |
 | 4 | Volcano TTS provider | not started |
 | 5 | `billing_stack` (Stripe) | not started |
@@ -84,6 +84,62 @@ Two details are load-bearing:
   refunded, and a job that never froze anything can't drive `frozen` negative — which matters
   because every task including `freeze_credit` itself catches to `rollback_credit`.
 
+## Architecture — auth and API
+
+`infra/stacks/auth_stack.py` — Cognito user pool: email sign-in alias, self-signup, email
+verification by code, `EMAIL_ONLY` recovery, password minimum 8 with upper/lower/digit but **no
+symbol requirement** (length is the lever that matters; symbols mostly add friction). The SPA app
+client has no secret and enables SRP always, plus `USER_PASSWORD_AUTH` **in dev only** so the API
+can be exercised with curl.
+
+`infra/stacks/api_stack.py` — HTTP API with a Cognito JWT authorizer:
+
+```
+issuer   https://cognito-idp.ap-southeast-2.amazonaws.com/<user-pool-id>
+audience <app-client-id>
+identity $request.header.Authorization
+```
+
+The authorizer is attached as `default_authorizer`, and `GET /health` opts out explicitly with
+`HttpNoneAuthorizer`. That direction matters: a route added later is protected by omission rather
+than exposed by it.
+
+**The API requires ID tokens, not access tokens.** Cognito access tokens carry neither an `aud`
+claim nor `email`, so `api/deps.py` rejects anything whose `token_use` is not `id`. `scripts/
+get_token.py` prints the ID token by default for this reason.
+
+Claims reach the application without any token parsing: API Gateway validates signature, issuer,
+audience and expiry before the Lambda runs, Mangum exposes the raw event as `scope["aws.event"]`,
+and `deps.py` reads `requestContext.authorizer.jwt.claims`. Re-verifying in FastAPI would duplicate
+the authorizer while being easier to get wrong.
+
+### Free credit on signup
+
+A Cognito post-confirmation trigger (`backend/functions/init_user/`) creates the user's `PROFILE`
+and `ENTITLEMENT` items with `available=1`. The write itself lives in
+`EntitlementStore.initialize_user`, not in the handler, because creating `ENTITLEMENT` is an
+entitlement mutation and constraint 1 routes those through `shared/db.py`.
+
+Two independent conditional puts, each guarded by `attribute_not_exists(PK)` and each swallowing
+its own `ConditionalCheckFailedException` — Cognito can invoke a trigger more than once. They are
+deliberately *not* a transaction: if an earlier partial write left `PROFILE` present but
+`ENTITLEMENT` missing, a transaction would fail as a whole and never repair the gap, while
+independent puts heal it.
+
+The trigger never fails a signup. Any DynamoDB error is logged and swallowed, which trades a
+guaranteed entitlement for a guaranteed signup. `GET /account` lazily calls the same idempotent
+`initialize_user` and is the compensating control that closes the gap.
+
+### Container images
+
+Both Lambdas are container images built from `backend/` as the Docker context, with layers ordered
+least- to most-volatile (dependencies → `shared/` → app code) so editing a router rebuilds only the
+final `COPY`. `init_user` gets its own slim image without FastAPI because it sits in the signup
+path where cold start is felt.
+
+`cdk synth` does **not** require Docker — verified by synthesizing with `CDK_DOCKER=/bin/false`.
+Images are built at `cdk deploy`.
+
 ## Local setup
 
 Development targets Linux — natively or through WSL — because that is what Lambda runs and what
@@ -109,9 +165,30 @@ source ~/.venvs/meditation/bin/activate
 ruff check . && ruff format --check .   # lint/format
 pytest backend/tests -q                 # tests
 cd infra && npx cdk synth               # dev (default)
-cd infra && npx cdk synth -c env=prod
+cd infra && npx cdk synth -c env=prod -c allowed_origins=https://app.example.com
 cd infra && npx cdk diff
 ```
+
+`allowed_origins` is required for `env=prod` and synth fails without it — falling back to a
+localhost CORS origin in a real deployment would be worse than a loud error. Dev defaults to
+`http://localhost:5173` (Vite).
+
+### Calling the deployed API
+
+```bash
+cd infra && npx cdk deploy --all --outputs-file ../cdk-outputs.json   # human-only
+
+export API_URL=$(python -c "import json;d=json.load(open('cdk-outputs.json'));\
+print(next(v['ApiUrl'] for v in d.values() if 'ApiUrl' in v))")
+
+curl "$API_URL/health"                                   # public
+
+TOKEN=$(python scripts/get_token.py -e me@example.com --outputs-file cdk-outputs.json)
+curl -H "Authorization: Bearer $TOKEN" "$API_URL/account"
+```
+
+`get_token.py` reads the password from `COGNITO_PASSWORD` or an interactive prompt — deliberately
+never from argv, which would land it in shell history and the process list.
 
 `cdk.json` runs `python app.py`, so the virtualenv must be active before any `cdk` command —
 otherwise CDK fails with `No module named 'aws_cdk'`.
@@ -122,11 +199,17 @@ otherwise CDK fails with `No module named 'aws_cdk'`.
 
 ```
 .prototools       Node version pin (22.21.0) for the CDK CLI
+pyproject.toml    ruff + pytest config for the whole repo
 infra/            CDK app, one stack per concern
   app.py          entry point; env selected via -c env=dev|prod
-  stacks/         data_stack.py (+ auth, api, pipeline, billing, frontend to come)
+  stacks/         data_stack.py, auth_stack.py, api_stack.py
+                  (+ pipeline, billing, frontend to come)
 backend/
-  pyproject.toml  installable `shared` package (ships as a Lambda layer)
+  pyproject.toml  installable packages: shared, api, functions.*
   shared/         models.py (Pydantic contracts), db.py (credit ledger)
+  api/            FastAPI app + Mangum handler, Dockerfile
+  functions/      one folder per single-purpose Lambda
   tests/          pytest + moto
+scripts/
+  get_token.py    prints a Cognito ID token for curl
 ```
