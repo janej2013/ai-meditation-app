@@ -1,8 +1,11 @@
 """Persistent data layer: the DynamoDB single table and the audio bucket.
 
 Both resources are retained in prod and destroyed in dev, driven by the ``env``
-context value. Later stacks consume ``table`` and ``audio_bucket`` directly as
-construct references rather than via CloudFormation exports.
+context value. Later stacks take ``table`` and ``audio_bucket`` as construct
+references, which is what lets CDK derive their IAM grants and deployment
+order. That is an authoring convenience, not a template one: the wiring still
+renders as CloudFormation exports, so neither resource can be renamed or
+removed while another stack imports it.
 """
 
 from aws_cdk import (

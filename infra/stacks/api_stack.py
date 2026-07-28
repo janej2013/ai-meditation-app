@@ -41,8 +41,11 @@ class ApiStack(Stack):
             environment={"TABLE_NAME": table.table_name},
             description="FastAPI application (Mangum) behind the HTTP API.",
         )
-        # Least privilege: this Lambda touches one table and nothing else.
-        table.grant_read_write_data(self.api_function)
+        # Narrower than grant_read_write_data, which would also hand over Scan,
+        # DeleteItem, BatchWriteItem and the stream actions. GET /account reads
+        # the entitlement and lazily creates it; credit mutations belong to the
+        # step Lambdas (constraint 2), so no update or transaction action here.
+        table.grant(self.api_function, "dynamodb:GetItem", "dynamodb:PutItem")
 
         # The authorizer validates signature, issuer, audience and expiry before
         # the Lambda is invoked, so the app only reads claims.
