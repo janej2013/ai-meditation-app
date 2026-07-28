@@ -1,0 +1,10 @@
+# Build context is backend/. Keep images small and cache keys stable.
+tests/
+**/__pycache__/
+**/*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+**/Dockerfile
+.dockerignore

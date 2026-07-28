@@ -13,13 +13,29 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# Runtime deps of the API container image only. Step-function Lambdas and the
+# Cognito trigger deliberately do not pull these in.
+api = [
+    "fastapi>=0.115",
+    "mangum>=0.17",
+]
 dev = [
     "pytest>=8.0",
     "moto[dynamodb]>=5.0",
     # boto3 clients are generated at runtime, so editors and type checkers only
     # see through to transact_write_items/exceptions with these stubs installed.
     "boto3-stubs[dynamodb]>=1.34",
+    # Required by fastapi.testclient.
+    "httpx>=0.27",
 ]
 
 [tool.setuptools]
-packages = ["shared"]
+# `api` and `functions.*` are listed so tests can import them the same way the
+# container images do. Only `shared` ships to the step Lambdas.
+packages = [
+    "shared",
+    "api",
+    "api.routers",
+    "functions",
+    "functions.init_user",
+]

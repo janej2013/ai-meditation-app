@@ -1,0 +1,4 @@
+# Runtime deps for the init_user image. Deliberately excludes FastAPI/Mangum:
+# this Lambda sits in the signup path, so the image stays small for cold start.
+pydantic>=2.7,<3
+boto3>=1.34

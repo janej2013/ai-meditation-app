@@ -1,0 +1,8 @@
+# Runtime deps for the API container image.
+# Kept in sync with the `api` extra in backend/pyproject.toml.
+fastapi>=0.115,<1
+mangum>=0.17,<1
+pydantic>=2.7,<3
+# The Lambda base image ships a boto3, but pinning it here keeps the deployed
+# version reproducible instead of drifting with the base image.
+boto3>=1.34
