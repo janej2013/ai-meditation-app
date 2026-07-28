@@ -1,0 +1,9 @@
+{
+  "name": "meditation-infra",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Pins the AWS CDK CLI for the Python CDK app. Run `npm install`, then `npx cdk synth`.",
+  "devDependencies": {
+    "aws-cdk": "^2.1029.0"
+  }
+}
