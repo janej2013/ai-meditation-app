@@ -6,5 +6,10 @@ tests/
 .pytest_cache/
 .ruff_cache/
 .mypy_cache/
-**/Dockerfile
 .dockerignore
+# Dockerfiles are deliberately NOT excluded. CDK copies the build context into
+# cdk.out/asset.<hash>/ applying this file, and only then runs docker build, so
+# anything ignored here is genuinely absent when `--file` looks for it. Plain
+# `docker build -f` reads the Dockerfile from disk first and does not care.
+# The cost is that `COPY api/` carries api/Dockerfile into that image: a few
+# hundred bytes that are never executed.
