@@ -19,12 +19,25 @@ Milestone 1 complete: CDK skeleton, data stack, and the shared credit ledger.
 | 5 | `billing_stack` (Stripe) | not started |
 | 6 | `frontend_stack` + PWA | not started |
 
+## Known gaps
+
+Deliberate deferrals, recorded so they read as decisions rather than oversights.
+
+- **The CDK CloudFormation execution role holds `AdministratorAccess`.** That is what
+  `cdk bootstrap` attaches when `--cloudformation-execution-policies` is not given. Scoping it
+  down means enumerating every permission this project actually needs — DynamoDB, S3, Lambda,
+  Cognito, API Gateway, Step Functions, Bedrock, Polly, Secrets Manager — and that list keeps
+  moving while stacks are still being added. Planned for after milestone 5, by re-running
+  `cdk bootstrap --cloudformation-execution-policies <scoped-policy-arn>`.
+
 ## Architecture — data layer
 
 `infra/stacks/data_stack.py` provisions the two persistent resources:
 
-**DynamoDB `AppTable`** — single-table design, on-demand billing, point-in-time recovery on,
-AWS-managed encryption. No GSI; one will be added only when a real access pattern needs it.
+**DynamoDB `AppTable`** — single-table design, on-demand billing, AWS-managed encryption.
+Point-in-time recovery is enabled in prod only: dev data is disposable and recreated by
+redeploying, so the backup charge buys nothing there. No GSI; one will be added only when a real
+access pattern needs it.
 
 ```
 PK = USER#<cognito_sub>
@@ -73,15 +86,26 @@ Two details are load-bearing:
 
 ## Local setup
 
+Development targets Linux — natively or through WSL — because that is what Lambda runs and what
+the container image for the API is built against.
+
 ```bash
-python -m venv .venv
-.venv/Scripts/python -m pip install -e "backend[dev]" ruff -r infra/requirements.txt
-cd infra && npm install          # pins the CDK CLI
+proto install node                       # 22.21.0, pinned in .prototools; nvm/fnm work too
+
+python3 -m venv ~/.venvs/meditation
+~/.venvs/meditation/bin/pip install -e "backend[dev]" ruff -r infra/requirements.txt
+
+cd infra && npm install                  # pins the CDK CLI
 ```
+
+Keep the virtualenv outside the checkout when the repo sits on a Windows drive under WSL
+(`/mnt/d/...`): the 9p mount makes an in-repo `.venv` markedly slower.
 
 ## Commands
 
 ```bash
+source ~/.venvs/meditation/bin/activate
+
 ruff check . && ruff format --check .   # lint/format
 pytest backend/tests -q                 # tests
 cd infra && npx cdk synth               # dev (default)
@@ -89,13 +113,15 @@ cd infra && npx cdk synth -c env=prod
 cd infra && npx cdk diff
 ```
 
-`cdk.json` runs `python app.py`, so activate `.venv` (or put `.venv/Scripts` on `PATH`) before synth.
+`cdk.json` runs `python app.py`, so the virtualenv must be active before any `cdk` command —
+otherwise CDK fails with `No module named 'aws_cdk'`.
 
 `cdk bootstrap` and `cdk deploy` are human-only — they spend money and touch live AWS resources.
 
 ## Repository layout
 
 ```
+.prototools       Node version pin (22.21.0) for the CDK CLI
 infra/            CDK app, one stack per concern
   app.py          entry point; env selected via -c env=dev|prod
   stacks/         data_stack.py (+ auth, api, pipeline, billing, frontend to come)
