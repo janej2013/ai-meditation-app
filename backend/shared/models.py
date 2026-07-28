@@ -22,6 +22,10 @@ from pydantic import BaseModel, ConfigDict, Field
 ENTITLEMENT_SK = "ENTITLEMENT"
 PROFILE_SK = "PROFILE"
 
+# Freemium rule: one free generation granted at signup.
+FREE_SIGNUP_CREDITS = 1
+DEFAULT_PLAN = "free"
+
 
 def user_pk(user_id: str) -> str:
     """Partition key for a user, keyed on the Cognito subject."""

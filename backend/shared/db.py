@@ -24,7 +24,10 @@ import boto3
 from boto3.dynamodb.types import TypeDeserializer, TypeSerializer
 
 from shared.models import (
+    DEFAULT_PLAN,
     ENTITLEMENT_SK,
+    FREE_SIGNUP_CREDITS,
+    PROFILE_SK,
     CreditOperationResult,
     Entitlement,
     Job,
@@ -116,6 +119,69 @@ class EntitlementStore:
         if not item:
             return None
         return Job.model_validate({**_unmarshal(item), "user_id": user_id, "job_id": job_id})
+
+    # ------------------------------------------------------------------
+    # Provisioning
+    # ------------------------------------------------------------------
+
+    def initialize_user(self, user_id: str, email: str | None = None) -> bool:
+        """Create the PROFILE and ENTITLEMENT items for a new user.
+
+        Grants the free signup credit. Lives here rather than in the Cognito
+        trigger because creating ENTITLEMENT is an entitlement mutation, and
+        constraint 1 routes all of those through this module. The Cognito
+        post-confirmation trigger and the API's lazy-init path both call it.
+
+        Idempotent via ``attribute_not_exists(PK)`` on each put, because Cognito
+        can invoke a trigger more than once for the same signup.
+
+        The two puts are deliberately independent rather than a transaction: if
+        an earlier partial write left PROFILE present but ENTITLEMENT missing, a
+        transaction would fail as a whole and never repair the gap, whereas
+        independent conditional puts heal it.
+
+        Returns True when this call created the ENTITLEMENT item -- i.e. when
+        the free credit was actually granted.
+        """
+        now = _now_iso()
+
+        profile: dict[str, Any] = {
+            "PK": user_pk(user_id),
+            "SK": PROFILE_SK,
+            "entity_type": "PROFILE",
+            "created_at": now,
+        }
+        if email:
+            profile["email"] = email
+        self._put_if_absent(profile)
+
+        granted = self._put_if_absent(
+            {
+                "PK": user_pk(user_id),
+                "SK": ENTITLEMENT_SK,
+                "entity_type": "ENTITLEMENT",
+                "available": FREE_SIGNUP_CREDITS,
+                "frozen": 0,
+                "plan": DEFAULT_PLAN,
+                "created_at": now,
+                "updated_at": now,
+            }
+        )
+        if granted:
+            logger.info("initialized user sub=%s free_credits=%s", user_id, FREE_SIGNUP_CREDITS)
+        return granted
+
+    def _put_if_absent(self, item: dict[str, Any]) -> bool:
+        """Put an item only if its key is unused. True if written."""
+        try:
+            self.client.put_item(
+                TableName=self.table_name,
+                Item=_marshal(item),
+                ConditionExpression="attribute_not_exists(PK)",
+            )
+        except self.client.exceptions.ConditionalCheckFailedException:
+            return False
+        return True
 
     # ------------------------------------------------------------------
     # Credit operations
