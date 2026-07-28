@@ -1,0 +1,30 @@
+# Repo-root tooling config only. The installable Python package lives in backend/.
+
+[tool.ruff]
+# Lambda runtime is Python 3.12 even when the local venv is newer.
+target-version = "py312"
+line-length = 100
+src = ["backend", "infra"]
+extend-exclude = ["cdk.out", ".venv", "node_modules"]
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "F",   # pyflakes
+    "I",   # isort
+    "B",   # flake8-bugbear
+    "UP",  # pyupgrade
+    "N",   # pep8-naming
+    "SIM", # flake8-simplify
+    "C4",  # flake8-comprehensions
+    "ARG", # flake8-unused-arguments
+    "RUF",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# CDK stack constructors take **kwargs they pass straight through to super().
+"infra/stacks/*.py" = ["ARG002"]
+
+[tool.pytest.ini_options]
+testpaths = ["backend/tests"]
+addopts = "-q"
