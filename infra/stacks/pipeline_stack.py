@@ -46,7 +46,17 @@ BEDROCK_TRANSIENT = "BedrockTransientError"
 TTS_TRANSIENT = "TTSTransientError"
 INSUFFICIENT_CREDITS = "InsufficientCreditsError"
 
-EXECUTION_TIMEOUT = Duration.minutes(10)
+# Must exceed the sum of every task timeout multiplied out by its retries, plus
+# backoff. MaxAttempts=3 means three retries *after* the first attempt, so
+# Synthesize alone can spend 4 x 180s + 14s of backoff = 734s -- more than a
+# 10-minute execution budget, which made its own retry policy unrunnable.
+#
+# This is not a tuning knob. An execution-level timeout does NOT run any Catch:
+# the execution is terminated, rollback_credit never fires, and the credit stays
+# frozen forever. `frozen >= 1` is also what POST /generate rejects new jobs on,
+# so a single stranded job locks the user out permanently with no way back.
+# A normal run finishes in about a minute, so the headroom costs nothing.
+EXECUTION_TIMEOUT = Duration.minutes(30)
 DEFAULT_TASK_TIMEOUT = Duration.seconds(30)
 
 

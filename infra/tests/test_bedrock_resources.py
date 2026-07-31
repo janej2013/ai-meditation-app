@@ -20,48 +20,13 @@ import pytest
 if shutil.which("node") is None:  # pragma: no cover - environment guard
     pytest.skip("aws-cdk-lib needs node on PATH", allow_module_level=True)
 
-import aws_cdk as cdk
 from aws_cdk import assertions
-from aws_cdk import aws_dynamodb as dynamodb
-from aws_cdk import aws_s3 as s3
-
-from stacks.pipeline_stack import PipelineStack
-
-ACCOUNT = "111122223333"
-REGION = "ap-southeast-2"
-
-AU_PROFILE = "au.anthropic.claude-haiku-4-5-20251001-v1:0"
-BARE_MODEL = "anthropic.claude-haiku-4-5-20251001-v1:0"
-
-
-def build_stack(model_id: str = AU_PROFILE) -> PipelineStack:
-    """A PipelineStack with throwaway upstream resources."""
-    app = cdk.App()
-    env = cdk.Environment(account=ACCOUNT, region=REGION)
-
-    upstream = cdk.Stack(app, "Upstream", env=env)
-    table = dynamodb.Table(
-        upstream,
-        "Table",
-        partition_key=dynamodb.Attribute(name="PK", type=dynamodb.AttributeType.STRING),
-        sort_key=dynamodb.Attribute(name="SK", type=dynamodb.AttributeType.STRING),
-    )
-    bucket = s3.Bucket(upstream, "Audio")
-
-    return PipelineStack(
-        app,
-        "Pipeline",
-        env_name="dev",
-        table=table,
-        audio_bucket=bucket,
-        bedrock_model_id=model_id,
-        env=env,
-    )
+from conftest import ACCOUNT, AU_PROFILE, BARE_MODEL, REGION
 
 
 @pytest.fixture(scope="module")
-def stack() -> PipelineStack:
-    return build_stack()
+def stack(pipeline_stack):
+    return pipeline_stack
 
 
 # ----------------------------------------------------------------------
