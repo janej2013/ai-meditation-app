@@ -39,4 +39,10 @@ packages = [
     "api.routers",
     "functions",
     "functions.init_user",
+    "functions.freeze_credit",
+    "functions.generate_script",
+    "functions.synthesize",
+    "functions.mix_audio",
+    "functions.commit_credit",
+    "functions.rollback_credit",
 ]

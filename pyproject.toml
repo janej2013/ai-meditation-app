@@ -24,6 +24,9 @@ select = [
 [tool.ruff.lint.per-file-ignores]
 # CDK stack constructors take **kwargs they pass straight through to super().
 "infra/stacks/*.py" = ["ARG002"]
+# Pytest fixtures are frequently requested for their side effects alone
+# (creating a bucket, setting env vars), so an unused argument is idiomatic.
+"backend/tests/*.py" = ["ARG001"]
 
 [tool.pytest.ini_options]
 testpaths = ["backend/tests"]
