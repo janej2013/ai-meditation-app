@@ -18,10 +18,29 @@ import aws_cdk as cdk
 from stacks.api_stack import ApiStack
 from stacks.auth_stack import AuthStack
 from stacks.data_stack import DataStack
+from stacks.pipeline_stack import PipelineStack
 
 VALID_ENVS = ("dev", "prod")
 REGION = "ap-southeast-2"  # Sydney, per CLAUDE.md
 DEV_ORIGINS = ["http://localhost:5173"]  # Vite dev server
+
+# Invocation goes through a cross-region inference profile rather than the bare
+# model id (CLAUDE.md). The model is listed in ap-southeast-2, but current
+# Anthropic models on Bedrock are invoked on demand through a profile, and the
+# profile also gives the request more than one region of capacity to land in.
+#
+# Haiku 4.5 offers an `au.` and a `global.` profile; `au.` is the deliberate
+# choice. The mood text a user submits
+# is a description of their emotional state, and `global.` would route it to any
+# commercial region worldwide, while `au.` keeps inference in Australia. The
+# smaller `au.` capacity pool throttles sooner, which the state machine's
+# exponential backoff on the Bedrock task already absorbs.
+#
+# Availability is per-account -- confirm with
+#     aws bedrock list-inference-profiles --region ap-southeast-2
+# and override with `-c bedrock_model_id=...`. A changed geo prefix also needs a
+# matching entry in pipeline_stack._bedrock_resources.
+DEFAULT_BEDROCK_MODEL_ID = "au.anthropic.claude-haiku-4-5-20251001-v1:0"
 
 
 def resolve_allowed_origins(app: cdk.App, env_name: str) -> list[str]:
@@ -80,6 +99,18 @@ def main() -> None:
         description="Cognito user pool, app client, and user provisioning trigger.",
     )
 
+    pipeline = PipelineStack(
+        app,
+        f"Meditation-{env_name}-Pipeline",
+        env_name=env_name,
+        table=data.table,
+        audio_bucket=data.audio_bucket,
+        bedrock_model_id=app.node.try_get_context("bedrock_model_id") or DEFAULT_BEDROCK_MODEL_ID,
+        tts_provider=app.node.try_get_context("tts_provider") or "polly",
+        env=env,
+        description="Step Functions generation pipeline and its task Lambdas.",
+    )
+
     ApiStack(
         app,
         f"Meditation-{env_name}-Api",
@@ -88,6 +119,8 @@ def main() -> None:
         user_pool=auth.user_pool,
         user_pool_client=auth.user_pool_client,
         allowed_origins=allowed_origins,
+        audio_bucket=data.audio_bucket,
+        state_machine=pipeline.state_machine,
         env=env,
         description="HTTP API with Cognito JWT authorizer and the FastAPI Lambda.",
     )
