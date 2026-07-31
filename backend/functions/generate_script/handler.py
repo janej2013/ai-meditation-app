@@ -18,14 +18,13 @@ from botocore.exceptions import ClientError
 from shared.db import EntitlementStore
 from shared.pipeline import BedrockTransientError, PipelineState, ScriptGenerationError
 
-from .prompt import SYSTEM_PROMPT, build_user_message, target_word_count
+from .prompt import SYSTEM_PROMPT, build_user_message, min_script_chars, target_word_count
 
 logger = logging.getLogger()
 logger.setLevel(os.environ.get("LOG_LEVEL", "INFO"))
 
 # Roughly 1.4 tokens per word, plus headroom for the model's own pacing.
 _TOKENS_PER_WORD = 2
-_MIN_SCRIPT_CHARS = 200
 
 # Bedrock signals overload and throttling with these. Everything else --
 # ValidationException, AccessDeniedException, a malformed response -- is
@@ -121,10 +120,10 @@ def _generate(mood_text: str, duration_minutes: int) -> str:
             raise BedrockTransientError(f"bedrock transient failure: {code}") from exc
         raise ScriptGenerationError(f"bedrock call failed: {code}") from exc
 
-    return _extract_text(response)
+    return _extract_text(response, duration_minutes)
 
 
-def _extract_text(response: dict[str, Any]) -> str:
+def _extract_text(response: dict[str, Any], duration_minutes: int) -> str:
     """Pull the script out of a Converse response, failing loudly if absent."""
     try:
         blocks = response["output"]["message"]["content"]
@@ -133,10 +132,14 @@ def _extract_text(response: dict[str, Any]) -> str:
 
     text = "\n".join(block["text"] for block in blocks if "text" in block).strip()
 
-    if len(text) < _MIN_SCRIPT_CHARS:
+    minimum = min_script_chars(duration_minutes)
+    if len(text) < minimum:
         # A truncated or empty generation would otherwise sail through to TTS
-        # and produce a few seconds of audio the user paid a credit for.
+        # and produce a few seconds of audio the user paid a credit for. The
+        # floor scales with the request: a flat one sized for 3 minutes would
+        # wave through a 30-minute script truncated to a twentieth.
         raise ScriptGenerationError(
-            f"bedrock returned {len(text)} chars, below the {_MIN_SCRIPT_CHARS} minimum"
+            f"bedrock returned {len(text)} chars, below the {minimum} minimum "
+            f"for {duration_minutes} minutes"
         )
     return text

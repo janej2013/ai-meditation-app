@@ -33,9 +33,28 @@ returning attention outward.
 """
 
 
+# Average English word plus its trailing space, for turning a word target into
+# a character floor.
+_CHARS_PER_WORD = 6
+
+# A script this far below target is truncated or refused, not merely terse.
+# The threshold is a trade: rejecting costs a rollback and no meditation,
+# letting it through costs the user a credit for a few seconds of audio.
+_MIN_SCRIPT_RATIO = 1 / 3
+
+
 def target_word_count(duration_minutes: int) -> int:
     """Words needed to fill ``duration_minutes`` of slow, spoken delivery."""
     return duration_minutes * WORDS_PER_MINUTE
+
+
+def min_script_chars(duration_minutes: int) -> int:
+    """Shortest script worth sending to TTS for ``duration_minutes``.
+
+    Scales with the request: a flat floor that passes a 3-minute script would
+    wave through a 30-minute one truncated to a twentieth of its length.
+    """
+    return int(target_word_count(duration_minutes) * _CHARS_PER_WORD * _MIN_SCRIPT_RATIO)
 
 
 def build_user_message(mood_text: str, duration_minutes: int) -> str:

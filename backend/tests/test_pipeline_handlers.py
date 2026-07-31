@@ -29,6 +29,7 @@ from functions.generate_script import handler as generate_handler
 from functions.generate_script.prompt import (
     SYSTEM_PROMPT,
     build_user_message,
+    min_script_chars,
     target_word_count,
 )
 from functions.mix_audio import handler as mix_handler
@@ -118,6 +119,16 @@ def bedrock_response(text: str) -> dict:
     return {"output": {"message": {"content": [{"text": text}]}}}
 
 
+def plausible_script(duration_minutes: int = 10) -> str:
+    """A script long enough to clear the length floor for ``duration_minutes``.
+
+    Real output runs to roughly six characters per word at 95 wpm, so a fixture
+    sized by hand drifts out of range as soon as the floor moves -- derive it.
+    """
+    paragraph = "Breathe slowly and evenly, and let the day settle.\n\n"
+    return paragraph * (min_script_chars(duration_minutes) // len(paragraph) + 2)
+
+
 def test_generate_writes_script_to_s3_and_returns_the_key(
     store, dynamodb_client, s3_bucket, audio_env, monkeypatch, state
 ):
@@ -128,7 +139,7 @@ def test_generate_writes_script_to_s3_and_returns_the_key(
     store.freeze_credit(USER_ID, JOB)
     patch_store(monkeypatch, generate_handler, store)
 
-    script = "Settle in.\n\n" + ("Breathe slowly and evenly. " * 40)
+    script = plausible_script()
     bedrock = MagicMock()
     bedrock.converse.return_value = bedrock_response(script)
     monkeypatch.setattr(generate_handler, "_get_bedrock", lambda: bedrock)
@@ -155,7 +166,7 @@ def test_generate_reads_mood_from_dynamodb_not_the_payload(
     patch_store(monkeypatch, generate_handler, store)
 
     bedrock = MagicMock()
-    bedrock.converse.return_value = bedrock_response("Breathe. " * 60)
+    bedrock.converse.return_value = bedrock_response(plausible_script())
     monkeypatch.setattr(generate_handler, "_get_bedrock", lambda: bedrock)
     monkeypatch.setattr(generate_handler, "_get_s3", lambda: s3_bucket)
 
@@ -239,6 +250,33 @@ def test_generate_rejects_a_too_short_script(
 
     with pytest.raises(ScriptGenerationError):
         generate_handler.lambda_handler(state, None)
+
+
+def test_the_length_floor_scales_with_the_requested_duration(
+    store, dynamodb_client, s3_bucket, audio_env, monkeypatch, state
+):
+    """The same script is a plausible 3-minute meditation and a truncated
+    30-minute one. A flat floor sized for the short request would wave the long
+    one through and charge a credit for a twentieth of the audio."""
+    from .conftest import seed_entitlement
+
+    seed_entitlement(dynamodb_client, available=1)
+    store.create_job(USER_ID, JOB, MOOD, 3)
+    patch_store(monkeypatch, generate_handler, store)
+
+    script = "Breathe in, and let it go.\n\n" * 30  # ~840 chars
+    assert min_script_chars(3) < len(script) < min_script_chars(30)
+
+    bedrock = MagicMock()
+    bedrock.converse.return_value = bedrock_response(script)
+    monkeypatch.setattr(generate_handler, "_get_bedrock", lambda: bedrock)
+    monkeypatch.setattr(generate_handler, "_get_s3", lambda: s3_bucket)
+
+    result = generate_handler.lambda_handler({**state, "duration_minutes": 3}, None)
+    assert result["script_key"] == f"jobs/{JOB}/script.txt"
+
+    with pytest.raises(ScriptGenerationError, match="below the"):
+        generate_handler.lambda_handler({**state, "duration_minutes": 30}, None)
 
 
 # ----------------------------------------------------------------------
