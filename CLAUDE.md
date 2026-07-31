@@ -17,7 +17,7 @@ This is a real product AND a portfolio project demonstrating AWS + GenAI enginee
 - **Auth**: Cognito User Pool, JWT authorizer on API Gateway HTTP API.
 - **Payments**: Stripe Checkout + webhooks. Never build custom payment UI.
 - **Frontend**: React + Vite, PWA (manifest + service worker), hosted on S3 + CloudFront.
-- **Audio mixing**: ffmpeg (Lambda layer or in container image), pre-bundled royalty-free BGM tracks.
+- **Audio mixing**: in the browser, via the Web Audio API. The pipeline delivers narration only; the PWA mixes a user-selectable BGM track under it at playback time, so the listener can switch tracks or change the music volume mid-session. Pre-bundled royalty-free BGM ships to `assets/` on the audio bucket. `backend/functions/mix_audio/` still holds a server-side ffmpeg mixer for a future download/share feature — it is kept green by its unit tests but is **not deployed**; see README.
 - **Python**: 3.12, type hints everywhere, Pydantic v2 models, `ruff` for lint/format, `pytest` for tests.
 
 ## Repository layout
@@ -34,8 +34,10 @@ infra/            CDK app. One stack per concern:
 backend/
   api/              FastAPI app (Mangum handler), routers/, deps.py, Dockerfile
   functions/        One folder per Step Functions task Lambda (zip):
-                    freeze_credit, generate_script, synthesize, mix_audio,
+                    freeze_credit, generate_script, synthesize,
                     commit_credit, rollback_credit
+                    mix_audio/ is retained but NOT deployed (browser mixes
+                    instead); init_user/ is a Cognito trigger, not a task
   shared/           Shared package (Lambda layer): models.py, db.py, tts/
   tests/
 frontend/           React + Vite PWA
@@ -45,11 +47,11 @@ frontend/           React + Vite PWA
 ## Hard constraints (never violate)
 
 1. **All credit/entitlement mutations go through `backend/shared/db.py`.** Freeze, commit, and rollback are DynamoDB conditional updates within a single user partition. Never write raw `update_item` calls for credits elsewhere. All three operations must be idempotent (safe to retry with the same `job_id`).
-2. **Generation flow**: API Lambda only validates JWT + starts the Step Functions execution and returns a `job_id`. All heavy work (Bedrock, TTS, ffmpeg, S3 upload) happens inside the state machine. Never call Bedrock or TTS synchronously from the API Lambda.
+2. **Generation flow**: API Lambda only validates JWT + starts the Step Functions execution and returns a `job_id`. All heavy work (Bedrock, TTS, S3 upload) happens inside the state machine. Never call Bedrock or TTS synchronously from the API Lambda.
 3. **State machine failure handling**: every task has a `Catch` routing to `rollback_credit`. The external TTS call additionally gets `Retry` with exponential backoff (2–3 attempts) before falling through to `Catch`.
 4. **Secrets** (Volcano TTS key, Stripe secret + webhook signing secret): Secrets Manager or SSM SecureString only. Never in code, `.env` committed files, plaintext Lambda env vars, or CDK context.
 5. **Stripe webhooks must verify the signature** before any state change. Entitlement updates from webhooks must be idempotent (key on Stripe event id).
-6. **Audio delivery**: CloudFront signed URLs to S3 objects. Never stream audio bytes through Lambda.
+6. **Audio delivery**: CloudFront signed URLs to S3 objects. Never stream audio bytes through Lambda. Applies to per-job narration under `jobs/`; the shared BGM under `assets/` carries no user content and is served as ordinary cached CloudFront objects so the browser can switch tracks without a round trip for a new signature.
 7. **No PII in prompts or logs.** The LLM prompt must instruct the model not to repeat user personal details verbatim in the script. Log `job_id`s and status, never user input text or generated scripts at INFO level.
 8. **`cdk deploy` and any command that spends money or touches live AWS resources is human-only.** Claude may run `cdk synth`, `cdk diff`, `ruff`, `pytest`, and local builds.
 
@@ -68,8 +70,16 @@ frontend/           React + Vite PWA
 
 ## Commands
 
+**Run everything from WSL (Ubuntu), never from Windows PowerShell or cmd.** The
+Lambda runtime, the layer build (`scripts/build_layers.sh`), the Docker image
+builds and the CDK CLI all assume a Linux toolchain; running them from Windows
+produces layers and images that fail at runtime. The repo lives at
+`/mnt/d/Jane/Project/meditation` inside WSL, and the virtualenv there is the one
+`ruff`, `pytest` and `cdk` must come from.
+
 - Lint/format: `ruff check . && ruff format --check .`
-- Tests: `pytest backend/tests -q`
+- Tests: `pytest` (covers `backend/tests` and `infra/tests`; the CDK tests skip
+  themselves when `node` is not on PATH)
 - Synth: `cd infra && cdk synth`
 - Diff: `cd infra && cdk diff`
 - Frontend dev: `cd frontend && npm run dev`

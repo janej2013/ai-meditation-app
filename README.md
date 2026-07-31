@@ -1,20 +1,22 @@
 # AI Meditation App
 
 Users describe how they feel; the system generates a personalised meditation script with an LLM,
-synthesises it to speech, mixes background music, and delivers a streamable audio file. Freemium:
-one free generation on signup, then paid credits via Stripe.
+synthesises it to speech, and delivers a streamable narration that the PWA mixes background music
+under — switchable mid-session. Freemium: one free generation on signup, then paid credits via
+Stripe.
 
 Region `ap-southeast-2` (Sydney). See [CLAUDE.md](CLAUDE.md) for the full stack and constraints.
 
 ## Current status
 
-Milestone 2 complete: Cognito auth, the HTTP API, and the FastAPI Lambda.
+Milestone 3 complete: the generation pipeline runs end to end with Polly as the
+TTS placeholder.
 
 | Milestone | Scope | Status |
 |---|---|---|
 | 1 | `infra/` skeleton + `data_stack` | done |
 | 2 | `auth_stack` + `api_stack` | done |
-| 3 | `pipeline_stack` (Polly placeholder) | not started |
+| 3 | `pipeline_stack` (Polly placeholder) | done |
 | 4 | Volcano TTS provider | not started |
 | 5 | `billing_stack` (Stripe) | not started |
 | 6 | `frontend_stack` + PWA | not started |
@@ -140,10 +142,183 @@ path where cold start is felt.
 `cdk synth` does **not** require Docker — verified by synthesizing with `CDK_DOCKER=/bin/false`.
 Images are built at `cdk deploy`.
 
+## Architecture — the generation pipeline
+
+`infra/stacks/pipeline_stack.py` builds a Standard state machine over five small
+zip Lambdas:
+
+```
+FreezeCredit ──► GenerateScript ──► Synthesize ──► CommitCredit ──► Succeed
+     │                  │                │              │
+     │ InsufficientCreditsError          └──────────────┤ States.ALL
+     ▼                                                  ▼
+InsufficientCredits (Fail)                    RollbackCredit ──► GenerationFailed (Fail)
+   no refund — nothing was frozen
+```
+
+Execution timeout 10 minutes; per-state timeouts 30 s / 120 s / 180 s / 30 s.
+
+There is no mix step — see [Mixing happens in the browser](#mixing-happens-in-the-browser).
+
+**Retries name concrete exception classes, never `States.ALL`.** `generate_script`
+retries `BedrockTransientError`, `synthesize` retries `TTSTransientError`, and
+both add the four Lambda transport errors — 3 attempts, 2 s base, ×2 backoff. A
+Pydantic `ValidationError` or a Bedrock `ValidationException` is permanent, so it
+falls straight to `Catch` instead of burning three attempts on something that
+cannot succeed.
+
+`LambdaInvoke` is constructed with `retry_on_service_exceptions=False`. CDK
+otherwise prepends its own transport-error retry with `maxAttempts: 6`, and
+Step Functions applies the *first* matching rule — so that default would
+silently override the explicit 3-attempt policy.
+
+### Where DONE is written
+
+`commit_credit` writes `status=DONE`, in the same `TransactWriteItems` that
+decrements `frozen`. `synthesize` writes only `audio_key`.
+
+This is not a style choice. `commit_credit`'s job condition is
+`status IN (FROZEN, GENERATING)`; if `synthesize` had already set DONE, that
+condition would fail, the whole transaction would cancel, commit would take its
+replay path — and **the credit would stay frozen forever**. Writing DONE inside
+the commit transaction is what makes "credit consumed" and "job finished" one
+atomic fact.
+
+Likewise `rollback_credit` writes `ROLLED_BACK`, not `FAILED`: `FAILED` is
+inside rollback's own allow-list, so writing it would let a retried rollback
+pass its own condition and **refund twice**. `GET /jobs/{id}` maps `ROLLED_BACK`
+to `"failed"` for clients — the internal status keeps the extra fact that the
+credit was returned.
+
+### Keeping user text out of the execution history
+
+Step Functions retains execution input for 90 days and shows it in the console,
+so constraint 7 rules it out for user input. The state machine payload carries
+only ids and S3 keys:
+
+```python
+class PipelineState(BaseModel):
+    user_id: str
+    job_id: str
+    duration_minutes: int
+    script_key: str | None  # set by generate_script
+    narration_key: str | None  # set by synthesize — what the file is
+    audio_key: str | None  # set by synthesize — what the client plays
+```
+
+`POST /generate` writes `mood_text` onto the JOB item and `generate_script`
+reads it back from DynamoDB. The generated script goes to S3 for the same
+reason. Handlers log lengths and ids, never content.
+
+### TTS provider abstraction
+
+`shared/tts/` exposes `TTSProvider` (a `Protocol`) and a neutral `VoiceConfig`;
+`get_provider()` reads `TTS_PROVIDER` and defaults to Polly. No vendor SDK is
+imported outside `shared/tts/polly.py`, so milestone 4 adds Volcano by
+registering it in the factory.
+
+Polly caps `SynthesizeSpeech` at 3000 billed characters, so `chunk_script()`
+packs paragraphs up to 2500. Splitting on paragraph boundaries does double duty:
+the prompt puts a blank line exactly where the listener should pause, so every
+seam in the concatenated MP3 lands on an intended silence rather than mid-phrase.
+
+### Mixing happens in the browser
+
+The pipeline ships **narration only**. The PWA fetches a BGM track from
+`assets/` and mixes it under the narration with the Web Audio API at playback
+time, routing each source through its own `GainNode`.
+
+The deciding requirement is that a listener can **switch background music
+mid-session**. A server-side mix bakes one track into one file, so every switch
+would mean re-rendering and re-downloading — there is no server-side design that
+satisfies this. Client-side mixing also gives the listener an independent music
+volume and the option of no music at all.
+
+What it buys structurally:
+
+| | server-side mix | browser mix |
+|---|---|---|
+| Pipeline | 5 states, ffmpeg Lambda at 1 GB + 1 GB `/tmp` | 4 states, no ffmpeg |
+| Lambda layers | shared + ffmpeg (~80 MB binary) | shared only |
+| Stored per job | narration **and** mixed output | narration |
+| BGM copies | baked into every generated file | one CDN object, shared by all users |
+| Delivery | one signed URL | signed URL for narration; BGM is public, cacheable |
+
+BGM under `assets/` carries no user content, so it is served as an ordinary
+cached CloudFront object — the browser can switch tracks without a round trip
+for a fresh signature. Per-job narration under `jobs/` still requires a signed
+URL (constraint 6).
+
+**Verify before relying on this:** on iOS Safari an `AudioContext` is suspended
+when the page is backgrounded, and listening with the screen off is the core use
+case for a meditation app. Anchoring each source in a real `<audio>` element via
+`createMediaElementSource` (rather than `AudioBufferSourceNode`) keeps the media
+session alive, but this needs testing on a physical device before the frontend
+commits to it.
+
+#### The retained server-side mixer
+
+`backend/functions/mix_audio/` still holds the ffmpeg mixer, for a possible
+"download this session" or share feature — the one thing browser mixing cannot
+do, since there is no single artefact to hand off. Nothing deploys it:
+`pipeline_stack.py` has no `MixAudio` state, no ffmpeg layer, and
+`scripts/build_layers.sh` no longer builds the binary by default.
+
+It is kept honest by its unit tests rather than by a dormant CDK branch. The
+tests stub `_run` and `probe_duration`, so they need no ffmpeg binary and run in
+CI like everything else; a CDK path that is never synthesized would rot silently
+and give false confidence. Re-enabling means re-adding the wiring (recoverable
+from git history) and running `scripts/build_layers.sh ffmpeg`.
+
+The filter graph it builds:
+
+```bash
+ffmpeg -y -i narration.mp3 -stream_loop -1 -i bgm.mp3 \
+  -filter_complex "\
+    [0:a]apad=pad_dur=5[voice]; \
+    [1:a]volume=0.2,afade=t=in:st=0:d=4,afade=t=out:st=${TAIL}:d=4[bg]; \
+    [voice][bg]amix=inputs=2:duration=first:normalize=0,alimiter=limit=0.95[out]" \
+  -map "[out]" -c:a libmp3lame -b:a 128k -ar 44100 final.mp3
+```
+
+`normalize=0` is load-bearing: `amix` divides by input count by default, which
+would silently halve the narration. With normalization off the inputs are
+summed, so `alimiter` catches the clipping that can follow. The same volume,
+fade and tail values are what the browser mixer should reproduce.
+
+### Bedrock model id
+
+Claude Haiku is not available directly in `ap-southeast-2`, so the default is
+the APAC cross-region inference profile. **Availability is per-account** —
+confirm yours and override if it differs:
+
+```bash
+aws bedrock list-inference-profiles --region ap-southeast-2
+cd infra && npx cdk synth -c bedrock_model_id=<your-profile-id>
+```
+
+A cross-region profile needs `bedrock:InvokeModel` on **both** the profile ARN
+and the foundation-model ARN in every region the profile can route to; granting
+only the profile fails at runtime with an opaque `AccessDenied`.
+
+### Before deploying
+
+```bash
+scripts/build_layers.sh      # shared package layer (default)
+scripts/build_layers.sh ffmpeg   # only when working on the retained mix_audio
+```
+
+The layer directories are gitignored. `cdk synth` succeeds without the shared
+layer and emits a warning; a deploy without it would fail at runtime. The ffmpeg
+layer is not deployed — see [layers/README.md](layers/README.md) for its source.
+
 ## Local setup
 
-Development targets Linux — natively or through WSL — because that is what Lambda runs and what
-the container image for the API is built against.
+**Run every command from WSL (Ubuntu), never from Windows PowerShell or cmd.**
+Lambda runs Linux, the layer build and the API container image are Linux
+artefacts, and the CDK CLI resolves the Python app through the Linux
+virtualenv — building any of it from Windows produces output that fails at
+runtime.
 
 ```bash
 proto install node                       # 22.21.0, pinned in .prototools; nvm/fnm work too
@@ -163,7 +338,7 @@ Keep the virtualenv outside the checkout when the repo sits on a Windows drive u
 source ~/.venvs/meditation/bin/activate
 
 ruff check . && ruff format --check .   # lint/format
-pytest backend/tests -q                 # tests
+pytest                                  # backend/tests + infra/tests
 cd infra && npx cdk synth               # dev (default)
 cd infra && npx cdk synth -c env=prod -c allowed_origins=https://app.example.com
 cd infra && npx cdk diff
@@ -185,6 +360,14 @@ curl "$API_URL/health"                                   # public
 
 TOKEN=$(python scripts/get_token.py -e me@example.com --outputs-file cdk-outputs.json)
 curl -H "Authorization: Bearer $TOKEN" "$API_URL/account"
+
+# Start a generation, then poll it.
+JOB=$(curl -s -X POST "$API_URL/generate" \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"mood":"wound up after a long week","duration_minutes":10}' | jq -r .job_id)
+
+curl -s -H "Authorization: Bearer $TOKEN" "$API_URL/jobs/$JOB" | jq
+# once status is DONE, audio_url holds a 15-minute presigned link
 ```
 
 `get_token.py` reads the password from `COGNITO_PASSWORD` or an interactive prompt — deliberately
@@ -202,14 +385,19 @@ otherwise CDK fails with `No module named 'aws_cdk'`.
 pyproject.toml    ruff + pytest config for the whole repo
 infra/            CDK app, one stack per concern
   app.py          entry point; env selected via -c env=dev|prod
-  stacks/         data_stack.py, auth_stack.py, api_stack.py
-                  (+ pipeline, billing, frontend to come)
+  stacks/         data_stack.py, auth_stack.py, api_stack.py,
+                  pipeline_stack.py (+ billing, frontend to come)
+  tests/          CDK assertions; skipped when node is absent
 backend/
   pyproject.toml  installable packages: shared, api, functions.*
-  shared/         models.py (Pydantic contracts), db.py (credit ledger)
+  shared/         models.py, db.py (credit ledger), pipeline.py (step
+                  contracts), tts/ (provider abstraction)
   api/            FastAPI app + Mangum handler, Dockerfile
   functions/      one folder per single-purpose Lambda
   tests/          pytest + moto
+layers/           generated Lambda layers (gitignored)
+assets/bgm/       background music synced to the audio bucket, mixed in-browser
 scripts/
-  get_token.py    prints a Cognito ID token for curl
+  get_token.py       prints a Cognito ID token for curl
+  build_layers.sh    builds the shared layer (ffmpeg on request)
 ```
