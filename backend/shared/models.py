@@ -70,13 +70,22 @@ class Entitlement(BaseModel):
 
 
 class Job(BaseModel):
-    """A generation job item."""
+    """A generation job item.
+
+    ``mood_text`` lives here rather than in the Step Functions payload: the
+    execution history is visible in the console and retained for 90 days, and
+    constraint 7 keeps user input out of it. ``generate_script`` reads the mood
+    back from this item.
+    """
 
     model_config = ConfigDict(extra="ignore")
 
     user_id: str
     job_id: str
     status: JobStatus
+    mood_text: str | None = None
+    duration_minutes: int | None = None
+    script_key: str | None = None
     audio_key: str | None = None
     created_at: datetime | None = None
     updated_at: datetime | None = None
