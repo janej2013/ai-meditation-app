@@ -212,9 +212,11 @@ class PipelineStack(Stack):
         commit: lambda_.Function,
         rollback: lambda_.Function,
     ) -> None:
-        # The credit ledger runs TransactWriteItems, which needs UpdateItem on
-        # the table plus GetItem for the replay path.
-        ledger_actions = ["dynamodb:GetItem", "dynamodb:UpdateItem", "dynamodb:PutItem"]
+        # The credit ledger runs TransactWriteItems containing only Update
+        # items, so UpdateItem covers the transaction and GetItem covers the
+        # replay path that reads the job back. No PutItem: _put_if_absent
+        # belongs to user provisioning, which these steps never reach.
+        ledger_actions = ["dynamodb:GetItem", "dynamodb:UpdateItem"]
         for fn in (freeze, commit, rollback):
             table.grant(fn, *ledger_actions)
         table.grant(generate, "dynamodb:GetItem", "dynamodb:UpdateItem")
