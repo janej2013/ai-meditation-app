@@ -9,6 +9,8 @@ is the failure that actually costs a user money.
 
 from __future__ import annotations
 
+import logging
+
 import pytest
 
 from shared.db import (
@@ -322,3 +324,54 @@ def test_set_available_helper_reflects_a_topped_up_balance(store, dynamodb_clien
 
     assert result.applied is True
     assert counters(store) == (2, 1)
+
+
+# ----------------------------------------------------------------------
+# Job lifecycle updates
+#
+# Both halves of a JOB condition fail with the same exception, so the only
+# thing separating a benign replay from a missing row is what gets logged.
+# ----------------------------------------------------------------------
+
+
+def _skip_record(caplog: pytest.LogCaptureFixture) -> logging.LogRecord:
+    return next(r for r in caplog.records if "job update skipped" in r.getMessage())
+
+
+def test_job_update_on_an_advanced_status_logs_a_replay(store, dynamodb_client, caplog):
+    """What a retried task hits once the job has moved past the transition."""
+    seed_job(dynamodb_client, status=JobStatus.DONE)
+
+    with caplog.at_level(logging.INFO, logger="shared.db"):
+        store.mark_job_generating(USER_ID, JOB_ID)
+
+    record = _skip_record(caplog)
+    assert record.levelno == logging.INFO
+    # The status it found is the whole point -- it says why the write was
+    # skipped, and it is the one job attribute constraint 7 allows in a log.
+    assert JobStatus.DONE.value in record.getMessage()
+
+
+def test_job_update_without_a_job_item_warns(store, caplog):
+    """A missing row is not a replay: create_job runs before the execution."""
+    with caplog.at_level(logging.INFO, logger="shared.db"):
+        store.mark_job_generating(USER_ID, "job-never-created")
+
+    record = _skip_record(caplog)
+    assert record.levelno == logging.WARNING
+    assert "no job item" in record.getMessage()
+
+
+def test_job_update_never_logs_the_mood_text(store, caplog):
+    """The condition-failure path reads the item back, so it could leak.
+
+    ``create_job`` leaves the job PENDING, which is outside the allow-list, so
+    the condition fails against a real item that still carries the mood text.
+    """
+    store.create_job(USER_ID, JOB_ID, "I feel overwhelmed about my job", 10)
+
+    with caplog.at_level(logging.INFO, logger="shared.db"):
+        store.mark_job_generating(USER_ID, JOB_ID)
+
+    assert _skip_record(caplog).levelno == logging.INFO
+    assert "overwhelmed" not in caplog.text

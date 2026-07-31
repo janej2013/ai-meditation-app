@@ -184,6 +184,127 @@ class EntitlementStore:
         return True
 
     # ------------------------------------------------------------------
+    # Job lifecycle (non-credit attributes)
+    # ------------------------------------------------------------------
+
+    def create_job(
+        self,
+        user_id: str,
+        job_id: str,
+        mood_text: str,
+        duration_minutes: int,
+    ) -> bool:
+        """Create a PENDING job. False if the job_id was already used.
+
+        ``mood_text`` is stored here rather than passed through the state
+        machine, keeping user input out of the execution history (constraint 7).
+        """
+        now = _now_iso()
+        return self._put_if_absent(
+            {
+                "PK": user_pk(user_id),
+                "SK": job_sk(job_id),
+                "entity_type": "JOB",
+                "job_id": job_id,
+                "status": JobStatus.PENDING.value,
+                "mood_text": mood_text,
+                "duration_minutes": duration_minutes,
+                "created_at": now,
+                "updated_at": now,
+            }
+        )
+
+    def mark_job_generating(self, user_id: str, job_id: str) -> None:
+        """Advance a frozen job to GENERATING. No-op if already generating."""
+        self._update_job(
+            user_id,
+            job_id,
+            update="SET #status = :generating, updated_at = :now",
+            condition="attribute_exists(PK) AND #status IN (:frozen, :generating)",
+            names=dict(_STATUS_NAMES),
+            values={
+                ":generating": JobStatus.GENERATING.value,
+                ":frozen": JobStatus.FROZEN.value,
+                ":now": _now_iso(),
+            },
+        )
+
+    def set_job_script_key(self, user_id: str, job_id: str, script_key: str) -> None:
+        self._update_job(
+            user_id,
+            job_id,
+            update="SET script_key = :key, updated_at = :now",
+            condition="attribute_exists(PK)",
+            values={":key": script_key, ":now": _now_iso()},
+        )
+
+    def set_job_audio_key(self, user_id: str, job_id: str, audio_key: str) -> None:
+        """Record the finished audio.
+
+        Deliberately does NOT set status=DONE. ``commit_credit`` owns that
+        transition, because it writes DONE in the same transaction that
+        decrements ``frozen``. Setting DONE here would make commit's condition
+        (`status IN (FROZEN, GENERATING)`) fail, cancelling the transaction and
+        leaving the credit frozen forever.
+        """
+        self._update_job(
+            user_id,
+            job_id,
+            update="SET audio_key = :key, updated_at = :now",
+            condition="attribute_exists(PK)",
+            values={":key": audio_key, ":now": _now_iso()},
+        )
+
+    def _update_job(
+        self,
+        user_id: str,
+        job_id: str,
+        *,
+        update: str,
+        condition: str,
+        values: dict[str, Any],
+        names: dict[str, str] | None = None,
+    ) -> None:
+        """Conditional update on a JOB item; a failed condition is a no-op.
+
+        Every condition here is ``attribute_exists(PK)`` plus, sometimes, a
+        status allow-list, and those two halves fail for very different reasons.
+        A status that has already moved on is the benign replay a retried task
+        produces. A missing item means the job row does not exist at all, which
+        cannot happen on a healthy path -- ``create_job`` succeeds before the
+        execution starts -- and is worth finding in the logs.
+
+        ``ReturnValuesOnConditionCheckFailure`` tells the two apart without a
+        second read: DynamoDB attaches the item as it stood when the condition
+        failed, so an absent one is the missing-row case.
+
+        Neither case raises. These run on retry paths where a replay must stay
+        harmless, and the credit ledger still fails loudly at ``commit_credit``
+        if the job really is gone.
+        """
+        kwargs: dict[str, Any] = {
+            "TableName": self.table_name,
+            "Key": _marshal({"PK": user_pk(user_id), "SK": job_sk(job_id)}),
+            "UpdateExpression": update,
+            "ConditionExpression": condition,
+            "ExpressionAttributeValues": _marshal(values),
+            "ReturnValuesOnConditionCheckFailure": "ALL_OLD",
+        }
+        if names:
+            kwargs["ExpressionAttributeNames"] = names
+        try:
+            self.client.update_item(**kwargs)
+        except self.client.exceptions.ConditionalCheckFailedException as exc:
+            item = (getattr(exc, "response", None) or {}).get("Item")
+            if not item:
+                logger.warning("job update skipped: no job item job_id=%s", job_id)
+                return
+            # Read the one attribute directly rather than unmarshalling the
+            # whole item, which holds mood_text (constraint 7).
+            status = item.get("status", {}).get("S", "UNKNOWN")
+            logger.info("job update skipped (replay) job_id=%s status=%s", job_id, status)
+
+    # ------------------------------------------------------------------
     # Credit operations
     # ------------------------------------------------------------------
 

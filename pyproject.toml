@@ -24,7 +24,13 @@ select = [
 [tool.ruff.lint.per-file-ignores]
 # CDK stack constructors take **kwargs they pass straight through to super().
 "infra/stacks/*.py" = ["ARG002"]
+# Pytest fixtures are frequently requested for their side effects alone
+# (creating a bucket, setting env vars), so an unused argument is idiomatic.
+"backend/tests/*.py" = ["ARG001"]
 
 [tool.pytest.ini_options]
-testpaths = ["backend/tests"]
+testpaths = ["backend/tests", "infra/tests"]
+# `stacks` is a top-level package only when infra/ is the root, which is how
+# cdk.json invokes the app. Mirror that here so the tests import it the same way.
+pythonpath = ["infra"]
 addopts = "-q"

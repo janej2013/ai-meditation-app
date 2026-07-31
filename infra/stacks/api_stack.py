@@ -6,7 +6,10 @@ from aws_cdk import aws_apigatewayv2_authorizers as authorizers
 from aws_cdk import aws_apigatewayv2_integrations as integrations
 from aws_cdk import aws_cognito as cognito
 from aws_cdk import aws_dynamodb as dynamodb
+from aws_cdk import aws_iam as iam
 from aws_cdk import aws_lambda as lambda_
+from aws_cdk import aws_s3 as s3
+from aws_cdk import aws_stepfunctions as sfn
 from constructs import Construct
 
 from stacks.paths import BACKEND_DIR
@@ -25,6 +28,8 @@ class ApiStack(Stack):
         user_pool: cognito.IUserPool,
         user_pool_client: cognito.IUserPoolClient,
         allowed_origins: list[str],
+        audio_bucket: s3.IBucket,
+        state_machine: sfn.IStateMachine,
         **kwargs,
     ) -> None:
         super().__init__(scope, construct_id, **kwargs)
@@ -38,14 +43,33 @@ class ApiStack(Stack):
             ),
             memory_size=512,
             timeout=Duration.seconds(15),
-            environment={"TABLE_NAME": table.table_name},
+            environment={
+                "TABLE_NAME": table.table_name,
+                "AUDIO_BUCKET": audio_bucket.bucket_name,
+                "STATE_MACHINE_ARN": state_machine.state_machine_arn,
+            },
             description="FastAPI application (Mangum) behind the HTTP API.",
         )
         # Narrower than grant_read_write_data, which would also hand over Scan,
-        # DeleteItem, BatchWriteItem and the stream actions. GET /account reads
-        # the entitlement and lazily creates it; credit mutations belong to the
-        # step Lambdas (constraint 2), so no update or transaction action here.
+        # DeleteItem, BatchWriteItem and the stream actions. The API reads the
+        # entitlement, lazily creates it, and writes the PENDING job row;
+        # credit mutations belong to the step Lambdas (constraint 2), so no
+        # update or transaction action here.
         table.grant(self.api_function, "dynamodb:GetItem", "dynamodb:PutItem")
+
+        # Starting the pipeline is the API's only write to Step Functions
+        # (constraint 2) -- it never describes or stops an execution.
+        state_machine.grant_start_execution(self.api_function)
+
+        # GET /jobs/{id} presigns a download. A presigned URL carries the
+        # signer's permissions, so the role needs read on generated audio --
+        # and nothing else in the bucket.
+        self.api_function.add_to_role_policy(
+            iam.PolicyStatement(
+                actions=["s3:GetObject"],
+                resources=[audio_bucket.arn_for_objects("jobs/*")],
+            )
+        )
 
         # The authorizer validates signature, issuer, audience and expiry before
         # the Lambda is invoked, so the app only reads claims.
@@ -101,6 +125,11 @@ class ApiStack(Stack):
         self.http_api.add_routes(
             path="/generate",
             methods=[apigwv2.HttpMethod.POST],
+            integration=integration,
+        )
+        self.http_api.add_routes(
+            path="/jobs/{job_id}",
+            methods=[apigwv2.HttpMethod.GET],
             integration=integration,
         )
 

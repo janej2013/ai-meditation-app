@@ -10,11 +10,16 @@ the real claim-extraction path against a request with no Lambda event.
 
 from __future__ import annotations
 
+import json
+from unittest.mock import MagicMock
+
 import pytest
+from botocore.exceptions import ClientError
 from fastapi.testclient import TestClient
 
 from api.deps import CurrentUser, get_claims, get_current_user, get_store
 from api.main import app
+from shared.models import JobStatus
 
 from .conftest import USER_ID, seed_entitlement
 
@@ -124,15 +129,88 @@ def test_claims_without_a_subject_are_rejected(client_with_claims):
 
 
 # ----------------------------------------------------------------------
-# /generate (stub)
+# POST /generate
 # ----------------------------------------------------------------------
 
+GOOD_BODY = {"mood": "anxious about work", "duration_minutes": 10}
 
-def test_generate_is_not_implemented_yet(client):
-    response = client.post("/generate", json={"mood": "anxious", "duration_minutes": 10})
 
-    assert response.status_code == 501
-    assert "not implemented" in response.json()["detail"].lower()
+@pytest.fixture
+def sfn_client(monkeypatch):
+    """Capture StartExecution instead of calling Step Functions."""
+    from api.routers import generate as generate_router
+
+    fake = MagicMock()
+    monkeypatch.setenv("STATE_MACHINE_ARN", "arn:aws:states:ap-southeast-2:123:stateMachine:m")
+    monkeypatch.setenv("AUDIO_BUCKET", "meditation-test-audio")
+    monkeypatch.setattr(generate_router, "_get_sfn", lambda: fake)
+    return fake
+
+
+def test_generate_accepts_and_starts_the_pipeline(client, dynamodb_client, store, sfn_client):
+    seed_entitlement(dynamodb_client, available=1)
+
+    response = client.post("/generate", json=GOOD_BODY)
+
+    assert response.status_code == 202
+    body = response.json()
+    assert body["status"] == "PENDING"
+
+    job = store.get_job(USER_ID, body["job_id"])
+    assert job is not None
+    assert job.status is JobStatus.PENDING
+    assert job.mood_text == GOOD_BODY["mood"]
+
+    sfn_client.start_execution.assert_called_once()
+    payload = json.loads(sfn_client.start_execution.call_args.kwargs["input"])
+    # Constraint 7: the mood is on the JOB item, never in the execution input.
+    assert payload == {
+        "user_id": USER_ID,
+        "job_id": body["job_id"],
+        "duration_minutes": 10,
+    }
+
+
+def test_generate_names_the_execution_after_the_job(client, dynamodb_client, sfn_client):
+    """A named execution makes a duplicated StartExecution a no-op, not a second run."""
+    seed_entitlement(dynamodb_client, available=1)
+
+    response = client.post("/generate", json=GOOD_BODY)
+
+    assert sfn_client.start_execution.call_args.kwargs["name"] == response.json()["job_id"]
+
+
+def test_generate_with_no_credits_is_payment_required(client, dynamodb_client, sfn_client):
+    seed_entitlement(dynamodb_client, available=0)
+
+    response = client.post("/generate", json=GOOD_BODY)
+
+    assert response.status_code == 402
+    sfn_client.start_execution.assert_not_called()
+
+
+def test_generate_rejects_a_second_concurrent_job(client, dynamodb_client, sfn_client):
+    """frozen >= 1 means a job is already in flight."""
+    seed_entitlement(dynamodb_client, available=3, frozen=1)
+
+    response = client.post("/generate", json=GOOD_BODY)
+
+    assert response.status_code == 429
+    assert "already in progress" in response.json()["detail"].lower()
+    sfn_client.start_execution.assert_not_called()
+
+
+def test_generate_reports_unavailable_when_the_pipeline_cannot_start(
+    client, dynamodb_client, sfn_client
+):
+    seed_entitlement(dynamodb_client, available=1)
+    sfn_client.start_execution.side_effect = ClientError(
+        {"Error": {"Code": "ThrottlingException"}}, "StartExecution"
+    )
+
+    response = client.post("/generate", json=GOOD_BODY)
+
+    assert response.status_code == 503
 
 
 @pytest.mark.parametrize(
@@ -146,14 +224,81 @@ def test_generate_is_not_implemented_yet(client):
         {"duration_minutes": 10},
     ],
 )
-def test_generate_rejects_bad_bodies_before_the_stub(client, payload):
-    """Validation runs first, so 422 beats 501."""
+def test_generate_rejects_bad_bodies(client, payload, sfn_client):
     response = client.post("/generate", json=payload)
 
     assert response.status_code == 422
+    sfn_client.start_execution.assert_not_called()
 
 
 def test_generate_without_claims_is_unauthorized(anonymous_client):
-    response = anonymous_client.post("/generate", json={"mood": "anxious", "duration_minutes": 10})
+    response = anonymous_client.post("/generate", json=GOOD_BODY)
 
     assert response.status_code == 401
+
+
+# ----------------------------------------------------------------------
+# GET /jobs/{job_id}
+# ----------------------------------------------------------------------
+
+
+def test_job_status_while_running(client, dynamodb_client, store, sfn_client):
+    seed_entitlement(dynamodb_client, available=1)
+    job_id = client.post("/generate", json=GOOD_BODY).json()["job_id"]
+    store.freeze_credit(USER_ID, job_id)
+
+    response = client.get(f"/jobs/{job_id}")
+
+    assert response.status_code == 200
+    assert response.json() == {"job_id": job_id, "status": "FROZEN", "audio_url": None}
+
+
+def test_done_job_returns_a_presigned_url(client, dynamodb_client, store, sfn_client, monkeypatch):
+    from api.routers import generate as generate_router
+
+    seed_entitlement(dynamodb_client, available=1)
+    job_id = client.post("/generate", json=GOOD_BODY).json()["job_id"]
+    store.freeze_credit(USER_ID, job_id)
+    store.set_job_audio_key(USER_ID, job_id, f"jobs/{job_id}/final.mp3")
+    store.commit_credit(USER_ID, job_id)
+
+    s3 = MagicMock()
+    s3.generate_presigned_url.return_value = "https://signed.example/final.mp3"
+    monkeypatch.setattr(generate_router, "_get_s3", lambda: s3)
+
+    response = client.get(f"/jobs/{job_id}")
+
+    assert response.json()["status"] == "DONE"
+    assert response.json()["audio_url"] == "https://signed.example/final.mp3"
+    assert s3.generate_presigned_url.call_args.kwargs["ExpiresIn"] == 900
+
+
+def test_rolled_back_job_is_reported_as_failed(client, dynamodb_client, store, sfn_client):
+    """ROLLED_BACK is the internal truth; clients only need 'it failed'."""
+    seed_entitlement(dynamodb_client, available=1)
+    job_id = client.post("/generate", json=GOOD_BODY).json()["job_id"]
+    store.freeze_credit(USER_ID, job_id)
+    store.rollback_credit(USER_ID, job_id)
+
+    response = client.get(f"/jobs/{job_id}")
+
+    assert response.json()["status"] == "FAILED"
+    assert response.json()["audio_url"] is None
+
+
+def test_another_users_job_is_not_found(client, dynamodb_client, store, sfn_client):
+    """Reads are scoped to the caller's partition -- no existence oracle."""
+    seed_entitlement(dynamodb_client, user_id="someone-else", available=1)
+    store.create_job("someone-else", "their-job", "private mood", 10)
+
+    response = client.get("/jobs/their-job")
+
+    assert response.status_code == 404
+
+
+def test_unknown_job_is_not_found(client, sfn_client):
+    assert client.get("/jobs/does-not-exist").status_code == 404
+
+
+def test_job_status_without_claims_is_unauthorized(anonymous_client):
+    assert anonymous_client.get("/jobs/anything").status_code == 401
