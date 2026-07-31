@@ -478,8 +478,9 @@ def test_rollback_refunds_and_is_idempotent(store, dynamodb_client, monkeypatch,
     assert store.get_job(USER_ID, JOB).status is JobStatus.ROLLED_BACK
 
 
-def test_rollback_unwraps_the_catch_error_envelope(store, dynamodb_client, monkeypatch, state):
-    """A Catch with result_path nests the payload under the original state."""
+def test_rollback_accepts_the_catch_error_envelope(store, dynamodb_client, monkeypatch, state):
+    """result_path="$.error" *merges* the error into the original input rather
+    than replacing it, so the payload is a PipelineState with one extra key."""
     from .conftest import seed_entitlement
 
     seed_entitlement(dynamodb_client, available=1)

@@ -37,9 +37,13 @@ def _get_store() -> EntitlementStore:
 
 
 def lambda_handler(event: dict[str, Any], context: object) -> dict[str, Any]:  # noqa: ARG001
-    # The Catch that routes here wraps the original payload, so the pipeline
-    # state may sit under a Step Functions error envelope.
-    state = PipelineState.model_validate(event.get("state", event))
+    # Every Catch routing here sets result_path="$.error", which *merges* the
+    # error into the original input rather than replacing it. The payload is
+    # therefore a PipelineState carrying an extra `error` key, which the model
+    # ignores. Dropping that result_path would replace the whole input with
+    # {Error, Cause} and this validation would fail -- which is the behaviour to
+    # want: a refund must never run against a payload that lost its user_id.
+    state = PipelineState.model_validate(event)
 
     result = _get_store().rollback_credit(state.user_id, state.job_id)
     logger.info(
