@@ -100,17 +100,27 @@ def test_catch_preserves_the_payload_for_rollback(states):
 def worst_case_seconds(states: dict) -> int:
     """Longest a run can take: every task timing out through every retry.
 
-    MaxAttempts is retries *after* the first attempt, so a state with
+    MaxAttempts counts retries *after* the first attempt, so a state with
     MaxAttempts=3 runs its timeout four times.
+
+    Retriers are summed rather than maxed. Step Functions counts attempts per
+    retrier, so a state whose failures alternate between error classes can
+    exhaust each retrier in turn. Every state here has exactly one retrier
+    today, which makes the two identical -- but a budget check that comes in
+    under the real worst case is worse than no check at all.
     """
     total = 0
-    for body in task_states(states).values():
+    for name, body in task_states(states).items():
+        # A Task with no TimeoutSeconds runs effectively unbounded, which is
+        # precisely what breaks the budget. Say so rather than KeyError.
+        assert "TimeoutSeconds" in body, f"{name} has no task timeout"
+
         attempts, backoff = 1, 0
         for retry in body.get("Retry", []):
             retries = retry.get("MaxAttempts", 3)
-            attempts = max(attempts, retries + 1)
+            attempts += retries
             interval, rate = retry.get("IntervalSeconds", 1), retry.get("BackoffRate", 2.0)
-            backoff = max(backoff, sum(int(interval * rate**i) for i in range(retries)))
+            backoff += sum(int(interval * rate**i) for i in range(retries))
         total += attempts * body["TimeoutSeconds"] + backoff
     return total
 
