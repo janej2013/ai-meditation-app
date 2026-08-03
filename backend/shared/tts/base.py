@@ -12,6 +12,8 @@ import re
 from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
 
+from shared.pipeline import TransientError
+
 # Polly's SynthesizeSpeech accepts 6000 characters, of which 3000 may be
 # billed (spoken) characters. Chunk well under that so a long paragraph plus
 # the request envelope can never trip the limit.
@@ -26,6 +28,21 @@ class TTSError(Exception):
 
 class UnknownProviderError(TTSError):
     """TTS_PROVIDER names a provider that is not registered."""
+
+
+class TTSTransientError(TTSError, TransientError):
+    """A TTS failure worth retrying: throttling, timeouts, vendor 5xx.
+
+    Both bases are load-bearing, which is why this lives here rather than
+    alongside the other pipeline errors:
+
+    * ``TransientError`` is the taxonomy the state machine's Retry blocks are
+      built from. Step Functions matches the class *name*, so the name is the
+      part that must not change.
+    * ``TTSError`` is what makes ``except TTSError`` mean "any TTS failure".
+      While this class sat outside that hierarchy, the one failure class a
+      caller most wants to handle was the one such a clause silently missed.
+    """
 
 
 @dataclass(frozen=True)
@@ -51,8 +68,10 @@ class TTSProvider(Protocol):
     def synthesize(self, script: str, voice: VoiceConfig) -> bytes:
         """Return MP3 audio for ``script``.
 
-        Implementations raise ``TTSTransientError`` (from shared.pipeline) for
-        throttling and upstream 5xx, and ``TTSError`` for anything permanent.
+        Implementations raise ``TTSTransientError`` for throttling and upstream
+        5xx, and ``TTSError`` for anything permanent. Either way the message
+        should carry whatever the vendor said about the failure: that text is
+        all a CloudWatch reader gets.
         """
         ...
 

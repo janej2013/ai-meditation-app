@@ -15,8 +15,9 @@ Two things are deliberately absent from this state:
 
 The error classes below are the vocabulary the state machine matches on. Step
 Functions compares ``ErrorEquals`` against the Python exception class name, so
-renaming one of these silently changes retry behaviour -- pipeline_stack
-imports them rather than repeating the strings.
+**renaming one of these silently changes retry behaviour**: pipeline_stack
+repeats the names as string literals, and nothing links the two. Moving a class
+between modules is safe; renaming it is not.
 """
 
 from __future__ import annotations
@@ -64,8 +65,10 @@ class BedrockTransientError(TransientError):
     """Bedrock throttled the request or returned a server-side error."""
 
 
-class TTSTransientError(TransientError):
-    """The TTS vendor throttled the request or returned a server-side error."""
+# ``TTSTransientError`` is deliberately not here. It has to be both a
+# TransientError and a TTSError, and defining it in shared.tts.base keeps the
+# dependency pointing one way -- the TTS layer knows about this taxonomy, and
+# this module knows nothing about TTS.
 
 
 class ScriptGenerationError(PipelineError):

@@ -12,8 +12,13 @@ from typing import TYPE_CHECKING, Any
 import boto3
 from botocore.exceptions import ClientError
 
-from shared.pipeline import TTSTransientError
-from shared.tts.base import MAX_POLLY_CHARS, TTSError, VoiceConfig, chunk_script
+from shared.tts.base import (
+    MAX_POLLY_CHARS,
+    TTSError,
+    TTSTransientError,
+    VoiceConfig,
+    chunk_script,
+)
 
 if TYPE_CHECKING:  # boto3-stubs is a dev dependency, never installed in Lambda.
     from mypy_boto3_polly.client import PollyClient
