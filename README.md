@@ -241,7 +241,7 @@ an intended silence rather than mid-phrase.
 a test because each fails quietly:
 
 - `additions` must be a JSON **string**, not a nested object — the server
-  otherwise ignores it and the ASMR/context tuning silently stops applying.
+  otherwise ignores it and the context-prompt tuning silently stops applying.
 - **HTTP 200 does not mean success.** Failures (bad credentials, unknown voice,
   resource not enabled) arrive as a non-zero `code` *inside* a 200 body, so the
   newline-delimited stream is checked line by line.
@@ -249,8 +249,10 @@ a test because each fails quietly:
 
 Voice ids beginning `S_` are cloned voices and route to the `volcano_icl`
 cluster; everything else uses `volcano_tts`. The default is the integration
-doc's English preset (`zh_male_m191_uranus_bigtts`, `speech_rate -25`, ASMR
-emotion at scale 4) with the meditation style prompt translated to English.
+doc's English preset with the
+meditation style prompt translated to English. No `emotion`/`emotion_scale` is
+sent by default — the delivery direction is the context prompt's job; the pair
+is an opt-in override via `VolcanoTuning` (used by `scripts/tts_preview.py`).
 
 Transport is `urllib3` — botocore already vendors it, so the shared layer gains
 no dependency. `retries=False`: the state machine owns retry policy, and a
@@ -277,8 +279,10 @@ aws secretsmanager create-secret \
   --secret-string '{"api_key":"<Access Token>","app_id":"<App ID>"}'
 ```
 
-`api_key` is required, `app_id` optional (the vendor recommends but does not
-require the header). Override the name with `-c volcano_secret_name=...`. Only
+`api_key` and `app_id` are both required. The vendor doc calls the App Id
+header optional, but seed-tts-2.0 rejects requests without it (HTTP 400, code
+45000000), so the provider refuses to load a secret missing either field.
+Override the name with `-c volcano_secret_name=...`. Only
 the synthesize Lambda is granted `secretsmanager:GetSecretValue`, and only on
 that one secret — asserted in `infra/tests/test_volcano_secret.py`.
 

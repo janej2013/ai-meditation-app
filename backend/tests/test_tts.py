@@ -34,6 +34,7 @@ from shared.tts.volcano import (
     MAX_VOLCANO_CHARS,
     VolcanoCredentials,
     VolcanoProvider,
+    VolcanoTuning,
     cluster_for,
     load_credentials,
     reset_credentials_cache,
@@ -283,18 +284,32 @@ def test_volcano_additions_is_a_json_string_not_an_object():
 
 
 def test_volcano_sends_the_english_meditation_defaults():
+    """No emotion keys by default -- the delivery direction is the context
+    prompt's job. An exact match, so a new default cannot sneak in unasserted."""
     http = FakeHTTP(response=FakeHTTPResponse(lines=[audio_line(b"A"), END_LINE]))
     VolcanoProvider(http=http, credentials=CREDENTIALS).synthesize("Breathe.")
 
     params = http.requests[0]["body"]["req_params"]
-    assert params["speaker"] == "zh_male_m191_uranus_bigtts"
+    assert params["speaker"] == "ICL_uranus_en_male_zayne_tob"
     assert params["audio_params"] == {
         "format": "mp3",
         "sample_rate": 24000,
         "speech_rate": -25,
-        "emotion": "ASMR",
-        "emotion_scale": 4,
     }
+
+
+def test_volcano_sends_both_emotion_keys_when_an_emotion_is_set():
+    """The emotion pair is an opt-in override and travels together: a scale
+    without an emotion is meaningless, and null is not "unset" to the API."""
+    http = FakeHTTP(response=FakeHTTPResponse(lines=[audio_line(b"A"), END_LINE]))
+    provider = VolcanoProvider(
+        http=http, credentials=CREDENTIALS, tuning=VolcanoTuning(emotion="ASMR")
+    )
+    provider.synthesize("Breathe.")
+
+    params = http.requests[0]["body"]["req_params"]["audio_params"]
+    assert params["emotion"] == "ASMR"
+    assert params["emotion_scale"] == 4
 
 
 def test_volcano_sample_rate_follows_the_voice_config():
@@ -317,7 +332,8 @@ def test_volcano_sends_the_auth_headers():
 
 
 def test_volcano_omits_the_app_id_header_when_unset():
-    """app_id is optional in the secret; the header must then be absent."""
+    """Directly injected credentials may omit app_id (dry-run tooling); the
+    header must then be absent rather than sent empty."""
     http = FakeHTTP(response=FakeHTTPResponse(lines=[audio_line(b"A"), END_LINE]))
     provider = VolcanoProvider(http=http, credentials=VolcanoCredentials(api_key="k"))
 
@@ -330,7 +346,7 @@ def test_volcano_omits_the_app_id_header_when_unset():
     ("voice_id", "expected"),
     [
         ("S_cloned_voice_123", "volcano_icl"),
-        ("zh_male_m191_uranus_bigtts", "volcano_tts"),
+        ("ICL_uranus_en_male_zayne_tob", "volcano_tts"),
     ],
 )
 def test_volcano_cluster_follows_the_voice_id_prefix(voice_id, expected):
@@ -539,7 +555,7 @@ def test_credentials_are_read_from_secrets_manager():
 def test_credentials_fall_back_to_the_env_var_arn(monkeypatch):
     """CDK injects only the ARN; the provider resolves it at cold start."""
     monkeypatch.setenv("VOLCANO_SECRET_ARN", "arn:from-env")
-    client = FakeSecretsClient(json.dumps({"api_key": "k"}))
+    client = FakeSecretsClient(json.dumps({"api_key": "k", "app_id": "a"}))
 
     load_credentials(client=client)
 
@@ -548,7 +564,7 @@ def test_credentials_fall_back_to_the_env_var_arn(monkeypatch):
 
 def test_credentials_are_cached_across_calls():
     """Secrets Manager charges per call; a warm container must not re-read."""
-    client = FakeSecretsClient(json.dumps({"api_key": "k"}))
+    client = FakeSecretsClient(json.dumps({"api_key": "k", "app_id": "a"}))
 
     load_credentials(secret_arn="arn:secret", client=client)
     load_credentials(secret_arn="arn:secret", client=client)
@@ -556,10 +572,13 @@ def test_credentials_are_cached_across_calls():
     assert client.calls == 1
 
 
-def test_credentials_app_id_is_optional():
+def test_credentials_without_an_app_id_raise():
+    """seed-tts-2.0 rejects requests without the App Id header (400, code
+    45000000), so a secret missing app_id must fail at load, not at synthesis."""
     client = FakeSecretsClient(json.dumps({"api_key": "k"}))
 
-    assert load_credentials(secret_arn="arn:secret", client=client).app_id is None
+    with pytest.raises(TTSError, match="app_id"):
+        load_credentials(secret_arn="arn:secret", client=client)
 
 
 def test_credentials_without_an_api_key_raise():

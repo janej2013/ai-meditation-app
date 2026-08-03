@@ -1,7 +1,7 @@
 """Volcano Engine (Doubao) Seed-TTS implementation of TTSProvider.
 
 The primary provider; Polly stays as the fallback. See
-``doubao-tts-integration.md`` at the repo root for the vendor contract.
+``docs/doubao-tts-integration.md`` for the vendor contract.
 
 Three details of that contract are easy to get wrong and are handled here:
 
@@ -23,6 +23,8 @@ import base64
 import json
 import logging
 import os
+from collections.abc import Sequence
+from dataclasses import dataclass, field
 from typing import Any
 
 import boto3
@@ -58,14 +60,18 @@ _CLUSTER_CLONED = "volcano_icl"
 _CLUSTER_PRESET = "volcano_tts"
 
 # Section 6 of the integration doc: the English preset. The product serves
-# Australian users, so the English voice and the ASMR emotion are the defaults.
+# Australian users, so the English voice is the default.
 DEFAULT_VOICE = VoiceConfig(
-    voice_id="zh_male_m191_uranus_bigtts",
+    voice_id="ICL_uranus_en_male_zayne_tob",
     language_code="en-AU",
     sample_rate_hz=24000,
 )
 DEFAULT_SPEECH_RATE = -25
-DEFAULT_EMOTION = "ASMR"
+
+# No emotion by default, in the pipeline too: the delivery direction comes
+# from the context prompt below, not from the emotion presets. The pair is an
+# optional override -- the scale applies only when an emotion is set.
+DEFAULT_EMOTION: str | None = None
 DEFAULT_EMOTION_SCALE = 4
 
 # English rendering of the meditation style prompt in section 6. Seed-TTS 2.0
@@ -78,6 +84,27 @@ DEFAULT_CONTEXT_TEXTS = [
     "feels upholding and compassionate."
 ]
 
+
+@dataclass(frozen=True)
+class VolcanoTuning:
+    """How Seed-TTS should deliver the script, in vendor terms.
+
+    The pipeline never passes one, so it always speaks with these defaults.
+    scripts/tts_preview.py builds its own to A/B deliveries by ear -- the
+    knobs live here, as constructor state, precisely so that nothing has to
+    monkey-patch module constants to vary them.
+
+    ``emotion=None`` means the vendor's own delivery: both emotion keys are
+    omitted from the request, because a scale without an emotion is
+    meaningless and ``null`` is not "unset" to the API.
+    """
+
+    speech_rate: int = DEFAULT_SPEECH_RATE
+    emotion: str | None = DEFAULT_EMOTION
+    emotion_scale: int = DEFAULT_EMOTION_SCALE
+    context_texts: Sequence[str] = field(default_factory=lambda: DEFAULT_CONTEXT_TEXTS)
+
+
 # Any business identifier; the vendor only requires the field to be present.
 _REQUEST_UID = "meditation-app"
 
@@ -89,7 +116,12 @@ _credentials: VolcanoCredentials | None = None
 
 
 class VolcanoCredentials:
-    """Access key and optional app id, as stored in Secrets Manager."""
+    """Access key and app id, as stored in Secrets Manager.
+
+    ``app_id`` stays optional at this level so a payload can be built without
+    real credentials (scripts/tts_preview.py --dry-run). ``load_credentials``
+    requires it, because the API does.
+    """
 
     __slots__ = ("api_key", "app_id")
 
@@ -101,8 +133,11 @@ class VolcanoCredentials:
 def load_credentials(secret_arn: str | None = None, client: Any = None) -> VolcanoCredentials:
     """Read the credentials secret, caching for the container's lifetime.
 
-    The secret holds a JSON document: ``api_key`` is required, ``app_id`` is
-    optional (the vendor recommends but does not require the header).
+    The secret holds a JSON document with ``api_key`` and ``app_id``, both
+    required. The vendor doc calls the App Id header optional, but
+    seed-tts-2.0 rejects a request without it (HTTP 400, code 45000000) --
+    so a missing ``app_id`` fails here, at credential load, rather than as a
+    400 on a request that has already spent a credit's worth of work.
     Constraint 4 forbids plaintext Lambda environment variables for this, so
     only the ARN is injected.
     """
@@ -133,7 +168,11 @@ def load_credentials(secret_arn: str | None = None, client: Any = None) -> Volca
     if not api_key:
         raise TTSError("Volcano credentials secret has no 'api_key' field")
 
-    _credentials = VolcanoCredentials(api_key=api_key, app_id=document.get("app_id"))
+    app_id = document.get("app_id")
+    if not app_id:
+        raise TTSError("Volcano credentials secret has no 'app_id' field")
+
+    _credentials = VolcanoCredentials(api_key=api_key, app_id=app_id)
     return _credentials
 
 
@@ -175,11 +214,13 @@ class VolcanoProvider:
         self,
         http: urllib3.PoolManager | None = None,
         credentials: VolcanoCredentials | None = None,
+        tuning: VolcanoTuning | None = None,
     ) -> None:
         # Reusing the pool keeps the TCP connection warm across chunks; the
         # vendor holds keep-alive open for a minute.
         self.http = http if http is not None else urllib3.PoolManager()
         self._credentials = credentials
+        self.tuning = tuning if tuning is not None else VolcanoTuning()
 
     def _get_credentials(self) -> VolcanoCredentials:
         if self._credentials is None:
@@ -205,12 +246,15 @@ class VolcanoProvider:
         audio_params: dict[str, Any] = {
             "format": "mp3",
             "sample_rate": voice.sample_rate_hz,
-            "speech_rate": DEFAULT_SPEECH_RATE,
-            "emotion": DEFAULT_EMOTION,
-            "emotion_scale": DEFAULT_EMOTION_SCALE,
+            "speech_rate": self.tuning.speech_rate,
         }
+        # See VolcanoTuning: emotion None omits both keys rather than sending
+        # null, and the scale is meaningless without an emotion.
+        if self.tuning.emotion is not None:
+            audio_params["emotion"] = self.tuning.emotion
+            audio_params["emotion_scale"] = self.tuning.emotion_scale
         additions = {
-            "context_texts": DEFAULT_CONTEXT_TEXTS,
+            "context_texts": list(self.tuning.context_texts),
             "cache_config": {"text_type": 1, "use_cache": True},
         }
         return {

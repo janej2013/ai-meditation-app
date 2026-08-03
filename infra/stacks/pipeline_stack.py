@@ -70,7 +70,7 @@ DEFAULT_TTS_PROVIDER = "volcano"
 # CDK generating it would put the value in the CloudFormation template and in
 # `cdk diff` output, which is exactly what constraint 4 forbids. Contents:
 #
-#     {"api_key": "<Access Token>", "app_id": "<App ID, optional>"}
+#     {"api_key": "<Access Token>", "app_id": "<App ID>"}    (both required)
 DEFAULT_VOLCANO_SECRET_NAME = "meditation/volcano-tts"
 
 
