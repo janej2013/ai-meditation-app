@@ -10,25 +10,36 @@ import os
 
 from shared.tts.base import TTSProvider, UnknownProviderError
 
-DEFAULT_PROVIDER = "polly"
+# Volcano Engine is the primary provider; Polly remains the fallback and is
+# what a deployment gets by passing -c tts_provider=polly.
+DEFAULT_PROVIDER = "volcano"
 PROVIDER_ENV_VAR = "TTS_PROVIDER"
+
+KNOWN_PROVIDERS = ("volcano", "polly")
 
 
 def get_provider(name: str | None = None) -> TTSProvider:
-    """Return the configured provider, defaulting to Polly.
+    """Return the configured provider, defaulting to Volcano Engine.
 
     ``name`` falls back to the ``TTS_PROVIDER`` environment variable, which
     CDK sets on the synthesize Lambda.
     """
     provider_name = (name or os.environ.get(PROVIDER_ENV_VAR) or DEFAULT_PROVIDER).lower()
 
+    # Imported lazily so only the selected vendor's module is loaded -- the
+    # Volcano provider reaches for Secrets Manager on first use, which a
+    # Polly-only deployment should never pay for.
+    if provider_name == "volcano":
+        from shared.tts.volcano import VolcanoProvider
+
+        return VolcanoProvider()
+
     if provider_name == "polly":
-        # Imported lazily so a provider's SDK is only loaded when selected.
         from shared.tts.polly import PollyProvider
 
         return PollyProvider()
 
-    # Milestone 4 registers "volcano" here.
     raise UnknownProviderError(
-        f"unknown TTS provider {provider_name!r}; set {PROVIDER_ENV_VAR} to one of: polly"
+        f"unknown TTS provider {provider_name!r}; set {PROVIDER_ENV_VAR} to one of: "
+        f"{', '.join(KNOWN_PROVIDERS)}"
     )

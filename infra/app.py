@@ -18,7 +18,11 @@ import aws_cdk as cdk
 from stacks.api_stack import ApiStack
 from stacks.auth_stack import AuthStack
 from stacks.data_stack import DataStack
-from stacks.pipeline_stack import PipelineStack
+from stacks.pipeline_stack import (
+    DEFAULT_TTS_PROVIDER,
+    DEFAULT_VOLCANO_SECRET_NAME,
+    PipelineStack,
+)
 
 VALID_ENVS = ("dev", "prod")
 REGION = "ap-southeast-2"  # Sydney, per CLAUDE.md
@@ -106,7 +110,12 @@ def main() -> None:
         table=data.table,
         audio_bucket=data.audio_bucket,
         bedrock_model_id=app.node.try_get_context("bedrock_model_id") or DEFAULT_BEDROCK_MODEL_ID,
-        tts_provider=app.node.try_get_context("tts_provider") or "polly",
+        # Volcano Engine is primary; `-c tts_provider=polly` falls back without
+        # a code change, and both providers keep their IAM grants either way.
+        tts_provider=app.node.try_get_context("tts_provider") or DEFAULT_TTS_PROVIDER,
+        volcano_secret_name=(
+            app.node.try_get_context("volcano_secret_name") or DEFAULT_VOLCANO_SECRET_NAME
+        ),
         env=env,
         description="Step Functions generation pipeline and its task Lambdas.",
     )

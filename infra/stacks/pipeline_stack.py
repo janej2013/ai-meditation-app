@@ -27,6 +27,7 @@ from aws_cdk import aws_lambda as lambda_
 from aws_cdk import aws_logs as logs
 from aws_cdk import aws_s3 as s3
 from aws_cdk import aws_s3_deployment as s3deploy
+from aws_cdk import aws_secretsmanager as secretsmanager
 from aws_cdk import aws_stepfunctions as sfn
 from aws_cdk import aws_stepfunctions_tasks as tasks
 from constructs import Construct
@@ -41,7 +42,9 @@ LAMBDA_SERVICE_ERRORS = [
     "Lambda.TooManyRequestsException",
 ]
 
-# Raised by shared.pipeline; Step Functions matches the Python class name.
+# Step Functions matches the Python exception class name. These are literals,
+# not imports -- infra cannot import the Lambda package -- so a rename in
+# shared/ has to be mirrored here by hand.
 BEDROCK_TRANSIENT = "BedrockTransientError"
 TTS_TRANSIENT = "TTSTransientError"
 INSUFFICIENT_CREDITS = "InsufficientCreditsError"
@@ -59,6 +62,17 @@ INSUFFICIENT_CREDITS = "InsufficientCreditsError"
 EXECUTION_TIMEOUT = Duration.minutes(30)
 DEFAULT_TASK_TIMEOUT = Duration.seconds(30)
 
+# Volcano Engine (Doubao) Seed-TTS is the primary provider; Polly is the
+# fallback, reachable with `-c tts_provider=polly`.
+DEFAULT_TTS_PROVIDER = "volcano"
+
+# The secret is created by hand in the console and merely *referenced* here:
+# CDK generating it would put the value in the CloudFormation template and in
+# `cdk diff` output, which is exactly what constraint 4 forbids. Contents:
+#
+#     {"api_key": "<Access Token>", "app_id": "<App ID>"}    (both required)
+DEFAULT_VOLCANO_SECRET_NAME = "meditation/volcano-tts"
+
 
 class PipelineStack(Stack):
     """Step Functions state machine plus its five task Lambdas."""
@@ -72,7 +86,8 @@ class PipelineStack(Stack):
         table: dynamodb.ITable,
         audio_bucket: s3.IBucket,
         bedrock_model_id: str,
-        tts_provider: str = "polly",
+        tts_provider: str = DEFAULT_TTS_PROVIDER,
+        volcano_secret_name: str = DEFAULT_VOLCANO_SECRET_NAME,
         **kwargs,
     ) -> None:
         super().__init__(scope, construct_id, **kwargs)
@@ -116,11 +131,24 @@ class PipelineStack(Stack):
             memory_size=512,
             timeout=Duration.seconds(120),
         )
+        # Referenced, never created: the value stays out of the template and
+        # out of `cdk diff`. from_secret_name_v2 resolves the ARN at deploy
+        # time without a lookup, so synth needs no AWS credentials.
+        volcano_secret = secretsmanager.Secret.from_secret_name_v2(
+            self, "VolcanoSecret", volcano_secret_name
+        )
+
         synthesize = self._task_function(
             "Synthesize",
             "synthesize",
             shared_layer,
-            {**common_env, "TTS_PROVIDER": tts_provider},
+            {
+                **common_env,
+                "TTS_PROVIDER": tts_provider,
+                # Only the ARN travels as an environment variable; the Lambda
+                # reads the value through Secrets Manager at cold start.
+                "VOLCANO_SECRET_ARN": volcano_secret.secret_arn,
+            },
             memory_size=1024,
             timeout=Duration.seconds(180),
         )
@@ -129,6 +157,7 @@ class PipelineStack(Stack):
             table=table,
             audio_bucket=audio_bucket,
             bedrock_model_id=bedrock_model_id,
+            volcano_secret=volcano_secret,
             freeze=freeze,
             generate=generate,
             synthesize=synthesize,
@@ -206,6 +235,7 @@ class PipelineStack(Stack):
         table: dynamodb.ITable,
         audio_bucket: s3.IBucket,
         bedrock_model_id: str,
+        volcano_secret: secretsmanager.ISecret,
         freeze: lambda_.Function,
         generate: lambda_.Function,
         synthesize: lambda_.Function,
@@ -242,9 +272,13 @@ class PipelineStack(Stack):
                 resources=self._bedrock_resources(bedrock_model_id),
             )
         )
+        # Both providers stay reachable: Volcano is primary, Polly is the
+        # fallback that `-c tts_provider=polly` selects. Granting both means
+        # switching back is a context change, not a redeploy of IAM.
         synthesize.add_to_role_policy(
             iam.PolicyStatement(actions=["polly:SynthesizeSpeech"], resources=["*"])
         )
+        volcano_secret.grant_read(synthesize)
 
     def _bedrock_resources(self, model_id: str) -> list[str]:
         """ARNs a Bedrock InvokeModel call needs.

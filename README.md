@@ -9,15 +9,15 @@ Region `ap-southeast-2` (Sydney). See [CLAUDE.md](CLAUDE.md) for the full stack 
 
 ## Current status
 
-Milestone 3 complete: the generation pipeline runs end to end with Polly as the
-TTS placeholder.
+Milestone 4 complete: the generation pipeline runs end to end, narrated by
+Volcano Engine (Doubao) Seed-TTS with Polly as the fallback.
 
 | Milestone | Scope | Status |
 |---|---|---|
 | 1 | `infra/` skeleton + `data_stack` | done |
 | 2 | `auth_stack` + `api_stack` | done |
 | 3 | `pipeline_stack` (Polly placeholder) | done |
-| 4 | Volcano TTS provider | not started |
+| 4 | Volcano TTS provider | done |
 | 5 | `billing_stack` (Stripe) | not started |
 | 6 | `frontend_stack` + PWA | not started |
 
@@ -210,17 +210,81 @@ class PipelineState(BaseModel):
 reads it back from DynamoDB. The generated script goes to S3 for the same
 reason. Handlers log lengths and ids, never content.
 
-### TTS provider abstraction
+### TTS providers — Volcano primary, Polly fallback
 
 `shared/tts/` exposes `TTSProvider` (a `Protocol`) and a neutral `VoiceConfig`;
-`get_provider()` reads `TTS_PROVIDER` and defaults to Polly. No vendor SDK is
-imported outside `shared/tts/polly.py`, so milestone 4 adds Volcano by
-registering it in the factory.
+`get_provider()` reads `TTS_PROVIDER` and returns one of:
 
-Polly caps `SynthesizeSpeech` at 3000 billed characters, so `chunk_script()`
-packs paragraphs up to 2500. Splitting on paragraph boundaries does double duty:
-the prompt puts a blank line exactly where the listener should pause, so every
-seam in the concatenated MP3 lands on an intended silence rather than mid-phrase.
+| provider | role | module |
+|---|---|---|
+| `volcano` | **primary** — Volcano Engine (Doubao) Seed-TTS 2.0 | `shared/tts/volcano.py` |
+| `polly` | fallback | `shared/tts/polly.py` |
+
+Falling back is a context change, not a code change:
+
+```bash
+cd infra && npx cdk deploy -c tts_provider=polly
+```
+
+Both providers keep their IAM grants in either configuration, so switching back
+and forth never needs an IAM redeploy. Vendor modules are imported lazily inside
+the factory, so a Polly-only deployment never touches Secrets Manager.
+
+Each vendor gets its own chunk size — `MAX_POLLY_CHARS` (2500, under Polly's
+3000 billed-character cap) and `MAX_VOLCANO_CHARS` (1000, conservative against
+a streaming endpoint the vendor documents no hard limit for). Splitting on
+paragraph boundaries does double duty: the prompt puts a blank line exactly
+where the listener should pause, so every seam in the concatenated MP3 lands on
+an intended silence rather than mid-phrase.
+
+**Three things about the Volcano contract are easy to get wrong**, and each has
+a test because each fails quietly:
+
+- `additions` must be a JSON **string**, not a nested object — the server
+  otherwise ignores it and the context-prompt tuning silently stops applying.
+- **HTTP 200 does not mean success.** Failures (bad credentials, unknown voice,
+  resource not enabled) arrive as a non-zero `code` *inside* a 200 body, so the
+  newline-delimited stream is checked line by line.
+- `code` **20000000 is the end-of-stream marker**, not an error.
+
+Voice ids beginning `S_` are cloned voices and route to the `volcano_icl`
+cluster; everything else uses `volcano_tts`. The default is the integration
+doc's English preset with the
+meditation style prompt translated to English. No `emotion`/`emotion_scale` is
+sent by default — the delivery direction is the context prompt's job; the pair
+is an opt-in override via `VolcanoTuning` (used by `scripts/tts_preview.py`).
+
+Transport is `urllib3` — botocore already vendors it, so the shared layer gains
+no dependency. `retries=False`: the state machine owns retry policy, and a
+second layer underneath it would multiply against those three attempts. HTTP 429
+and 5xx and every transport failure become `TTSTransientError` (which the
+`Synthesize` state retries); in-stream error codes and other 4xx become
+`TTSError`, which goes straight to `Catch`.
+
+#### Credentials
+
+Constraint 4 forbids plaintext Lambda environment variables for vendor keys, so
+only an ARN is injected as `VOLCANO_SECRET_ARN` and the provider reads the value
+through Secrets Manager once per container.
+
+**Create the secret by hand before deploying** — CDK references it with
+`Secret.from_secret_name_v2` and deliberately does not generate it, because a
+generated value would land in the CloudFormation template and in `cdk diff`
+output:
+
+```bash
+aws secretsmanager create-secret \
+  --name meditation/volcano-tts \
+  --region ap-southeast-2 \
+  --secret-string '{"api_key":"<Access Token>","app_id":"<App ID>"}'
+```
+
+`api_key` and `app_id` are both required. The vendor doc calls the App Id
+header optional, but seed-tts-2.0 rejects requests without it (HTTP 400, code
+45000000), so the provider refuses to load a secret missing either field.
+Override the name with `-c volcano_secret_name=...`. Only
+the synthesize Lambda is granted `secretsmanager:GetSecretValue`, and only on
+that one secret — asserted in `infra/tests/test_volcano_secret.py`.
 
 ### Mixing happens in the browser
 
