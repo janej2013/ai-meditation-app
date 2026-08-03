@@ -19,6 +19,9 @@ layers/shared/python/*
 layers/ffmpeg/bin/*
 !layers/ffmpeg/bin/.gitkeep
 
+# Audio written by scripts/tts_preview.py while tuning the voice by ear.
+tts-preview/
+
 # CDK
 cdk.out/
 .cdk.staging/
