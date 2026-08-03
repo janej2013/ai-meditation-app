@@ -1,7 +1,8 @@
 # 豆包（火山引擎）TTS 语音合成接入文档
 
-> 本文档基于本项目 `minip/cloudfunctions/tts/index.js` 的实现整理，用于在其他项目中接入相同的 TTS 能力。
-> 该云函数中的微信扣费逻辑（`user-manager` credit 检查）为业务逻辑，与 TTS 接口本身无关，其他项目可按需替换。
+> 厂商契约的参考文档：端点、请求头、参数、响应格式，以及若干容易踩错的地方。
+> 实现在 [`backend/shared/tts/volcano.py`](../backend/shared/tts/volcano.py)，
+> 第六节的默认配置就是那个模块里的常量来源。
 
 ## 一、厂商与接口概览
 
@@ -15,7 +16,7 @@
 
 ### 官方文档链接
 
-- **单向流式 HTTP V3 接口文档（本项目使用的接口，支持复刻/混音）**：https://www.volcengine.com/docs/6561/1598757
+- **单向流式 HTTP V3 接口文档（此处使用的接口，支持复刻/混音）**：https://www.volcengine.com/docs/6561/1598757
 - 豆包语音 API 接口文档总览：https://www.volcengine.com/docs/6561/1096680
 - 音色列表（voice_type / speaker 取值）：https://www.volcengine.com/docs/6561/97465
 - 火山引擎语音技术控制台（开通服务、获取 App ID / Access Token）：https://console.volcengine.com/speech/app
@@ -28,24 +29,27 @@
 | --- | --- | --- |
 | App ID | `X-Api-App-Id` | 应用 ID（可选，但建议携带） |
 | Access Token | `X-Api-Access-Key` | 鉴权密钥（**必填**） |
-| Resource ID | `X-Api-Resource-Id` | 资源/模型 ID，本项目使用 `seed-tts-2.0` |
+| Resource ID | `X-Api-Resource-Id` | 资源/模型 ID，此处使用 `seed-tts-2.0` |
 | Cluster | `X-Api-Cluster` | 集群，见下方规则 |
 
-**Cluster 选择规则**（本项目实现）：
+**Cluster 选择规则**：
 
 - 音色 ID 以 `S_` 开头（声音复刻音色）→ `volcano_icl`
 - 其他（平台预置大模型音色）→ `volcano_tts`
 
-```js
-function getDoubaoCluster(voiceId) {
-  return voiceId.startsWith('S_') ? 'volcano_icl' : 'volcano_tts';
-}
+实现见 `volcano.cluster_for()`。
+
+**本仓库的凭证注入方式**：密钥存在 Secrets Manager，Lambda 只拿到 ARN
+（`VOLCANO_SECRET_ARN`），在冷启动时读取一次并缓存。硬约束 4 禁止把密钥放进
+Lambda 的明文环境变量，所以**不要**照搬"用环境变量传 Access Token"的做法。密钥
+是一个 JSON 文档：
+
+```json
+{"api_key": "<Access Token>", "app_id": "<App ID，可选>"}
 ```
 
-凭证建议通过环境变量注入（本项目约定）：
-
-- `DOUBAO_API_KEY` — Access Token（必填）
-- `DOUBAO_APP_ID` — App ID（可选）
+本地调参脚本 `scripts/tts_preview.py` 是唯一的例外——它从 `VOLCANO_API_KEY`
+读取，因为它不跑在 AWS 上，也不接触任何用户数据。
 
 ## 三、请求格式
 
@@ -92,10 +96,10 @@ X-Api-Cluster: volcano_tts
 | `audio_params.volume` | number | 否 | 音量 |
 | `audio_params.emotion` | string | 否 | 情感，如 `ASMR`（需音色支持） |
 | `audio_params.emotion_scale` | number | 否 | 情感强度 |
-| `req_params.additions` | string | 否 | **JSON 字符串**（注意需 `JSON.stringify`），扩展参数 |
+| `req_params.additions` | string | 否 | **JSON 字符串**（注意需 `json.dumps`，不是嵌套对象），扩展参数 |
 | `req_params.mix_speaker` | object | 否 | 混合音色配置（见官方文档） |
 
-`additions` 内本项目使用的扩展参数：
+`additions` 内用到的扩展参数：
 
 - `context_texts: string[]` — 上下文提示词，用自然语言描述期望的语气/风格（Seed-TTS 2.0 特性）
 - `cache_config: { text_type: 1, use_cache: true }` — 开启文本缓存，相同文本命中缓存可加速并省费
@@ -109,109 +113,34 @@ X-Api-Cluster: volcano_tts
 {"code": 20000000, "message": "OK", ...}   // 结束标记行
 ```
 
-解析规则（与本项目实现一致）：
+解析规则（实现见 `VolcanoProvider._read_stream`）：
 
-1. 按 `\n` 分行，过滤空行，逐行 `JSON.parse`；
-2. `code === 20000000` → 合成结束，停止解析；
+1. 按 `\n` 分行，过滤空行，逐行解析 JSON；
+2. `code == 20000000` → 合成结束，停止解析；
 3. `code` 非 0 且非 20000000 → 错误，`message` 为错误信息；
 4. 其余行取 `data` 字段（base64 字符串），**按顺序拼接**即为完整音频的 base64；
 5. base64 解码后即得到 `format` 指定格式的音频二进制。
 
-## 五、通用 Node.js 接入示例（不依赖微信云函数）
+## 五、参考实现
 
-```js
-const https = require('https');
+Python 实现见 [`backend/shared/tts/volcano.py`](../backend/shared/tts/volcano.py)：
 
-const DOUBAO_HOST = 'openspeech.bytedance.com';
-const DOUBAO_PATH = '/api/v3/tts/unidirectional';
+| 关注点 | 位置 |
+| --- | --- |
+| 构造请求体（含 `additions` 的字符串化） | `VolcanoProvider._build_payload` |
+| 请求头与集群选择 | `VolcanoProvider._headers` / `cluster_for` |
+| 逐行解析响应、区分结束标记与错误 | `VolcanoProvider._read_stream` |
+| 长文本分块与拼接 | `VolcanoProvider.synthesize` / `chunk_script` |
 
-/**
- * @param {string} text 待合成文本
- * @param {object} opts { apiKey, appId, model, voiceId, format, sampleRate, speechRate, emotion, emotionScale, contextTexts, uid }
- * @returns {Promise<Buffer>} 音频二进制
- */
-function doubaoTTS(text, opts) {
-  const {
-    apiKey, appId,
-    model = 'seed-tts-2.0',
-    voiceId = 'zh_male_ruyayichen_saturn_bigtts',
-    format = 'mp3',
-    sampleRate = 24000,
-    speechRate = -25,
-    emotion, emotionScale,
-    contextTexts,
-    uid = 'default-user'
-  } = opts;
+本地试听与调参用 `scripts/tts_preview.py`，它直接驱动上面这些代码，
+只是把音色、语速、情感、提示词做成了命令行参数。
 
-  const cluster = voiceId.startsWith('S_') ? 'volcano_icl' : 'volcano_tts';
+## 六、默认配置
 
-  const audio_params = { format, sample_rate: sampleRate, speech_rate: speechRate };
-  if (emotion) audio_params.emotion = emotion;
-  if (emotionScale !== undefined) audio_params.emotion_scale = emotionScale;
-
-  const additions = { cache_config: { text_type: 1, use_cache: true } };
-  if (Array.isArray(contextTexts)) additions.context_texts = contextTexts;
-
-  const payload = JSON.stringify({
-    user: { uid },
-    req_params: {
-      text,
-      speaker: voiceId,
-      audio_params,
-      additions: JSON.stringify(additions) // 注意：additions 是 JSON 字符串
-    }
-  });
-
-  const headers = {
-    'Content-Type': 'application/json',
-    'Content-Length': Buffer.byteLength(payload),
-    'X-Api-Access-Key': apiKey,
-    'X-Api-Resource-Id': model,
-    'X-Api-Cluster': cluster
-  };
-  if (appId) headers['X-Api-App-Id'] = appId;
-
-  return new Promise((resolve, reject) => {
-    const req = https.request(
-      { hostname: DOUBAO_HOST, path: DOUBAO_PATH, method: 'POST', headers, timeout: 60000 },
-      (res) => {
-        let raw = '';
-        res.on('data', (c) => (raw += c.toString()));
-        res.on('end', () => {
-          if (res.statusCode !== 200) {
-            return reject(new Error(`HTTP ${res.statusCode}: ${raw}`));
-          }
-          const chunks = [];
-          for (const line of raw.split('\n').filter((l) => l.trim())) {
-            let json;
-            try { json = JSON.parse(line); } catch { continue; }
-            if (json.code === 20000000) break; // 结束标记
-            if (json.code && json.code !== 0) {
-              return reject(new Error(`Doubao TTS 错误: ${json.code} - ${json.message || '未知错误'}`));
-            }
-            if (json.data) chunks.push(json.data);
-          }
-          if (!chunks.length) return reject(new Error('未返回音频数据'));
-          resolve(Buffer.from(chunks.join(''), 'base64'));
-        });
-      }
-    );
-    req.on('error', reject);
-    req.on('timeout', () => { req.destroy(); reject(new Error('请求超时')); });
-    req.write(payload);
-    req.end();
-  });
-}
-
-// 使用示例
-// const audio = await doubaoTTS('闭上眼睛，深呼吸。', {
-//   apiKey: process.env.DOUBAO_API_KEY,
-//   appId: process.env.DOUBAO_APP_ID
-// });
-// require('fs').writeFileSync('out.mp3', audio);
-```
-
-## 六、本项目使用的默认配置（可作为其他项目的推荐值）
+英文一列即 `volcano.py` 中 `DEFAULT_VOICE` / `DEFAULT_SPEECH_RATE` /
+`DEFAULT_EMOTION` / `DEFAULT_EMOTION_SCALE` / `DEFAULT_CONTEXT_TEXTS` 的取值。
+音色 ID 的 `zh_male_` 前缀反映的是原始录音人，不是输出语言——英文一列那个确实
+是英文预设。
 
 | 配置项 | 中文 | 英文 |
 | --- | --- | --- |
@@ -229,10 +158,10 @@ function doubaoTTS(text, opts) {
 ## 七、注意事项
 
 1. **`additions` 必须是 JSON 字符串**，不是对象——直接传对象会被服务端忽略或报错。
-2. **连接复用**：火山服务端 keep-alive 为 1 分钟，高频调用时建议复用 TCP 连接（Node 使用 `https.Agent({ keepAlive: true })`）。
+2. **连接复用**：火山服务端 keep-alive 为 1 分钟，长文本分块合成时应复用 TCP 连接——`VolcanoProvider` 持有一个 `urllib3.PoolManager` 来做这件事。
 3. **超时**：长文本合成较慢，建议超时设为 60s。
 4. **文本长度**：单次请求文本不宜过长；超长文本请用官方[异步长文本接口](https://www.volcengine.com/docs/6561/1829010)（支持 10 万字符）。
 5. **错误处理**：HTTP 200 不代表成功，必须逐行检查 `code`；常见错误如鉴权失败、音色不存在、资源未开通等都通过流内 JSON 的 `code`/`message` 返回。
 6. **声音复刻音色**（`S_` 开头）需将 cluster 切为 `volcano_icl`，且账号需开通声音复刻服务。
 7. **缓存**：`cache_config.use_cache = true` 时相同文本+音色命中缓存，可显著降低延迟。
-8. 密钥不要写入代码，通过环境变量（`DOUBAO_API_KEY` / `DOUBAO_APP_ID`）或密钥管理服务注入。
+8. **密钥**：不写进代码，也不放进 Lambda 明文环境变量（硬约束 4）；存 Secrets Manager，只把 ARN 作为环境变量下发。
