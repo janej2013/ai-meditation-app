@@ -42,6 +42,16 @@ def subscription_sk(stripe_subscription_id: str) -> str:
     return f"SUB#{stripe_subscription_id}"
 
 
+def event_sk(stripe_event_id: str) -> str:
+    """Sort key for a processed Stripe event.
+
+    Writing this item conditionally in the same transaction as the entitlement
+    update is what makes webhook processing idempotent (constraint 5): Stripe
+    retries deliveries, and a replayed event must not grant credits twice.
+    """
+    return f"EVENT#{stripe_event_id}"
+
+
 class JobStatus(StrEnum):
     """Lifecycle of a single meditation generation job."""
 
@@ -89,6 +99,20 @@ class Job(BaseModel):
     audio_key: str | None = None
     created_at: datetime | None = None
     updated_at: datetime | None = None
+
+
+class BillingOperationResult(BaseModel):
+    """Outcome of a Stripe-driven entitlement change.
+
+    ``applied`` is False when the Stripe event had already been processed --
+    the dedupe marker was present, so nothing was mutated. That is a success,
+    not an error: the webhook must return 200 so Stripe stops retrying.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    applied: bool
+    entitlement: Entitlement
 
 
 class CreditOperationResult(BaseModel):

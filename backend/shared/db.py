@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import logging
 import os
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
 import boto3
@@ -28,11 +28,14 @@ from shared.models import (
     ENTITLEMENT_SK,
     FREE_SIGNUP_CREDITS,
     PROFILE_SK,
+    BillingOperationResult,
     CreditOperationResult,
     Entitlement,
     Job,
     JobStatus,
+    event_sk,
     job_sk,
+    subscription_sk,
     user_pk,
 )
 
@@ -51,10 +54,21 @@ _deserializer = TypeDeserializer()
 _ENTITLEMENT_ITEM = 0
 _JOB_ITEM = 1
 
+# Billing transactions use the same index-0 entitlement slot, with the Stripe
+# event dedupe item where the job item sits for credit operations.
+_EVENT_ITEM = 1
+_SUBSCRIPTION_ITEM = 2
+
 _CONDITIONAL_CHECK_FAILED = "ConditionalCheckFailed"
 
-# "status" is a DynamoDB reserved word.
+# "status" and "plan" are DynamoDB reserved words.
 _STATUS_NAMES = {"#status": "status"}
+_PLAN_NAMES = {"#plan": "plan"}
+
+# How long a processed-event marker is kept. Stripe retries a failed webhook
+# delivery for up to ~3 days, so 30 covers every retry window with room to
+# spare while keeping the partition from growing without bound.
+EVENT_TTL_DAYS = 30
 
 
 class CreditLedgerError(Exception):
@@ -81,6 +95,11 @@ def _unmarshal(item: dict[str, Any]) -> dict[str, Any]:
 
 def _now_iso() -> str:
     return datetime.now(UTC).isoformat()
+
+
+def _ttl_epoch(days: int) -> int:
+    """Absolute epoch seconds DynamoDB's TTL reaper compares against."""
+    return int((datetime.now(UTC) + timedelta(days=days)).timestamp())
 
 
 class EntitlementStore:
@@ -477,6 +496,212 @@ class EntitlementStore:
     # ------------------------------------------------------------------
     # Internals
     # ------------------------------------------------------------------
+
+    # ------------------------------------------------------------------
+    # Billing -- entitlement changes driven by Stripe
+    #
+    # Same shape as the credit operations above: one TransactWriteItems, with
+    # a conditional item that makes a replay a no-op. Here the guard is an
+    # EVENT#<stripe_event_id> marker rather than the job status, because Stripe
+    # retries deliveries and constraint 5 requires the update to be idempotent
+    # on the event id.
+    #
+    # These take plain data, never a Stripe object: shared/ does not import
+    # stripe, so the vendor stays behind the API layer.
+    # ------------------------------------------------------------------
+
+    def apply_stripe_credit(
+        self,
+        user_id: str,
+        event_id: str,
+        credits: int,
+    ) -> BillingOperationResult:
+        """Add ``credits`` to ``available`` for a one-off credit pack.
+
+        Idempotent per ``event_id``: a redelivered webhook finds the marker
+        already written, the transaction cancels, and nothing is added.
+        """
+        if credits <= 0:
+            raise ValueError(f"credit pack must grant a positive amount, got {credits}")
+
+        now = _now_iso()
+        entitlement_update: TransactWriteItemTypeDef = {
+            "Update": {
+                "TableName": self.table_name,
+                "Key": _marshal({"PK": user_pk(user_id), "SK": ENTITLEMENT_SK}),
+                # No attribute_exists guard and if_not_exists on every counter:
+                # a paid-for top-up must land even if the ENTITLEMENT item is
+                # somehow missing. Dropping a purchase is worse than creating
+                # the row the signup trigger should already have made.
+                "UpdateExpression": (
+                    "SET available = if_not_exists(available, :zero) + :credits, "
+                    "frozen = if_not_exists(frozen, :zero), "
+                    "#plan = if_not_exists(#plan, :free), "
+                    "updated_at = :now"
+                ),
+                "ExpressionAttributeNames": dict(_PLAN_NAMES),
+                "ExpressionAttributeValues": _marshal(
+                    {":credits": credits, ":zero": 0, ":free": DEFAULT_PLAN, ":now": now}
+                ),
+            }
+        }
+
+        return self._run_billing_transaction(
+            user_id=user_id,
+            event_id=event_id,
+            operation="credit_pack",
+            entitlement_update=entitlement_update,
+            event_detail={"credits": credits},
+        )
+
+    def apply_subscription_update(
+        self,
+        user_id: str,
+        event_id: str,
+        *,
+        plan: str,
+        period_end: str | None = None,
+        credits: int = 0,
+        subscription_id: str | None = None,
+    ) -> BillingOperationResult:
+        """Set the plan, optionally grant the period's credits, record the sub.
+
+        Covers all three subscription transitions:
+
+        * first payment -- plan, period_end, credits and a SUB# item;
+        * renewal (``invoice.paid``) -- a later period_end plus fresh credits;
+        * cancellation -- ``plan="free"`` with ``credits=0``, which clears
+          period_end and deliberately leaves ``available`` alone. Credits
+          already paid for stay spendable.
+
+        Idempotent per ``event_id``, exactly as ``apply_stripe_credit``.
+        """
+        if credits < 0:
+            raise ValueError(f"subscription credits cannot be negative, got {credits}")
+
+        now = _now_iso()
+        set_clauses = [
+            "frozen = if_not_exists(frozen, :zero)",
+            "#plan = :plan",
+            "updated_at = :now",
+        ]
+        values: dict[str, Any] = {":zero": 0, ":plan": plan, ":now": now}
+
+        if credits:
+            set_clauses.insert(0, "available = if_not_exists(available, :zero) + :credits")
+            values[":credits"] = credits
+        else:
+            # Still guarantee the attribute exists, so a later freeze finds an
+            # integer rather than a missing field.
+            set_clauses.insert(0, "available = if_not_exists(available, :zero)")
+
+        remove_clause = ""
+        if period_end is not None:
+            set_clauses.append("period_end = :period_end")
+            values[":period_end"] = period_end
+        else:
+            # Cancellation: no period to be inside any more.
+            remove_clause = " REMOVE period_end"
+
+        entitlement_update: TransactWriteItemTypeDef = {
+            "Update": {
+                "TableName": self.table_name,
+                "Key": _marshal({"PK": user_pk(user_id), "SK": ENTITLEMENT_SK}),
+                "UpdateExpression": f"SET {', '.join(set_clauses)}{remove_clause}",
+                "ExpressionAttributeNames": dict(_PLAN_NAMES),
+                "ExpressionAttributeValues": _marshal(values),
+            }
+        }
+
+        extra: list[TransactWriteItemTypeDef] = []
+        if subscription_id:
+            # Unconditional put: a renewal overwrites the same key with a later
+            # period_end, and the EVENT marker already provides the replay
+            # guard, so a condition here would only add a second failure mode.
+            extra.append(
+                {
+                    "Put": {
+                        "TableName": self.table_name,
+                        "Item": _marshal(
+                            {
+                                "PK": user_pk(user_id),
+                                "SK": subscription_sk(subscription_id),
+                                "entity_type": "SUBSCRIPTION",
+                                "subscription_id": subscription_id,
+                                "plan": plan,
+                                "period_end": period_end,
+                                "updated_at": now,
+                            }
+                        ),
+                    }
+                }
+            )
+
+        return self._run_billing_transaction(
+            user_id=user_id,
+            event_id=event_id,
+            operation="subscription",
+            entitlement_update=entitlement_update,
+            event_detail={"plan": plan, "credits": credits},
+            extra_items=extra,
+        )
+
+    def _run_billing_transaction(
+        self,
+        *,
+        user_id: str,
+        event_id: str,
+        operation: str,
+        entitlement_update: TransactWriteItemTypeDef,
+        event_detail: dict[str, Any],
+        extra_items: list[TransactWriteItemTypeDef] | None = None,
+    ) -> BillingOperationResult:
+        """Apply an entitlement change exactly once per Stripe event."""
+        event_put: TransactWriteItemTypeDef = {
+            "Put": {
+                "TableName": self.table_name,
+                "Item": _marshal(
+                    {
+                        "PK": user_pk(user_id),
+                        "SK": event_sk(event_id),
+                        "entity_type": "STRIPE_EVENT",
+                        "event_id": event_id,
+                        "operation": operation,
+                        "processed_at": _now_iso(),
+                        # Reaped by DynamoDB's TTL; see EVENT_TTL_DAYS.
+                        "expires_at": _ttl_epoch(EVENT_TTL_DAYS),
+                        **event_detail,
+                    }
+                ),
+                "ConditionExpression": "attribute_not_exists(PK)",
+            }
+        }
+
+        # Order must match _ENTITLEMENT_ITEM / _EVENT_ITEM / _SUBSCRIPTION_ITEM.
+        items = [entitlement_update, event_put, *(extra_items or [])]
+
+        try:
+            self.client.transact_write_items(TransactItems=items)
+        except self.client.exceptions.TransactionCanceledException as exc:
+            reasons = _cancellation_reasons(exc)
+            if _condition_failed(reasons, _EVENT_ITEM):
+                # The only condition in this transaction, so a cancellation
+                # here means exactly one thing: Stripe redelivered an event
+                # already applied. Constraint 5's idempotency, and a silent
+                # success so Stripe stops retrying.
+                logger.info("stripe %s already applied event_id=%s", operation, event_id)
+                return BillingOperationResult(
+                    applied=False,
+                    entitlement=self._require_entitlement(user_id),
+                )
+            raise CreditLedgerError(f"stripe {operation} failed for event {event_id}") from exc
+
+        # No PII and no event payload: ids and the outcome only (constraint 7).
+        logger.info("stripe %s applied event_id=%s", operation, event_id)
+        return BillingOperationResult(
+            applied=True,
+            entitlement=self._require_entitlement(user_id),
+        )
 
     def _run_credit_transaction(
         self,
