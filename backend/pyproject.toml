@@ -18,6 +18,9 @@ dependencies = [
 api = [
     "fastapi>=0.115",
     "mangum>=0.17",
+    # API-only on purpose: shared/ never imports stripe, so the step Lambdas'
+    # layer stays vendor-free and db.py takes plain data (constraint 1).
+    "stripe>=11,<13",
 ]
 dev = [
     "pytest>=8.0",

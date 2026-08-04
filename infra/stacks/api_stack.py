@@ -51,11 +51,24 @@ class ApiStack(Stack):
             description="FastAPI application (Mangum) behind the HTTP API.",
         )
         # Narrower than grant_read_write_data, which would also hand over Scan,
-        # DeleteItem, BatchWriteItem and the stream actions. The API reads the
-        # entitlement, lazily creates it, and writes the PENDING job row;
-        # credit mutations belong to the step Lambdas (constraint 2), so no
-        # update or transaction action here.
-        table.grant(self.api_function, "dynamodb:GetItem", "dynamodb:PutItem")
+        # DeleteItem, BatchWriteItem and the stream actions.
+        #
+        # GetItem/PutItem cover reading the entitlement, lazily creating it, and
+        # writing the PENDING job row. UpdateItem is what the Stripe webhook
+        # needs: its TransactWriteItems carries an Update on the ENTITLEMENT
+        # item, and IAM authorises a transaction per item, not per call. Without
+        # it every paid webhook fails AccessDenied and grants nothing.
+        #
+        # Generation credits are still not mutated here -- freeze, commit and
+        # rollback stay in the step Lambdas (constraint 2). Billing is the one
+        # entitlement change that legitimately starts at the API, because only
+        # Stripe can say a payment happened.
+        table.grant(
+            self.api_function,
+            "dynamodb:GetItem",
+            "dynamodb:PutItem",
+            "dynamodb:UpdateItem",
+        )
 
         # Starting the pipeline is the API's only write to Step Functions
         # (constraint 2) -- it never describes or stops an execution.
@@ -105,9 +118,13 @@ class ApiStack(Stack):
             ),
         )
 
-        integration = integrations.HttpLambdaIntegration(
+        # Public so BillingStack can hang its own routes off the same Lambda
+        # without redefining the integration (which would create a second,
+        # identical permission and route target).
+        self.integration = integrations.HttpLambdaIntegration(
             "ApiIntegration", handler=self.api_function
         )
+        integration = self.integration
 
         # Preflight is answered by API Gateway before the authorizer runs, so
         # OPTIONS requests do not need credentials.

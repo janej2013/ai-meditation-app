@@ -52,6 +52,11 @@ class DataStack(Stack):
             point_in_time_recovery_specification=dynamodb.PointInTimeRecoverySpecification(
                 point_in_time_recovery_enabled=is_prod
             ),
+            # Only the Stripe EVENT# dedupe markers carry this attribute, so
+            # only they expire. Every other item type omits it and is kept
+            # indefinitely -- TTL deletes nothing it is not given a timestamp
+            # for. See shared/db.py EVENT_TTL_DAYS.
+            time_to_live_attribute="expires_at",
             removal_policy=removal_policy,
         )
 

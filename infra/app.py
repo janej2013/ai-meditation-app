@@ -17,6 +17,7 @@ import aws_cdk as cdk
 
 from stacks.api_stack import ApiStack
 from stacks.auth_stack import AuthStack
+from stacks.billing_stack import DEFAULT_STRIPE_SECRET_NAME, BillingStack
 from stacks.data_stack import DataStack
 from stacks.pipeline_stack import (
     DEFAULT_TTS_PROVIDER,
@@ -120,7 +121,7 @@ def main() -> None:
         description="Step Functions generation pipeline and its task Lambdas.",
     )
 
-    ApiStack(
+    api = ApiStack(
         app,
         f"Meditation-{env_name}-Api",
         env_name=env_name,
@@ -132,6 +133,22 @@ def main() -> None:
         state_machine=pipeline.state_machine,
         env=env,
         description="HTTP API with Cognito JWT authorizer and the FastAPI Lambda.",
+    )
+
+    # Deliberately last, and deliberately owns no Lambda: it adds routes to the
+    # API stack's existing integration. The direction of dependency is
+    # one-way -- see the cycle note in billing_stack.
+    BillingStack(
+        app,
+        f"Meditation-{env_name}-Billing",
+        http_api=api.http_api,
+        integration=api.integration,
+        api_function=api.api_function,
+        stripe_secret_name=(
+            app.node.try_get_context("stripe_secret_name") or DEFAULT_STRIPE_SECRET_NAME
+        ),
+        env=env,
+        description="Stripe secret wiring and the /billing routes.",
     )
 
     cdk.Tags.of(app).add("Project", "meditation")

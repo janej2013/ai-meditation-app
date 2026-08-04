@@ -6,3 +6,6 @@ pydantic>=2.7,<3
 # The Lambda base image ships a boto3, but pinning it here keeps the deployed
 # version reproducible instead of drifting with the base image.
 boto3>=1.34
+# Stripe Checkout + webhook signature verification. API-only on purpose:
+# shared/ must not import stripe (constraint 1 keeps db.py vendor-free).
+stripe>=11,<13
