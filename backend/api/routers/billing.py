@@ -207,7 +207,8 @@ def _handle_checkout_completed(store: Any, event_id: str, session: dict[str, Any
 
 def _handle_invoice_paid(store: Any, event_id: str, invoice: dict[str, Any]) -> str:
     """Renewal: push period_end out and grant the new period's credits."""
-    if not invoice.get("subscription"):
+    subscription_id = _subscription_id_from(invoice)
+    if not subscription_id:
         # A one-off payment also produces an invoice; checkout.session.completed
         # already granted it, so acting here would double-count.
         return "not-a-subscription"
@@ -241,7 +242,7 @@ def _handle_invoice_paid(store: Any, event_id: str, invoice: dict[str, Any]) -> 
         plan=product.plan,
         period_end=_period_end_from(invoice),
         credits=product.credits,
-        subscription_id=invoice.get("subscription"),
+        subscription_id=subscription_id,
     )
     return "renewed" if result.applied else "duplicate"
 
@@ -268,13 +269,38 @@ def _handle_subscription_deleted(store: Any, event_id: str, subscription: dict[s
 # ----------------------------------------------------------------------
 
 
+def _subscription_id_from(invoice: dict[str, Any]) -> str | None:
+    """The subscription an invoice belongs to, wherever this API version puts it.
+
+    Older API versions carry ``invoice.subscription``; 2025-03-31.basil moved
+    the reference under ``invoice.parent.subscription_details``. Reading both
+    matters because the single-location read fails *silently*: the handler
+    would take its not-a-subscription early return, answer 200, and every
+    renewal would stop granting.
+    """
+    parent_details = (invoice.get("parent") or {}).get("subscription_details") or {}
+    return invoice.get("subscription") or parent_details.get("subscription")
+
+
 def _user_from(obj: dict[str, Any]) -> str | None:
     """The Cognito sub, wherever this object type carries it.
 
-    Checkout sessions have ``client_reference_id``; subscriptions and their
-    invoices only have the metadata copy that ``subscription_data`` attached.
+    Checkout sessions carry ``client_reference_id``; subscriptions carry the
+    metadata copy that ``subscription_data`` attached. Invoices do NOT inherit
+    that copy into ``invoice.metadata`` -- depending on the API version it
+    surfaces at ``subscription_details.metadata`` (2022-11 onwards) or
+    ``parent.subscription_details.metadata`` (2025-03-31.basil) -- so every
+    known location is tried.
     """
-    user_id = obj.get("client_reference_id") or (obj.get("metadata") or {}).get("cognito_sub")
+    subscription_details = obj.get("subscription_details") or {}
+    parent_details = (obj.get("parent") or {}).get("subscription_details") or {}
+    candidates = (
+        obj.get("client_reference_id"),
+        (obj.get("metadata") or {}).get("cognito_sub"),
+        (subscription_details.get("metadata") or {}).get("cognito_sub"),
+        (parent_details.get("metadata") or {}).get("cognito_sub"),
+    )
+    user_id = next((candidate for candidate in candidates if candidate), None)
     if not user_id:
         # Nothing to attribute the payment to. Logged as an error because it
         # means a paying customer got nothing and needs manual repair.

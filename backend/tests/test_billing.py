@@ -369,6 +369,54 @@ def test_a_renewal_without_a_billing_reason_still_grants(client, dynamodb_client
     assert store.get_entitlement(USER_ID).available == 20
 
 
+def test_a_renewal_in_the_2025_api_shape_grants(client, dynamodb_client, store):
+    """2025-03-31.basil: no invoice.subscription and no invoice.metadata -- both
+    moved under invoice.parent.subscription_details. The old single-location
+    reads answered 200 and silently dropped every renewal on this shape."""
+    seed_entitlement(dynamodb_client, available=0)
+    invoice = {
+        "id": "in_test_modern",
+        "billing_reason": "subscription_cycle",
+        "parent": {
+            "type": "subscription_details",
+            "subscription_details": {
+                "subscription": SUBSCRIPTION,
+                "metadata": {"cognito_sub": USER_ID},
+            },
+        },
+        "lines": {
+            "data": [
+                {
+                    "price": {"id": "price_placeholder_plan_monthly"},
+                    "period": {"end": PERIOD_END_EPOCH},
+                }
+            ]
+        },
+    }
+    event = {"id": "evt_inv_2025", "type": "invoice.paid", "data": {"object": invoice}}
+
+    response = post_event(client, event)
+
+    assert response.status_code == 200
+    entitlement = store.get_entitlement(USER_ID)
+    assert entitlement.available == 20
+    assert entitlement.period_end is not None
+
+
+def test_a_renewal_with_metadata_on_subscription_details_grants(client, dynamodb_client, store):
+    """2022-11 onwards: invoice.metadata is the invoice's own (empty) metadata;
+    the subscription's copy sits at invoice.subscription_details.metadata."""
+    seed_entitlement(dynamodb_client, available=0)
+    event = invoice_event(event_id="evt_inv_subdetails")
+    invoice = event["data"]["object"]
+    invoice["metadata"] = {}
+    invoice["subscription_details"] = {"metadata": {"cognito_sub": USER_ID}}
+
+    post_event(client, event)
+
+    assert store.get_entitlement(USER_ID).available == 20
+
+
 # ----------------------------------------------------------------------
 # customer.subscription.deleted
 # ----------------------------------------------------------------------
@@ -536,6 +584,19 @@ def test_a_malformed_catalogue_falls_back_to_the_builtin(monkeypatch):
     monkeypatch.setenv(products.PRODUCTS_ENV_VAR, "{not json")
     products.reset_catalogue_cache()
 
+    assert products.by_key("pack_10") is not None
+
+
+def test_a_catalogue_entry_missing_a_price_id_falls_back(monkeypatch):
+    """Valid JSON with a broken entry gets the same treatment as invalid JSON --
+    not a KeyError turned 500 on the first request that touches the catalogue."""
+    monkeypatch.setenv(
+        products.PRODUCTS_ENV_VAR,
+        json.dumps({"pack_broken": {"kind": "credit_pack", "credits": 5}}),
+    )
+    products.reset_catalogue_cache()
+
+    assert products.by_key("pack_broken") is None
     assert products.by_key("pack_10") is not None
 
 

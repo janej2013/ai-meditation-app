@@ -89,16 +89,24 @@ def _load_catalogue() -> dict[str, Product]:
         )
         return {product.key: product for product in _DEFAULT_PRODUCTS}
 
-    return {
-        key: Product(
-            key=key,
-            price_id=entry["price_id"],
-            kind=entry.get("kind", "credit_pack"),
-            credits=int(entry.get("credits", 0)),
-            plan=entry.get("plan", "free"),
+    try:
+        return {
+            key: Product(
+                key=key,
+                price_id=entry["price_id"],
+                kind=entry.get("kind", "credit_pack"),
+                credits=int(entry.get("credits", 0)),
+                plan=entry.get("plan", "free"),
+            )
+            for key, entry in document.items()
+        }
+    except (KeyError, TypeError, ValueError):
+        # Same posture as invalid JSON: a malformed entry must not turn every
+        # request into a 500 at first catalogue access.
+        logger.error(
+            "%s has a malformed entry; falling back to the built-in catalogue", PRODUCTS_ENV_VAR
         )
-        for key, entry in document.items()
-    }
+        return {product.key: product for product in _DEFAULT_PRODUCTS}
 
 
 def catalogue() -> dict[str, Product]:

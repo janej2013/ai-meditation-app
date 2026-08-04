@@ -33,16 +33,23 @@ Deliberate deferrals, recorded so they read as decisions rather than oversights.
   moving while stacks are still being added. Planned for after milestone 5, by re-running
   `cdk bootstrap --cloudformation-execution-policies <scoped-policy-arn>`.
 
-- **The webhook reads two Stripe fields whose location has moved between API versions.**
-  `_handle_invoice_paid` looks for `invoice.subscription`, and `_period_end_from` for
-  `current_period_end`; newer API versions relocated both — the subscription reference off the
-  invoice root, and the period onto the subscription's line items. Under a version that has moved
-  them the handler takes its `not-a-subscription` early return, answers Stripe `200`, and **every
-  renewal silently stops granting credits**, leaving one INFO line behind. That is the worst shape
-  a billing bug can take: Stripe sees success so it never retries, and nothing alerts.
-  Not deferred so much as unverified — settle it against the API version the account is actually
-  pinned to before milestone 5 goes live. Drive a renewal through *Testing webhooks locally* below
-  and assert the entitlement moved; a `200` on its own proves nothing here.
+- **Webhook field locations are read defensively, but remain unverified against the account's
+  pinned API version.** Stripe has moved the invoice's subscription reference (root →
+  `parent.subscription_details.subscription` in 2025-03-31.basil) and the subscription-metadata
+  copy (`invoice.metadata` never had it; `subscription_details.metadata` from 2022-11, then under
+  `parent`). The handlers now read every known location, with tests for each shape — the failure
+  mode being guarded against is the worst a billing bug can take: a single-location read answers
+  Stripe `200` while **every renewal silently stops granting credits**, so Stripe never retries and
+  nothing alerts. What remains is empirical: drive a renewal through *Testing webhooks locally*
+  below against the account's real pinned version and assert the entitlement moved; a `200` on its
+  own proves nothing here.
+
+- **A first subscription payment leaves `period_end` unset until the first renewal.** Real
+  checkout sessions carry no `current_period_end`, and the opening invoice is deliberately skipped
+  (the session is what grants, see `_handle_invoice_paid`). Correctness is unaffected — credits and
+  plan land — but a "renews on …" display in milestone 6 would have nothing to show for the first
+  period. Either fetch the subscription once in the checkout handler, or accept the gap; decide
+  with the frontend.
 
 - **`GET /jobs/{id}` returns an S3 presigned URL, not the CloudFront signed URL constraint 6 asks
   for.** The distribution does not exist until milestone 6, and `api/routers/generate.py` carries a
