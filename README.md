@@ -9,8 +9,9 @@ Region `ap-southeast-2` (Sydney). See [CLAUDE.md](CLAUDE.md) for the full stack 
 
 ## Current status
 
-Milestone 4 complete: the generation pipeline runs end to end, narrated by
-Volcano Engine (Doubao) Seed-TTS with Polly as the fallback.
+Milestone 5 complete: the generation pipeline runs end to end, narrated by
+Volcano Engine (Doubao) Seed-TTS with Polly as the fallback, and credits can be
+bought through Stripe Checkout.
 
 | Milestone | Scope | Status |
 |---|---|---|
@@ -18,7 +19,7 @@ Volcano Engine (Doubao) Seed-TTS with Polly as the fallback.
 | 2 | `auth_stack` + `api_stack` | done |
 | 3 | `pipeline_stack` (Polly placeholder) | done |
 | 4 | Volcano TTS provider | done |
-| 5 | `billing_stack` (Stripe) | not started |
+| 5 | `billing_stack` (Stripe) | done |
 | 6 | `frontend_stack` + PWA | not started |
 
 ## Known gaps
@@ -31,6 +32,28 @@ Deliberate deferrals, recorded so they read as decisions rather than oversights.
   Cognito, API Gateway, Step Functions, Bedrock, Polly, Secrets Manager — and that list keeps
   moving while stacks are still being added. Planned for after milestone 5, by re-running
   `cdk bootstrap --cloudformation-execution-policies <scoped-policy-arn>`.
+
+- **The webhook reads two Stripe fields whose location has moved between API versions.**
+  `_handle_invoice_paid` looks for `invoice.subscription`, and `_period_end_from` for
+  `current_period_end`; newer API versions relocated both — the subscription reference off the
+  invoice root, and the period onto the subscription's line items. Under a version that has moved
+  them the handler takes its `not-a-subscription` early return, answers Stripe `200`, and **every
+  renewal silently stops granting credits**, leaving one INFO line behind. That is the worst shape
+  a billing bug can take: Stripe sees success so it never retries, and nothing alerts.
+  Not deferred so much as unverified — settle it against the API version the account is actually
+  pinned to before milestone 5 goes live. Drive a renewal through *Testing webhooks locally* below
+  and assert the entitlement moved; a `200` on its own proves nothing here.
+
+- **`GET /jobs/{id}` returns an S3 presigned URL, not the CloudFront signed URL constraint 6 asks
+  for.** The distribution does not exist until milestone 6, and `api/routers/generate.py` carries a
+  `TODO` marking the swap. Both things the constraint is really protecting already hold — the
+  bucket blocks all public access, and bytes never pass through Lambda — so what is missing is edge
+  delivery, not the security property. Two consequences to settle when the distribution lands:
+  narration is served from an S3 origin rather than the edge, and the browser mixing described
+  below needs the audio readable by `fetch` + `decodeAudioData`, which is same-origin through
+  CloudFront but a cross-origin request against S3. Serving narration from the same distribution as
+  the PWA closes both at once; keeping the presigned URL would mean adding a CORS configuration to
+  the bucket instead.
 
 ## Architecture — data layer
 
@@ -50,8 +73,10 @@ PK = USER#<cognito_sub>
 ```
 
 **S3 `AudioBucket`** — generated audio. All public access blocked, SSE-S3, TLS enforced, objects
-expire after 90 days. No CORS: delivery is via CloudFront signed URLs, so the bucket stays private
-and audio bytes never stream through Lambda.
+expire after 90 days. The bucket stays private and audio bytes never stream through Lambda:
+delivery is a signed URL, today an S3 presigned one and a CloudFront signed one once milestone 6
+builds the distribution (see *Known gaps*). No CORS configuration yet — nothing fetches these
+objects from a browser until that milestone.
 
 Both resources use `RemovalPolicy.DESTROY` in dev and `RETAIN` in prod, selected by the `env`
 context value. Stacks are named `Meditation-<env>-<Concern>` so dev and prod coexist in one account.
@@ -365,6 +390,111 @@ A cross-region profile needs `bedrock:InvokeModel` on **both** the profile ARN
 and the foundation-model ARN in every region the profile can route to; granting
 only the profile fails at runtime with an opaque `AccessDenied`.
 
+## Architecture — billing
+
+`infra/stacks/billing_stack.py` owns no Lambda and no HTTP API. It hangs two
+routes off the API stack's existing integration and grants that stack's
+function read access to the Stripe secret:
+
+| route | auth | why |
+|---|---|---|
+| `POST /billing/checkout` | Cognito JWT (the API's default authorizer) | a signed-in user starting a purchase |
+| `POST /billing/webhook` | **none** — `HttpNoneAuthorizer` | Stripe's servers cannot hold a Cognito token |
+
+Checkout is a **hosted Stripe page**. There is no custom payment UI anywhere in
+this project and card details never reach us — the endpoint creates a Checkout
+Session and returns its URL.
+
+The client names a **product key** (`pack_10`), never a price id. The catalogue
+in `backend/api/products.py` resolves the key to a Stripe price, so a client
+cannot name an arbitrary price and buy something the catalogue does not offer.
+Price ids are not secrets, so they live in code and can be overridden with the
+`STRIPE_PRODUCTS` env var once the real Stripe products exist.
+
+### The webhook is anonymous; the signature is the authentication
+
+Constraint 5: `stripe.Webhook.construct_event` verifies the raw body against
+the `Stripe-Signature` header **before any state change**, and a failure returns
+400 having written nothing. An attacker who POSTs without the signing secret can
+reach the Lambda but cannot move a credit — covered by tests that forge a
+signature, tamper with a signed body, and replay a stale timestamp.
+
+The handler is `async` because the signature is computed over the *raw* bytes:
+re-serialising a parsed payload would change them and break the MAC.
+
+### Idempotency
+
+Stripe retries any delivery that is not 2xx, so the same event arrives more than
+once. Each entitlement change is a single `TransactWriteItems` carrying:
+
+| index | item | role |
+|---|---|---|
+| 0 | `SK = ENTITLEMENT` | moves the balance / plan |
+| 1 | `SK = EVENT#<stripe_event_id>` | `attribute_not_exists(PK)` — **the dedupe guard** |
+| 2 | `SK = SUB#<subscription_id>` | subscription record (subscription events only) |
+
+A redelivered event finds the marker already written, the transaction cancels,
+and `applied=False` comes back as a **success** — the webhook returns 200 so
+Stripe stops retrying. This is the same shape as the freeze/commit/rollback
+transactions, with the event marker where the job status guard sits.
+
+Markers carry `expires_at` and the table's TTL reaps them after 30 days (Stripe
+retries for ~3). Only these items carry the attribute, so nothing else expires.
+
+| Stripe event | effect |
+|---|---|
+| `checkout.session.completed` | credit pack → `available += N`; subscription → set plan + `period_end`, grant the period, write `SUB#` |
+| `invoice.paid` | renewal → advance `period_end`, grant the new period |
+| `customer.subscription.deleted` | back to `free`, clear `period_end`, **leave `available` alone** — paid-for credits stay spendable |
+
+Anything else is logged and acknowledged with 200. An unknown price id is a
+`WARNING` and a 200, so Stripe stops retrying an event this deployment can never
+act on. Logs carry the event id, type and outcome — never the event body, which
+holds customer email and billing details (constraint 7).
+
+`stripe` is an **API-only dependency**. `shared/db.py` never imports it: the
+router pulls plain values out of the event and hands those over, so the step
+Lambdas' layer stays vendor-free.
+
+### Stripe credentials
+
+Create the secret by hand before deploying — CDK references it with
+`Secret.from_secret_name_v2` and deliberately does not generate it, because a
+generated value would land in the template and in `cdk diff` output
+(constraint 4):
+
+```bash
+aws secretsmanager create-secret \
+  --name meditation/stripe \
+  --region ap-southeast-2 \
+  --secret-string '{"secret_key":"sk_live_...","webhook_secret":"whsec_..."}'
+```
+
+Both fields are required — without `webhook_secret` the webhook cannot verify a
+signature, and constraint 5 forbids acting on an unverified event. Override the
+name with `-c stripe_secret_name=...`. Only `STRIPE_SECRET_ARN` is injected into
+the Lambda; the values are read through Secrets Manager once per container.
+
+### Testing webhooks locally
+
+The Stripe CLI forwards real events to a local server, so you can exercise the
+handler without deploying:
+
+```bash
+stripe login
+stripe listen --forward-to http://localhost:8000/billing/webhook
+# prints a whsec_... — put it in the local secret the app reads
+
+stripe trigger checkout.session.completed
+stripe trigger invoice.paid
+stripe trigger customer.subscription.deleted
+```
+
+`stripe listen` mints its **own** signing secret, distinct from the one in the
+dashboard for a deployed endpoint. Against the deployed API, register
+`<ApiUrl>/billing/webhook` in the Stripe dashboard and use the signing secret it
+issues there.
+
 ### Before deploying
 
 ```bash
@@ -450,7 +580,7 @@ pyproject.toml    ruff + pytest config for the whole repo
 infra/            CDK app, one stack per concern
   app.py          entry point; env selected via -c env=dev|prod
   stacks/         data_stack.py, auth_stack.py, api_stack.py,
-                  pipeline_stack.py (+ billing, frontend to come)
+                  pipeline_stack.py, billing_stack.py (+ frontend to come)
   tests/          CDK assertions; skipped when node is absent
 backend/
   pyproject.toml  installable packages: shared, api, functions.*
