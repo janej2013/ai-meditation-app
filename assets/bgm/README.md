@@ -15,7 +15,7 @@ is simply the narration with an inaudible bed.
 Drop licensed royalty-free MP3s in here and point `BGM_KEY` at one:
 
 ```bash
-cd infra && npx cdk deploy -c bgm_key=assets/bgm/<your-track>.mp3
+cd infra && npm run cdk -- deploy -c bgm_key=assets/bgm/<your-track>.mp3
 ```
 
 Requirements: MP3, 44.1 kHz, and long enough that looping isn't obvious —
