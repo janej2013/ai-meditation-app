@@ -17,6 +17,7 @@ from botocore.exceptions import ClientError
 from fastapi import APIRouter, HTTPException, status
 from pydantic import BaseModel, Field
 
+from api import cloudfront_signer
 from api.deps import CurrentUserDep, StoreDep
 from shared.models import JobStatus
 from shared.pipeline import MAX_DURATION_MINUTES, MIN_DURATION_MINUTES
@@ -25,10 +26,7 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["generate"])
 
-_PRESIGN_EXPIRY_SECONDS = 15 * 60
-
 _sfn: Any = None
-_s3: Any = None
 
 
 def _get_sfn() -> Any:
@@ -36,13 +34,6 @@ def _get_sfn() -> Any:
     if _sfn is None:
         _sfn = boto3.client("stepfunctions")
     return _sfn
-
-
-def _get_s3() -> Any:
-    global _s3
-    if _s3 is None:
-        _s3 = boto3.client("s3")
-    return _s3
 
 
 class GenerateRequest(BaseModel):
@@ -119,7 +110,7 @@ def get_job(job_id: str, user: CurrentUserDep, store: StoreDep) -> JobResponse:
 
     audio_url = None
     if job.status is JobStatus.DONE and job.audio_key:
-        audio_url = _presigned_url(job.audio_key)
+        audio_url = _audio_url(job.audio_key)
 
     return JobResponse(
         job_id=job.job_id,
@@ -149,15 +140,12 @@ def _reject_if_job_in_flight(frozen: int) -> None:
         )
 
 
-def _presigned_url(audio_key: str) -> str:
-    """Short-lived direct download.
+def _audio_url(audio_key: str) -> str:
+    """A short-lived CloudFront signed URL for the narration (constraint 6).
 
-    TODO(milestone 6): replace with a CloudFront signed URL once the
-    distribution exists (constraint 6). Presigning keeps the bucket private in
-    the meantime, but serves bytes from S3 rather than the edge.
+    Signing happens at the edge distribution, not on the bucket: the object is
+    served from CloudFront and the bucket stays reachable only through OAC.
+    Only ``jobs/*`` is signed -- the shared BGM under ``assets/*`` is public and
+    cached, so the player can switch tracks without a round trip here.
     """
-    return _get_s3().generate_presigned_url(
-        "get_object",
-        Params={"Bucket": os.environ["AUDIO_BUCKET"], "Key": audio_key},
-        ExpiresIn=_PRESIGN_EXPIRY_SECONDS,
-    )
+    return cloudfront_signer.signed_url(audio_key)
