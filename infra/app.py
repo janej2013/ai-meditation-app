@@ -15,10 +15,11 @@ import os
 
 import aws_cdk as cdk
 
-from stacks.api_stack import ApiStack
+from stacks.api_stack import DEFAULT_CLOUDFRONT_KEY_SECRET_NAME, ApiStack
 from stacks.auth_stack import AuthStack
 from stacks.billing_stack import DEFAULT_STRIPE_SECRET_NAME, BillingStack
 from stacks.data_stack import DataStack
+from stacks.frontend_stack import FrontendStack
 from stacks.pipeline_stack import (
     DEFAULT_TTS_PROVIDER,
     DEFAULT_VOLCANO_SECRET_NAME,
@@ -48,12 +49,16 @@ DEV_ORIGINS = ["http://localhost:5173"]  # Vite dev server
 DEFAULT_BEDROCK_MODEL_ID = "au.anthropic.claude-haiku-4-5-20251001-v1:0"
 
 
-def resolve_allowed_origins(app: cdk.App, env_name: str) -> list[str]:
+def resolve_allowed_origins(app: cdk.App, env_name: str, domain_name: str | None) -> list[str]:
     """CORS origins from context, with a dev-only default.
 
     Accepts either a JSON list in cdk.json or a comma-separated ``-c`` value.
     Prod must state its origins explicitly: silently falling back to localhost
     would ship a nonsense CORS policy to a real deployment.
+
+    A configured ``domain_name`` is folded in automatically -- the PWA is served
+    from there, so forgetting to list it would leave the app unable to call its
+    own API.
     """
     raw = app.node.try_get_context("allowed_origins")
     if isinstance(raw, str):
@@ -63,12 +68,16 @@ def resolve_allowed_origins(app: cdk.App, env_name: str) -> list[str]:
     else:
         origins = []
 
+    site_origin = f"https://{domain_name}" if domain_name else None
+    if site_origin and site_origin not in origins:
+        origins.append(site_origin)
+
     if origins:
         return origins
     if env_name == "prod":
         raise ValueError(
-            "context 'allowed_origins' is required for env=prod, e.g. "
-            "-c allowed_origins=https://app.example.com"
+            "context 'allowed_origins' is required for env=prod (or set "
+            "'domain_name'), e.g. -c allowed_origins=https://app.example.com"
         )
     return DEV_ORIGINS
 
@@ -80,7 +89,8 @@ def main() -> None:
     if env_name not in VALID_ENVS:
         raise ValueError(f"context 'env' must be one of {VALID_ENVS}, got {env_name!r}")
 
-    allowed_origins = resolve_allowed_origins(app, env_name)
+    domain_name = app.node.try_get_context("domain_name")
+    allowed_origins = resolve_allowed_origins(app, env_name, domain_name)
 
     env = cdk.Environment(
         account=os.environ.get("CDK_DEFAULT_ACCOUNT"),
@@ -121,6 +131,26 @@ def main() -> None:
         description="Step Functions generation pipeline and its task Lambdas.",
     )
 
+    # Before the API: the API needs the audio distribution's domain and key
+    # pair id to sign playback URLs. Nothing here points back at the API, so
+    # the graph stays acyclic.
+    #
+    # cross_region_references lets the ACM certificate live in us-east-1 (the
+    # only region CloudFront reads certificates from) while the distribution
+    # sits in ap-southeast-2.
+    frontend = FrontendStack(
+        app,
+        f"Meditation-{env_name}-Frontend",
+        env_name=env_name,
+        audio_bucket=data.audio_bucket,
+        audio_public_key_pem=app.node.try_get_context("audio_public_key_pem"),
+        domain_name=domain_name,
+        hosted_zone_id=app.node.try_get_context("hosted_zone_id"),
+        env=env,
+        cross_region_references=True,
+        description="CloudFront delivery for the PWA and for generated audio.",
+    )
+
     api = ApiStack(
         app,
         f"Meditation-{env_name}-Api",
@@ -131,6 +161,12 @@ def main() -> None:
         allowed_origins=allowed_origins,
         audio_bucket=data.audio_bucket,
         state_machine=pipeline.state_machine,
+        audio_domain_name=frontend.audio_distribution.distribution_domain_name,
+        cloudfront_key_pair_id=frontend.audio_key_pair_id,
+        cloudfront_key_secret_name=(
+            app.node.try_get_context("cloudfront_key_secret_name")
+            or DEFAULT_CLOUDFRONT_KEY_SECRET_NAME
+        ),
         env=env,
         description="HTTP API with Cognito JWT authorizer and the FastAPI Lambda.",
     )

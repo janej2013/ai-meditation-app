@@ -15,6 +15,7 @@ from aws_cdk import (
     Stack,
 )
 from aws_cdk import aws_dynamodb as dynamodb
+from aws_cdk import aws_iam as iam
 from aws_cdk import aws_s3 as s3
 from constructs import Construct
 
@@ -79,6 +80,30 @@ class DataStack(Stack):
             removal_policy=removal_policy,
             # Lets `cdk destroy` actually succeed in dev; never in prod.
             auto_delete_objects=not is_prod,
+        )
+
+        # Origin access for the CloudFront distribution that frontend_stack
+        # builds over this bucket (constraint 6).
+        #
+        # The condition names *any* distribution in this account rather than
+        # the specific one, and that is load bearing: the distribution has to
+        # read the bucket's regional domain name, so pinning its ARN here would
+        # make the two stacks reference each other and CDK would refuse to
+        # synthesise a dependency cycle. The grant is still narrow -- read-only,
+        # service principal cloudfront.amazonaws.com, and scoped to this
+        # account's distributions -- and the bucket stays fully private with no
+        # public access and no website endpoint.
+        self.audio_bucket.add_to_resource_policy(
+            iam.PolicyStatement(
+                actions=["s3:GetObject"],
+                resources=[self.audio_bucket.arn_for_objects("*")],
+                principals=[iam.ServicePrincipal("cloudfront.amazonaws.com")],
+                conditions={
+                    "StringLike": {
+                        "AWS:SourceArn": f"arn:aws:cloudfront::{self.account}:distribution/*"
+                    }
+                },
+            )
         )
 
         CfnOutput(

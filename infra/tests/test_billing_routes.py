@@ -67,6 +67,10 @@ def build() -> tuple[ApiStack, BillingStack]:
         allowed_origins=["http://localhost:5173"],
         audio_bucket=bucket,
         state_machine=machine,
+        # Milestone 6 wiring; fixed values keep this test independent of a
+        # FrontendStack instance.
+        audio_domain_name="d111111abcdef8.cloudfront.net",
+        cloudfront_key_pair_id="K2JCJMDEHXQW5F",
         env=env,
     )
     billing = BillingStack(
@@ -188,10 +192,11 @@ def test_the_api_lambda_may_read_the_stripe_secret(api_template):
         )
     ]
 
-    assert len(statements) == 1
-    assert DEFAULT_STRIPE_SECRET_NAME in str(statements[0]["Resource"])
-    # A wildcard here would hand over every secret in the account.
-    assert statements[0]["Resource"] != "*"
+    # Two named secrets since milestone 6: Stripe, and the CloudFront signing
+    # key. Each grant is scoped to its one secret; none is a wildcard.
+    stripe = [s for s in statements if DEFAULT_STRIPE_SECRET_NAME in str(s["Resource"])]
+    assert len(stripe) == 1
+    assert all(statement["Resource"] != "*" for statement in statements)
 
 
 def test_the_stripe_secret_value_never_reaches_a_template(api_template, billing_template):

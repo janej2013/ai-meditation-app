@@ -6,13 +6,18 @@ from aws_cdk import aws_apigatewayv2_authorizers as authorizers
 from aws_cdk import aws_apigatewayv2_integrations as integrations
 from aws_cdk import aws_cognito as cognito
 from aws_cdk import aws_dynamodb as dynamodb
-from aws_cdk import aws_iam as iam
 from aws_cdk import aws_lambda as lambda_
 from aws_cdk import aws_s3 as s3
+from aws_cdk import aws_secretsmanager as secretsmanager
 from aws_cdk import aws_stepfunctions as sfn
 from constructs import Construct
 
 from stacks.paths import BACKEND_DIR
+
+# Created by hand: the CloudFront URL-signing private key, whose public half
+# is registered on the audio distribution. Either a bare PEM or
+# {"private_key": "-----BEGIN..."} -- the signer accepts both.
+DEFAULT_CLOUDFRONT_KEY_SECRET_NAME = "meditation/cloudfront-signing-key"
 
 
 class ApiStack(Stack):
@@ -30,9 +35,18 @@ class ApiStack(Stack):
         allowed_origins: list[str],
         audio_bucket: s3.IBucket,
         state_machine: sfn.IStateMachine,
+        audio_domain_name: str,
+        cloudfront_key_pair_id: str,
+        cloudfront_key_secret_name: str = DEFAULT_CLOUDFRONT_KEY_SECRET_NAME,
         **kwargs,
     ) -> None:
         super().__init__(scope, construct_id, **kwargs)
+
+        # Referenced, never created: a generated secret would put the private
+        # key in the template and in `cdk diff` (constraint 4).
+        cloudfront_key_secret = secretsmanager.Secret.from_secret_name_v2(
+            self, "CloudFrontKeySecret", cloudfront_key_secret_name
+        )
 
         self.api_function = lambda_.DockerImageFunction(
             self,
@@ -47,6 +61,11 @@ class ApiStack(Stack):
                 "TABLE_NAME": table.table_name,
                 "AUDIO_BUCKET": audio_bucket.bucket_name,
                 "STATE_MACHINE_ARN": state_machine.state_machine_arn,
+                # Signing config for GET /jobs/{id}. The key pair id is public;
+                # only the ARN of the private key travels here (constraint 4).
+                "CLOUDFRONT_AUDIO_DOMAIN": audio_domain_name,
+                "CLOUDFRONT_KEY_PAIR_ID": cloudfront_key_pair_id,
+                "CLOUDFRONT_KEY_SECRET_ARN": cloudfront_key_secret.secret_arn,
             },
             description="FastAPI application (Mangum) behind the HTTP API.",
         )
@@ -74,15 +93,11 @@ class ApiStack(Stack):
         # (constraint 2) -- it never describes or stops an execution.
         state_machine.grant_start_execution(self.api_function)
 
-        # GET /jobs/{id} presigns a download. A presigned URL carries the
-        # signer's permissions, so the role needs read on generated audio --
-        # and nothing else in the bucket.
-        self.api_function.add_to_role_policy(
-            iam.PolicyStatement(
-                actions=["s3:GetObject"],
-                resources=[audio_bucket.arn_for_objects("jobs/*")],
-            )
-        )
+        # GET /jobs/{id} mints a CloudFront signed URL, so the Lambda needs the
+        # signing key -- and no longer needs s3:GetObject at all. Bytes are
+        # served from the edge, and the bucket is reachable only through OAC
+        # (constraint 6).
+        cloudfront_key_secret.grant_read(self.api_function)
 
         # The authorizer validates signature, issuer, audience and expiry before
         # the Lambda is invoked, so the app only reads claims.
