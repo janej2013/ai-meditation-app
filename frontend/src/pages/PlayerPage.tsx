@@ -4,7 +4,8 @@
  * all without touching the narration source, per CLAUDE.md.
  */
 import { useEffect, useRef, useState } from 'react'
-import { useLocation, useNavigate } from 'react-router-dom'
+import { useLocation, useNavigate, useParams } from 'react-router-dom'
+import { NotSignedInError, getJob } from '../api/client'
 import { BGM_TRACKS, DEFAULT_BGM_VOLUME, DualTrackMixer, bgmUrl } from '../audio/mixer'
 
 function fmt(s: number): string {
@@ -16,7 +17,12 @@ function fmt(s: number): string {
 export default function PlayerPage() {
   const navigate = useNavigate()
   const location = useLocation()
-  const audioUrl = (location.state as { audioUrl?: string } | null)?.audioUrl
+  const { jobId } = useParams<{ jobId: string }>()
+  // The handoff from GeneratingPage, when there was one. It does not survive a
+  // reload, and its signature expires in 15 minutes -- so it is an
+  // optimisation, and the job id in the path is what actually addresses the
+  // session.
+  const handoffUrl = (location.state as { audioUrl?: string } | null)?.audioUrl
 
   // The mixer lives in a ref and is only ever touched from effects and event
   // handlers -- never during render, which the react-hooks rules (correctly)
@@ -33,16 +39,37 @@ export default function PlayerPage() {
 
   // Load both tracks, then wait for the listener to press play.
   useEffect(() => {
-    if (!audioUrl) {
+    if (!jobId) {
       navigate('/', { replace: true })
       return
     }
     const mixer = new DualTrackMixer()
     mixerRef.current = mixer
     let cancelled = false
+
+    /** A signature minted just now, for a job that is already DONE. */
+    const freshNarrationUrl = async (): Promise<string> => {
+      const job = await getJob(jobId)
+      if (!job.audio_url) throw new Error(`job ${jobId} has no audio`)
+      return job.audio_url
+    }
+
+    const loadNarration = async (): Promise<void> => {
+      if (handoffUrl) {
+        try {
+          await mixer.loadNarration(handoffUrl)
+          return
+        } catch {
+          // Expired while the tab sat idle, most likely. Fall through and ask
+          // the API to sign a new one rather than stranding a paid session.
+        }
+      }
+      await mixer.loadNarration(await freshNarrationUrl())
+    }
+
     void (async () => {
       try {
-        await mixer.loadNarration(audioUrl)
+        await loadNarration()
         const initial = BGM_TRACKS.find((t) => t.id === trackId) ?? BGM_TRACKS[0]
         const url = bgmUrl(initial)
         if (url) await mixer.loadBgm(url)
@@ -50,9 +77,12 @@ export default function PlayerPage() {
           setDuration(mixer.duration())
           setReady(true)
         }
-      } catch {
-        // Typical cause: the signed URL expired while the tab was idle.
-        if (!cancelled) setFailed(true)
+      } catch (e) {
+        if (cancelled) return
+        // A dead session token is not a dead session; send them to sign in
+        // rather than telling them the recording is gone.
+        if (e instanceof NotSignedInError) navigate('/signup', { replace: true })
+        else setFailed(true)
       }
     })()
     mixer.onEnded = () => setPlaying(false)
@@ -62,7 +92,7 @@ export default function PlayerPage() {
       mixerRef.current = null
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps -- mount-only load
-  }, [audioUrl])
+  }, [jobId])
 
   useEffect(() => {
     const t = setInterval(() => setElapsed(mixerRef.current?.elapsed() ?? 0), 500)
@@ -105,8 +135,10 @@ export default function PlayerPage() {
   if (failed) {
     return (
       <div className="screen">
+        {/* No longer "the link expired" -- an expired signature is refreshed
+            above. Reaching here means the session itself is unavailable. */}
         <div style={{ marginTop: 120, textAlign: 'center', color: 'var(--text-secondary)' }}>
-          This session link has expired.
+          This session could not be loaded.
         </div>
         <div style={{ marginTop: 'auto', paddingBottom: 34 }}>
           <button
