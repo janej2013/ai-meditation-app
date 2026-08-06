@@ -22,6 +22,12 @@ layers/ffmpeg/bin/*
 # Audio written by scripts/tts_preview.py while tuning the voice by ear.
 tts-preview/
 
+# Playwright: browsers live in a user cache, these are per-run artefacts.
+# .auth holds a captured Cognito session -- real tokens for a real account.
+frontend/playwright-report/
+frontend/test-results/
+frontend/e2e/.auth/
+
 # CDK
 cdk.out/
 .cdk.staging/
