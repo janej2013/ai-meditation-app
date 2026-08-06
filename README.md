@@ -9,9 +9,9 @@ Region `ap-southeast-2` (Sydney). See [CLAUDE.md](CLAUDE.md) for the full stack 
 
 ## Current status
 
-Milestone 5 complete: the generation pipeline runs end to end, narrated by
-Volcano Engine (Doubao) Seed-TTS with Polly as the fallback, and credits can be
-bought through Stripe Checkout.
+All six milestones complete: signup to playback runs end to end — Cognito
+auth, Bedrock scripts, Volcano/Polly narration, Stripe billing, and a React
+PWA that mixes background music in the browser.
 
 | Milestone | Scope | Status |
 |---|---|---|
@@ -20,7 +20,7 @@ bought through Stripe Checkout.
 | 3 | `pipeline_stack` (Polly placeholder) | done |
 | 4 | Volcano TTS provider | done |
 | 5 | `billing_stack` (Stripe) | done |
-| 6 | `frontend_stack` + PWA | not started |
+| 6 | `frontend_stack` + PWA | done |
 
 ## Known gaps
 
@@ -51,16 +51,25 @@ Deliberate deferrals, recorded so they read as decisions rather than oversights.
   period. Either fetch the subscription once in the checkout handler, or accept the gap; decide
   with the frontend.
 
-- **`GET /jobs/{id}` returns an S3 presigned URL, not the CloudFront signed URL constraint 6 asks
-  for.** The distribution does not exist until milestone 6, and `api/routers/generate.py` carries a
-  `TODO` marking the swap. Both things the constraint is really protecting already hold — the
-  bucket blocks all public access, and bytes never pass through Lambda — so what is missing is edge
-  delivery, not the security property. Two consequences to settle when the distribution lands:
-  narration is served from an S3 origin rather than the edge, and the browser mixing described
-  below needs the audio readable by `fetch` + `decodeAudioData`, which is same-origin through
-  CloudFront but a cross-origin request against S3. Serving narration from the same distribution as
-  the PWA closes both at once; keeping the presigned URL would mean adding a CORS configuration to
-  the bucket instead.
+- **The audio bucket grants read to *any* CloudFront distribution in the account, not just its
+  own.** Compare the two policies a deploy writes: `SiteBucket` gets `StringEquals` on
+  `distribution/${SiteDistribution}`, while `AudioBucket` gets `StringLike` on `distribution/*`.
+  The asymmetry is structural, not sloppiness — the audio bucket belongs to the data stack, so the
+  frontend stack can only import it, and handing the real construct to `S3BucketOrigin` would make
+  CDK write a distribution-specific policy into a stack the distribution already reads from. CDK
+  rejects that cycle, so the grant is written in `data_stack` against a distribution ARN it cannot
+  know. The `Cannot update bucket policy of an imported bucket` warning on every synth is this.
+
+  What it costs: anyone who can create a CloudFront distribution in this account can point one at
+  the audio bucket and read `jobs/*` without a signature. That needs CloudFront-create permission
+  already, so it is not an external exposure — but it does mean the signed-URL requirement rests on
+  the distribution's key group alone, with no second line behind it. **It compounds with deploying
+  without `-c audio_public_key_pem`**: no key group means `jobs/*` is already unsigned on the
+  intended distribution, and this policy means a second one would work too.
+
+  Closing it properly means co-locating the bucket and its distribution in one stack, which trades
+  the wildcard for a weaker separation of concerns. Worth revisiting if the audio bucket ever holds
+  anything a leak would be expensive.
 
 ## Architecture — data layer
 
@@ -81,9 +90,9 @@ PK = USER#<cognito_sub>
 
 **S3 `AudioBucket`** — generated audio. All public access blocked, SSE-S3, TLS enforced, objects
 expire after 90 days. The bucket stays private and audio bytes never stream through Lambda:
-delivery is a signed URL, today an S3 presigned one and a CloudFront signed one once milestone 6
-builds the distribution (see *Known gaps*). No CORS configuration yet — nothing fetches these
-objects from a browser until that milestone.
+delivery is a CloudFront signed URL for `jobs/*` and plain cached CloudFront objects for
+`assets/*` — see *frontend delivery* below. CORS lives on the distribution's response headers
+policy, not the bucket.
 
 Both resources use `RemovalPolicy.DESTROY` in dev and `RETAIN` in prod, selected by the `env`
 context value. Stacks are named `Meditation-<env>-<Concern>` so dev and prod coexist in one account.
@@ -255,7 +264,7 @@ reason. Handlers log lengths and ids, never content.
 Falling back is a context change, not a code change:
 
 ```bash
-cd infra && npx cdk deploy -c tts_provider=polly
+cd infra && npm run cdk -- deploy -c tts_provider=polly
 ```
 
 Both providers keep their IAM grants in either configuration, so switching back
@@ -390,7 +399,7 @@ confirm yours and override if it differs:
 
 ```bash
 aws bedrock list-inference-profiles --region ap-southeast-2
-cd infra && npx cdk synth -c bedrock_model_id=<your-profile-id>
+cd infra && npm run synth -- -c bedrock_model_id=<your-profile-id>
 ```
 
 A cross-region profile needs `bedrock:InvokeModel` on **both** the profile ARN
@@ -513,6 +522,87 @@ The layer directories are gitignored. `cdk synth` succeeds without the shared
 layer and emits a warning; a deploy without it would fail at runtime. The ffmpeg
 layer is not deployed — see [layers/README.md](layers/README.md) for its source.
 
+## Architecture — frontend delivery and the PWA
+
+`infra/stacks/frontend_stack.py` owns what the browser fetches directly:
+
+**The site.** A private S3 bucket (all public access blocked, no website
+endpoint) behind CloudFront with OAC. SPA routing maps 403 *and* 404 to
+`/index.html` — 403 matters because OAC deliberately withholds `ListBucket`,
+so S3 answers missing keys with AccessDenied. A custom domain is optional
+context (`-c domain_name=... -c hosted_zone_id=...`); the ACM certificate is
+created in us-east-1 via `cross_region_references=True`, and without a domain
+the stack serves on the CloudFront default domain so synth never needs a real
+hosted zone.
+
+**Audio (constraint 6).** One distribution over the audio bucket, two
+behaviours with opposite rules:
+
+| path | access | why |
+|---|---|---|
+| `jobs/*` | **signed URL** (trusted key group) | one user's narration |
+| `assets/*` | public, cached | shared BGM — the player switches tracks mid-session without a round trip |
+
+`GET /jobs/{id}` now mints CloudFront signed URLs (`api/cloudfront_signer.py`,
+RSA-SHA1 canned policy, 15-minute expiry) instead of S3 presigning; the API
+Lambda's `s3:GetObject` grant is gone. The signing key pair is operator-made:
+
+```bash
+openssl genrsa -out cf-signing.pem 2048
+openssl rsa -in cf-signing.pem -pubout -out cf-signing.pub.pem
+
+aws secretsmanager create-secret --name meditation/cloudfront-signing-key   --region ap-southeast-2 --secret-string file://cf-signing.pem
+
+cd infra && npm run cdk -- deploy -c audio_public_key_pem="$(cat ../cf-signing.pub.pem)"
+```
+
+Only the private key's ARN reaches the Lambda; the public half becomes a
+CloudFront `PublicKey` + `KeyGroup`. Without the context value the stack still
+synthesises — `jobs/*` simply has no key group until the key is wired.
+
+**One CDK trap, documented in `data_stack.py`:** the OAC bucket policy must
+live in the *data* stack and name `distribution/*` rather than the specific
+distribution ARN — pinning it would make Data and Frontend reference each
+other, which CDK rejects as a cycle.
+
+### The PWA (`frontend/`)
+
+React + Vite + TypeScript; pages/components/api/auth/audio split. Visuals and
+flow follow the Claude Design prototype (warm dark oklch palette, DM Sans/DM
+Mono — see `src/styles/tokens.css`).
+
+- **Auth**: `amazon-cognito-identity-js` (SRP; no Amplify). Sign-up with the
+  emailed six-digit code, sign-in, sign-out. Every API call carries the **ID
+  token** — the authorizer checks `aud` and the backend enforces
+  `token_use=id`, so the access token would 401. `getSession()` refreshes
+  expired tokens from the stored refresh token transparently.
+- **Flow**: home (mood + duration → `POST /generate`; 402 routes to plans,
+  429 shows "already in progress") → generating (poll `GET /jobs/{id}`,
+  2s→10s backoff, 10-minute cap matching the state machine timeout) → player
+  on DONE / refund screen on FAILED.
+- **Playback**: Web Audio dual-track mix (`src/audio/mixer.ts`) — narration
+  through one GainNode, looped BGM through another at 20%. Switching BGM
+  replaces only the BGM source; the narration never stops. Both fetches are
+  CORS (`mode: 'cors'`), which the audio distribution's response headers
+  policy exists to satisfy.
+- **Billing**: plans page → `POST /billing/checkout` → redirect to the
+  Stripe-hosted page. `/billing/success` lands on the account page and
+  re-fetches the balance.
+- **PWA**: manifest + `vite-plugin-pwa`. Precache: app shell; CacheFirst:
+  `assets/bgm/*` (immutable, small). **NetworkOnly, deliberately**: all API
+  paths and `jobs/*` — signed URLs expire and credit/job state must be live,
+  so caching either would serve dead links or stale balances.
+
+```bash
+cd frontend
+cp .env.example .env.local   # fill from cdk-outputs.json
+npm install
+npm run dev                  # or: test / lint / format:check / build
+```
+
+Deploying the built app is `aws s3 sync dist/ s3://<SiteBucketName>` plus a
+CloudFront invalidation — both human-run, like every deploy in this repo.
+
 ## Local setup
 
 **Run every command from WSL (Ubuntu), never from Windows PowerShell or cmd.**
@@ -540,9 +630,9 @@ source ~/.venvs/meditation/bin/activate
 
 ruff check . && ruff format --check .   # lint/format
 pytest                                  # backend/tests + infra/tests
-cd infra && npx cdk synth               # dev (default)
-cd infra && npx cdk synth -c env=prod -c allowed_origins=https://app.example.com
-cd infra && npx cdk diff
+cd infra && npm run synth                       # dev (default)
+cd infra && npm run synth -- -c env=prod -c allowed_origins=https://app.example.com
+cd infra && npm run diff
 ```
 
 `allowed_origins` is required for `env=prod` and synth fails without it — falling back to a
@@ -552,7 +642,7 @@ localhost CORS origin in a real deployment would be worse than a loud error. Dev
 ### Calling the deployed API
 
 ```bash
-cd infra && npx cdk deploy --all --outputs-file ../cdk-outputs.json   # human-only
+cd infra && npm run cdk -- deploy --all --outputs-file ../cdk-outputs.json   # human-only
 
 export API_URL=$(python -c "import json;d=json.load(open('cdk-outputs.json'));\
 print(next(v['ApiUrl'] for v in d.values() if 'ApiUrl' in v))")
@@ -587,7 +677,7 @@ pyproject.toml    ruff + pytest config for the whole repo
 infra/            CDK app, one stack per concern
   app.py          entry point; env selected via -c env=dev|prod
   stacks/         data_stack.py, auth_stack.py, api_stack.py,
-                  pipeline_stack.py, billing_stack.py (+ frontend to come)
+                  pipeline_stack.py, billing_stack.py, frontend_stack.py
   tests/          CDK assertions; skipped when node is absent
 backend/
   pyproject.toml  installable packages: shared, api, functions.*

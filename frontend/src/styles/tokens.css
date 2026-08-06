@@ -1,0 +1,59 @@
+/* Design tokens, lifted from the Claude Design prototype
+   (Meditation PWA Prototype.dc.html). The palette is a warm dark scheme in
+   oklch; keep edits in sync with the prototype rather than inventing values. */
+
+:root {
+  /* Surfaces */
+  --bg-page: oklch(0.16 0.01 60);
+  --bg-shell: oklch(0.245 0.012 60);
+  --bg-raised: oklch(0.29 0.012 60);
+  --bg-chip: oklch(0.3 0.012 60);
+  --bg-chip-hover: oklch(0.34 0.012 60);
+  --bg-selected: oklch(0.32 0.014 60);
+
+  /* Text */
+  --text-primary: oklch(0.94 0.008 80);
+  --text-secondary: oklch(0.78 0.01 60);
+  --text-muted: oklch(0.66 0.01 60);
+  --text-faint: oklch(0.62 0.01 60);
+  --text-disabled: oklch(0.52 0.01 60);
+
+  /* Accent — the warm amber the prototype uses everywhere */
+  --accent: oklch(0.78 0.05 70);
+  --accent-bright: oklch(0.84 0.05 70);
+  --accent-text: oklch(0.86 0.04 70);
+  --accent-soft-06: oklch(0.78 0.05 70 / 0.06);
+  --accent-soft-10: oklch(0.78 0.05 70 / 0.1);
+  --accent-soft-22: oklch(0.78 0.05 70 / 0.22);
+
+  /* Action buttons */
+  --btn-primary-bg: oklch(0.94 0.008 80);
+  --btn-primary-bg-hover: oklch(0.98 0.008 80);
+  --btn-primary-fg: oklch(0.22 0.012 60);
+  --btn-disabled-bg: oklch(0.32 0.012 60);
+
+  /* Lines & errors */
+  --border-subtle: oklch(0.32 0.012 60);
+  --error: oklch(0.8 0.06 40);
+
+  /* Radial washes behind the generating / player / plans screens */
+  --wash-top: radial-gradient(
+    120% 60% at 50% 26%,
+    oklch(0.33 0.03 70) 0%,
+    oklch(0.245 0.012 60) 62%
+  );
+  --wash-bottom: radial-gradient(
+    110% 58% at 50% 82%,
+    oklch(0.32 0.03 70) 0%,
+    oklch(0.245 0.012 60) 60%
+  );
+  --wash-plans: radial-gradient(
+    120% 55% at 50% 20%,
+    oklch(0.31 0.026 70) 0%,
+    oklch(0.245 0.012 60) 62%
+  );
+
+  /* Type */
+  --font-sans: 'DM Sans', system-ui, sans-serif;
+  --font-mono: 'DM Mono', ui-monospace, monospace;
+}

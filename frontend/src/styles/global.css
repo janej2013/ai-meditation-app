@@ -1,0 +1,143 @@
+@import './tokens.css';
+
+body {
+  margin: 0;
+  background: var(--bg-page);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+  color: var(--text-primary);
+}
+
+a {
+  color: var(--accent-bright);
+}
+a:hover {
+  color: oklch(0.9 0.04 70);
+}
+
+input,
+button {
+  font-family: inherit;
+}
+input::placeholder {
+  color: var(--text-disabled);
+}
+
+/* The breathing circle on the generating screen (from the prototype). */
+@keyframes breathe10 {
+  0% {
+    transform: scale(0.84);
+    opacity: 0.45;
+  }
+  40% {
+    transform: scale(1.2);
+    opacity: 1;
+  }
+  100% {
+    transform: scale(0.84);
+    opacity: 0.45;
+  }
+}
+
+/* App shell: the prototype frames everything as a phone; on a real device the
+   shell is simply the viewport. */
+.shell {
+  min-height: 100dvh;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-shell);
+  max-width: 480px;
+  margin: 0 auto;
+}
+
+.screen {
+  flex: 1;
+  padding: 0 30px;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+/* Shared primitives, matching the prototype's inline styles. */
+.btn-primary {
+  height: 64px;
+  border: none;
+  border-radius: 32px;
+  background: var(--btn-primary-bg);
+  font-size: 17px;
+  font-weight: 500;
+  letter-spacing: 0.01em;
+  color: var(--btn-primary-fg);
+  cursor: pointer;
+}
+.btn-primary:hover {
+  background: var(--btn-primary-bg-hover);
+}
+.btn-primary:active {
+  transform: scale(0.985);
+}
+.btn-primary:disabled {
+  background: var(--btn-disabled-bg);
+  color: var(--text-faint);
+  cursor: default;
+}
+
+.btn-accent {
+  height: 64px;
+  border: none;
+  border-radius: 32px;
+  background: var(--accent);
+  font-size: 17px;
+  font-weight: 500;
+  color: var(--btn-primary-fg);
+  cursor: pointer;
+}
+.btn-accent:hover {
+  background: var(--accent-bright);
+}
+
+.btn-ghost {
+  background: none;
+  border: none;
+  font-size: 13px;
+  font-weight: 400;
+  color: oklch(0.7 0.01 60);
+  cursor: pointer;
+}
+
+.btn-back {
+  background: none;
+  border: none;
+  padding: 0;
+  font-size: 13px;
+  font-weight: 400;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+.btn-back:hover {
+  color: oklch(0.92 0.008 80);
+}
+
+.text-input {
+  width: 100%;
+  box-sizing: border-box;
+  background: var(--bg-raised);
+  border: none;
+  border-radius: 16px;
+  padding: 18px;
+  font-size: 16px;
+  font-weight: 300;
+  color: var(--text-primary);
+  outline: none;
+}
+
+.label-mono {
+  font: 500 10px var(--font-mono);
+  letter-spacing: 0.14em;
+  color: var(--text-faint);
+}
+
+.error-text {
+  font: 400 12.5px var(--font-sans);
+  color: var(--error);
+}

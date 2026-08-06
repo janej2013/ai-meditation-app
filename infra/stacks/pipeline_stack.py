@@ -180,6 +180,16 @@ class PipelineStack(Stack):
             value=self.state_machine.state_machine_arn,
             description="Generation pipeline state machine ARN.",
         )
+        # The PWA polls until a job is terminal and needs the same deadline, or
+        # it reports a failure for an execution that is still running -- and
+        # bills the credit for it. Published rather than duplicated so raising
+        # EXECUTION_TIMEOUT cannot leave the client behind again.
+        CfnOutput(
+            self,
+            "JobTimeoutMs",
+            value=str(EXECUTION_TIMEOUT.to_milliseconds()),
+            description="Execution timeout in ms; the PWA's VITE_JOB_TIMEOUT_MS.",
+        )
 
     # ------------------------------------------------------------------
     # Lambdas

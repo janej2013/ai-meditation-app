@@ -253,7 +253,10 @@ def test_job_status_while_running(client, dynamodb_client, store, sfn_client):
     assert response.json() == {"job_id": job_id, "status": "FROZEN", "audio_url": None}
 
 
-def test_done_job_returns_a_presigned_url(client, dynamodb_client, store, sfn_client, monkeypatch):
+def test_done_job_returns_a_cloudfront_signed_url(
+    client, dynamodb_client, store, sfn_client, monkeypatch
+):
+    """Constraint 6: the URL comes from the CloudFront signer, not S3 presign."""
     from api.routers import generate as generate_router
 
     seed_entitlement(dynamodb_client, available=1)
@@ -262,15 +265,15 @@ def test_done_job_returns_a_presigned_url(client, dynamodb_client, store, sfn_cl
     store.set_job_audio_key(USER_ID, job_id, f"jobs/{job_id}/final.mp3")
     store.commit_credit(USER_ID, job_id)
 
-    s3 = MagicMock()
-    s3.generate_presigned_url.return_value = "https://signed.example/final.mp3"
-    monkeypatch.setattr(generate_router, "_get_s3", lambda: s3)
+    signer = MagicMock()
+    signer.signed_url.return_value = "https://audio.example/jobs/x/final.mp3?Signature=abc"
+    monkeypatch.setattr(generate_router, "cloudfront_signer", signer)
 
     response = client.get(f"/jobs/{job_id}")
 
     assert response.json()["status"] == "DONE"
-    assert response.json()["audio_url"] == "https://signed.example/final.mp3"
-    assert s3.generate_presigned_url.call_args.kwargs["ExpiresIn"] == 900
+    assert response.json()["audio_url"] == signer.signed_url.return_value
+    signer.signed_url.assert_called_once_with(f"jobs/{job_id}/final.mp3")
 
 
 def test_rolled_back_job_is_reported_as_failed(client, dynamodb_client, store, sfn_client):

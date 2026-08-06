@@ -21,6 +21,8 @@ api = [
     # API-only on purpose: shared/ never imports stripe, so the step Lambdas'
     # layer stays vendor-free and db.py takes plain data (constraint 1).
     "stripe>=11,<13",
+    # CloudFront signed URLs; botocore has the signer, not the crypto.
+    "cryptography>=42",
 ]
 dev = [
     "pytest>=8.0",
