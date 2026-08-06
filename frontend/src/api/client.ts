@@ -107,11 +107,28 @@ export function createCheckout(productKey: string): Promise<CheckoutResponse> {
 }
 
 /**
+ * The state machine's own execution timeout, published by the Pipeline stack
+ * as `JobTimeoutMs`. Polling for less than this reports a failure for an
+ * execution that is still running -- and that execution goes on to commit the
+ * credit, so the caller is billed for a generation they were told failed, and
+ * `frozen >= 1` blocks them from retrying until it finishes.
+ *
+ * The fallback is the CDK default, and deliberately errs long: waiting too
+ * long costs a spinner, waiting too little costs a credit.
+ */
+const DEFAULT_JOB_TIMEOUT_MS = 30 * 60 * 1000
+
+function jobTimeoutMs(): number {
+  const configured = Number(import.meta.env.VITE_JOB_TIMEOUT_MS)
+  return Number.isFinite(configured) && configured > 0 ? configured : DEFAULT_JOB_TIMEOUT_MS
+}
+
+/**
  * Poll a job until it leaves the pipeline.
  *
  * The interval starts short (the whole pipeline often finishes inside a
- * minute) and backs off; the deadline matches the state machine's own
- * 10-minute execution timeout, after which the job cannot still be running.
+ * minute) and backs off; the deadline comes from the state machine, so a job
+ * is only ever declared timed out once it truly cannot still be running.
  */
 export async function pollJob(
   jobId: string,
@@ -128,7 +145,7 @@ export async function pollJob(
     signal,
     initialIntervalMs = 2000,
     maxIntervalMs = 10000,
-    timeoutMs = 10 * 60 * 1000,
+    timeoutMs = jobTimeoutMs(),
   } = opts
 
   const deadline = Date.now() + timeoutMs

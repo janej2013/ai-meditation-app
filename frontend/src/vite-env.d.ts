@@ -9,6 +9,8 @@ interface ImportMetaEnv {
   readonly VITE_COGNITO_CLIENT_ID: string
   /** CloudFront domain serving jobs/* (signed) and assets/* (BGM). */
   readonly VITE_AUDIO_DOMAIN: string
+  /** Pipeline execution timeout in ms, from the Pipeline stack's JobTimeoutMs. */
+  readonly VITE_JOB_TIMEOUT_MS: string
 }
 
 interface ImportMeta {

@@ -122,3 +122,58 @@ describe('pollJob', () => {
     await expect(pending).rejects.toHaveProperty('name', 'AbortError')
   })
 })
+
+describe('poll deadline', () => {
+  /**
+   * Polling for less than the state machine's execution timeout reports a
+   * failure for a job that is still running, and that job goes on to commit
+   * the credit. The deadline therefore comes from the Pipeline stack rather
+   * than a constant that has to be kept in step by hand.
+   *
+   * Each call needs its own Response: a body can only be read once, and this
+   * loop reads several.
+   */
+  function stillGenerating(): void {
+    vi.mocked(fetch).mockImplementation(() =>
+      Promise.resolve(jsonResponse(200, { job_id: 'j1', status: 'GENERATING' })),
+    )
+  }
+
+  async function pendingAfter(ms: number): Promise<unknown> {
+    const promise = pollJob('j1').catch((e: unknown) => e)
+    await vi.advanceTimersByTimeAsync(ms)
+    return Promise.race([promise, Promise.resolve('pending')])
+  }
+
+  beforeEach(() => {
+    vi.useFakeTimers()
+    stillGenerating()
+  })
+
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  it('keeps polling past the ten minutes it used to give up at', async () => {
+    vi.stubEnv('VITE_JOB_TIMEOUT_MS', '1800000')
+
+    expect(await pendingAfter(20 * 60 * 1000)).toBe('pending')
+  })
+
+  it('falls back to thirty minutes when the variable is absent', async () => {
+    vi.stubEnv('VITE_JOB_TIMEOUT_MS', '')
+
+    // The dangerous fallback would be a short one: it bills for a job it has
+    // already declared failed.
+    expect(await pendingAfter(20 * 60 * 1000)).toBe('pending')
+  })
+
+  it('does give up once the pipeline could not still be running', async () => {
+    vi.stubEnv('VITE_JOB_TIMEOUT_MS', '60000')
+
+    const settled = await pendingAfter(5 * 60 * 1000)
+
+    expect(settled).toBeInstanceOf(ApiError)
+    expect((settled as ApiError).status).toBe(408)
+  })
+})
