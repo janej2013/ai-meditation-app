@@ -1,12 +1,13 @@
 """HTTP API, JWT authorizer, and the FastAPI Lambda behind it."""
 
-from aws_cdk import CfnOutput, Duration, Stack
+from aws_cdk import CfnOutput, Duration, RemovalPolicy, Stack
 from aws_cdk import aws_apigatewayv2 as apigwv2
 from aws_cdk import aws_apigatewayv2_authorizers as authorizers
 from aws_cdk import aws_apigatewayv2_integrations as integrations
 from aws_cdk import aws_cognito as cognito
 from aws_cdk import aws_dynamodb as dynamodb
 from aws_cdk import aws_lambda as lambda_
+from aws_cdk import aws_logs as logs
 from aws_cdk import aws_s3 as s3
 from aws_cdk import aws_secretsmanager as secretsmanager
 from aws_cdk import aws_stepfunctions as sfn
@@ -57,6 +58,15 @@ class ApiStack(Stack):
             ),
             memory_size=512,
             timeout=Duration.seconds(15),
+            # An explicit log group, like the pipeline's task Lambdas: the
+            # default one is created on first invoke with retention "never
+            # expire", which grows storage cost forever.
+            log_group=logs.LogGroup(
+                self,
+                "ApiFunctionLogs",
+                retention=logs.RetentionDays.ONE_MONTH,
+                removal_policy=RemovalPolicy.DESTROY,
+            ),
             environment={
                 "TABLE_NAME": table.table_name,
                 "AUDIO_BUCKET": audio_bucket.bucket_name,

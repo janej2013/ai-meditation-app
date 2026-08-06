@@ -6,6 +6,7 @@
   "scripts": {
     "synth": "cdk synth",
     "diff": "cdk diff",
+    "gc": "cdk gc --unstable=gc",
     "cdk": "cdk"
   },
   "devDependencies": {
