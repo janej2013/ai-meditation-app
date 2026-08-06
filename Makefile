@@ -94,10 +94,14 @@ e2e-install: ## One-time: fetch the browser and the system libraries it links
 	cd frontend && npx playwright install --with-deps chromium
 
 e2e: ## Browser E2E against stubbed APIs (no AWS, no cost)
-	cd frontend && npx playwright test
+	# --project=stubbed, not the default all-projects run: the day a
+	# *.smoke.spec.ts exists, a bare `playwright test` would drive the deployed
+	# stack and spend money -- from the one target whose help text says it never
+	# does, bypassing the CONFIRM gate below.
+	cd frontend && npx playwright test --project=stubbed
 
 e2e-ui: ## The same suite in Playwright's inspector, for debugging a failure
-	cd frontend && npx playwright test --ui
+	cd frontend && npx playwright test --ui --project=stubbed
 
 e2e-auth: ## How to refresh the signed-in storage fixture
 	@echo "Cognito uses SRP, so a session is captured rather than faked:"

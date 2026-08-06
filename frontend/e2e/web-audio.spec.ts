@@ -21,8 +21,10 @@ test('headless Chromium decodes a real MP3 into an AudioBuffer', async ({ page }
     route.fulfill({
       path: MP3,
       contentType: 'audio/mpeg',
-      // The audio distribution sends these; without them Web Audio refuses to
-      // read a cross-origin buffer, which is the failure this guards against.
+      // Mimics the header the audio distribution sends. Same-origin here, so
+      // CORS is not actually exercised -- proving the *cross-origin* fetch
+      // works against the real response-headers policy is smoke-test
+      // territory, where the site and audio origins genuinely differ.
       headers: { 'access-control-allow-origin': '*' },
     }),
   )
