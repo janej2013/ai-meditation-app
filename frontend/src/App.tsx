@@ -7,26 +7,36 @@ import PlansPage from './pages/PlansPage'
 import PlayerPage from './pages/PlayerPage'
 import SignupPage from './pages/SignupPage'
 import VerifyPage from './pages/VerifyPage'
+import { SceneProvider } from './scene/SceneContext'
+import SceneLayer from './scene/SceneLayer'
 
 export default function App() {
   return (
     <BrowserRouter>
-      <div className="shell">
-        <Routes>
-          <Route path="/" element={<HomePage />} />
-          <Route path="/generating/:jobId" element={<GeneratingPage />} />
-          <Route path="/player/:jobId" element={<PlayerPage />} />
-          <Route path="/failed" element={<FailedPage />} />
-          <Route path="/plans" element={<PlansPage />} />
-          <Route path="/signup" element={<SignupPage />} />
-          <Route path="/verify" element={<VerifyPage />} />
-          <Route path="/account" element={<AccountPage />} />
-          {/* Stripe return URLs; success lands on the account with a banner. */}
-          <Route path="/billing/success" element={<Navigate to="/account?paid=1" replace />} />
-          <Route path="/billing/cancel" element={<Navigate to="/plans" replace />} />
-          <Route path="*" element={<Navigate to="/" replace />} />
-        </Routes>
-      </div>
+      <SceneProvider>
+        <div className="shell">
+          <SceneLayer />
+          <div className="content">
+            <Routes>
+              <Route path="/" element={<HomePage />} />
+              <Route path="/generating/:jobId" element={<GeneratingPage />} />
+              <Route path="/player/:jobId" element={<PlayerPage />} />
+              <Route path="/failed" element={<FailedPage />} />
+              <Route path="/plans" element={<PlansPage />} />
+              <Route path="/signup" element={<SignupPage />} />
+              <Route path="/verify" element={<VerifyPage />} />
+              <Route path="/account" element={<AccountPage />} />
+              {/* Stripe return URLs; success lands on the account with a banner. */}
+              <Route
+                path="/billing/success"
+                element={<Navigate to="/account?paid=1" replace />}
+              />
+              <Route path="/billing/cancel" element={<Navigate to="/plans" replace />} />
+              <Route path="*" element={<Navigate to="/" replace />} />
+            </Routes>
+          </div>
+        </div>
+      </SceneProvider>
     </BrowserRouter>
   )
 }

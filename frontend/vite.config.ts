@@ -17,12 +17,12 @@ export default defineConfig({
     VitePWA({
       registerType: 'autoUpdate',
       manifest: {
-        name: 'Tonight — guided meditation',
-        short_name: 'Tonight',
+        name: 'Drift — guided meditation',
+        short_name: 'Drift',
         description: 'Personalised guided meditations from how you feel.',
-        // The prototype's shell surface / accent, converted from oklch.
-        theme_color: '#332f2a',
-        background_color: '#211e1b',
+        // The revised prototype's shell / page surfaces, converted from oklch.
+        theme_color: '#0f1625',
+        background_color: '#050a17',
         display: 'standalone',
         orientation: 'portrait',
         icons: [

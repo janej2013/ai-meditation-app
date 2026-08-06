@@ -2,11 +2,15 @@
  * The player: narration + BGM mixed live in the browser (Web Audio).
  * Progress ring, scrubber, pause/resume, BGM track switching and volume —
  * all without touching the narration source, per CLAUDE.md.
+ *
+ * The particle cloud behind the screen follows playback: pulsing while audio
+ * runs, near-still while paused (SceneContext → SceneLayer, per prototype).
  */
 import { useEffect, useRef, useState } from 'react'
 import { useLocation, useNavigate, useParams } from 'react-router-dom'
 import { NotSignedInError, getJob } from '../api/client'
 import { BGM_TRACKS, DEFAULT_BGM_VOLUME, DualTrackMixer, bgmUrl } from '../audio/mixer'
+import { useScene } from '../scene/SceneContext'
 
 function fmt(s: number): string {
   const m = Math.floor(s / 60)
@@ -18,11 +22,30 @@ export default function PlayerPage() {
   const navigate = useNavigate()
   const location = useLocation()
   const { jobId } = useParams<{ jobId: string }>()
+  const { setPlaying: setScenePlaying } = useScene()
   // The handoff from GeneratingPage, when there was one. It does not survive a
   // reload, and its signature expires in 15 minutes -- so it is an
   // optimisation, and the job id in the path is what actually addresses the
   // session.
-  const handoffUrl = (location.state as { audioUrl?: string } | null)?.audioUrl
+  const state = location.state as {
+    audioUrl?: string
+    feeling?: string
+    destination?: string
+    pic?: boolean
+  } | null
+  const handoffUrl = state?.audioUrl
+
+  // "Stressed, can't sleep / quiet mind" — the mood carried over from home,
+  // with the prototype's words-mode second line as the resting fallback. A
+  // reload arrives without state and gets the plain title.
+  const feeling = state?.feeling
+  const destination = state?.destination
+  const titleLines = feeling
+    ? [
+        `${feeling.charAt(0).toUpperCase()}${feeling.slice(1)},`,
+        destination && destination !== 'Anywhere' ? destination.toLowerCase() : 'quiet mind',
+      ]
+    : ['Your session']
 
   // The mixer lives in a ref and is only ever touched from effects and event
   // handlers -- never during render, which the react-hooks rules (correctly)
@@ -35,7 +58,20 @@ export default function PlayerPage() {
   const [duration, setDuration] = useState(0)
   const [trackId, setTrackId] = useState(BGM_TRACKS[0].id)
   const [bgmVolume, setBgmVolume] = useState(DEFAULT_BGM_VOLUME)
+  const [fade, setFade] = useState(0)
   const trackRef = useRef<HTMLDivElement>(null)
+
+  // The prototype's playFade: the screen breathes in on arrival.
+  useEffect(() => {
+    const t = setTimeout(() => setFade(1), 40)
+    return () => clearTimeout(t)
+  }, [])
+
+  // The cloud pulses with playback; leaving the player releases it.
+  useEffect(() => {
+    setScenePlaying(playing)
+    return () => setScenePlaying(null)
+  }, [playing, setScenePlaying])
 
   // Load both tracks, then wait for the listener to press play.
   useEffect(() => {
@@ -154,7 +190,10 @@ export default function PlayerPage() {
   }
 
   return (
-    <div className="screen" style={{ background: 'var(--wash-bottom)' }}>
+    <div
+      className="screen"
+      style={{ background: 'var(--wash-player)', transition: 'opacity 1s ease', opacity: fade }}
+    >
       <div
         style={{
           marginTop: 16,
@@ -170,7 +209,7 @@ export default function PlayerPage() {
 
       <div
         style={{
-          marginTop: 40,
+          marginTop: 52,
           textAlign: 'center',
           display: 'flex',
           flexDirection: 'column',
@@ -187,10 +226,16 @@ export default function PlayerPage() {
           NOW PLAYING
         </div>
         <div style={{ font: '400 28px/1.35 var(--font-sans)', color: 'var(--text-primary)' }}>
-          Your session
+          {titleLines.map((line, i) => (
+            <span key={line}>
+              {i > 0 && <br />}
+              {line}
+            </span>
+          ))}
         </div>
-        <div style={{ font: '400 12.5px var(--font-sans)', color: 'oklch(0.68 0.01 60)' }}>
-          {duration ? `${Math.round(duration / 60)} min` : '…'} · voice + soft pad
+        <div style={{ font: '400 12.5px var(--font-sans)', color: 'oklch(0.86 0.016 275)' }}>
+          {duration ? `${Math.round(duration / 60)} min` : '…'} ·{' '}
+          {state?.pic ? 'from your picture' : 'voice + soft pad'}
         </div>
       </div>
 
@@ -237,31 +282,25 @@ export default function PlayerPage() {
             alignItems: 'center',
             justifyContent: 'center',
             font: '400 24px var(--font-sans)',
-            color: 'oklch(0.88 0.01 60)',
+            color: 'oklch(0.885 0.016 275)',
           }}
         >
           {fmt(elapsed)}
         </div>
       </div>
 
-      {/* BGM: switchable mid-session, volume independent of the voice. */}
+      {/* BGM: switchable mid-session, volume independent of the voice. Not in
+          the prototype's player frame, but required by the product (CLAUDE.md);
+          styled with the same chip/slider language. */}
       <div style={{ marginTop: 28 }}>
         <div className="label-mono">BACKGROUND</div>
         <div style={{ marginTop: 10, display: 'flex', gap: 9 }}>
           {BGM_TRACKS.map((t) => (
             <button
               key={t.id}
+              className={t.id === trackId ? 'chip selected' : 'chip'}
+              style={{ padding: '10px 15px', fontSize: 13 }}
               onClick={() => void switchTrack(t.id)}
-              style={{
-                flex: 'none',
-                border: 'none',
-                borderRadius: 20,
-                padding: '10px 15px',
-                fontSize: 13,
-                cursor: 'pointer',
-                background: t.id === trackId ? 'var(--accent)' : 'var(--bg-chip)',
-                color: t.id === trackId ? 'var(--btn-primary-fg)' : 'oklch(0.82 0.01 60)',
-              }}
             >
               {t.label}
             </button>
@@ -305,7 +344,7 @@ export default function PlayerPage() {
             alignItems: 'center',
             justifyContent: 'center',
             fontSize: 16,
-            color: 'oklch(0.24 0.012 60)',
+            color: 'var(--btn-primary-fg)',
             cursor: ready ? 'pointer' : 'default',
             opacity: ready ? 1 : 0.6,
           }}
@@ -355,7 +394,7 @@ export default function PlayerPage() {
               display: 'flex',
               justifyContent: 'space-between',
               font: '400 11.5px var(--font-mono)',
-              color: 'oklch(0.70 0.01 60)',
+              color: 'var(--text-muted)',
             }}
           >
             <span>{fmt(elapsed)}</span>

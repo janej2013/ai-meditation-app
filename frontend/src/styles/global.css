@@ -9,10 +9,10 @@ body {
 }
 
 a {
-  color: var(--accent-bright);
+  color: var(--accent-text);
 }
 a:hover {
-  color: oklch(0.9 0.04 70);
+  color: var(--accent-hover);
 }
 
 input,
@@ -20,7 +20,7 @@ button {
   font-family: inherit;
 }
 input::placeholder {
-  color: var(--text-disabled);
+  color: var(--text-dim);
 }
 
 /* The breathing circle on the generating screen (from the prototype). */
@@ -39,15 +39,41 @@ input::placeholder {
   }
 }
 
-/* App shell: the prototype frames everything as a phone; on a real device the
-   shell is simply the viewport. */
+/* App shell. The prototype frames everything as a 390×844 phone; on a real
+   device the shell is the viewport, and on a desktop it becomes the framed
+   card the prototype shows, with the particle cloud clipped inside. */
 .shell {
   min-height: 100dvh;
   display: flex;
   flex-direction: column;
   background: var(--bg-shell);
-  max-width: 480px;
+  max-width: 430px;
   margin: 0 auto;
+  position: relative;
+  overflow: hidden;
+}
+
+@media (min-width: 560px) and (min-height: 700px) {
+  .shell {
+    max-width: 390px;
+    min-height: 0;
+    height: min(844px, calc(100dvh - 80px));
+    margin: 40px auto;
+    border-radius: 46px;
+    box-shadow:
+      inset 0 0 0 1px var(--shell-line),
+      0 30px 70px oklch(0.07 0.03 265 / 0.66);
+  }
+}
+
+/* Routed content sits above the cloud + scrim (SceneLayer, z-index 0). */
+.content {
+  position: relative;
+  z-index: 2;
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
 }
 
 .screen {
@@ -56,6 +82,7 @@ input::placeholder {
   display: flex;
   flex-direction: column;
   min-height: 0;
+  position: relative;
 }
 
 /* Shared primitives, matching the prototype's inline styles. */
@@ -64,11 +91,15 @@ input::placeholder {
   border: none;
   border-radius: 32px;
   background: var(--btn-primary-bg);
+  box-shadow: 0 8px 30px oklch(0.07 0.03 265 / 0.5);
   font-size: 17px;
   font-weight: 500;
   letter-spacing: 0.01em;
   color: var(--btn-primary-fg);
   cursor: pointer;
+  transition:
+    background 0.25s,
+    color 0.25s;
 }
 .btn-primary:hover {
   background: var(--btn-primary-bg-hover);
@@ -78,7 +109,8 @@ input::placeholder {
 }
 .btn-primary:disabled {
   background: var(--btn-disabled-bg);
-  color: var(--text-faint);
+  color: var(--btn-disabled-fg);
+  box-shadow: none;
   cursor: default;
 }
 
@@ -93,7 +125,7 @@ input::placeholder {
   cursor: pointer;
 }
 .btn-accent:hover {
-  background: var(--accent-bright);
+  background: var(--accent-text);
 }
 
 .btn-ghost {
@@ -101,7 +133,7 @@ input::placeholder {
   border: none;
   font-size: 13px;
   font-weight: 400;
-  color: oklch(0.7 0.01 60);
+  color: var(--text-muted);
   cursor: pointer;
 }
 
@@ -115,10 +147,84 @@ input::placeholder {
   cursor: pointer;
 }
 .btn-back:hover {
-  color: oklch(0.92 0.008 80);
+  color: var(--text-bright);
 }
 
+/* Glass chips — mood/destination/BGM pickers. */
+.chip {
+  flex: none;
+  white-space: nowrap;
+  border: none;
+  border-radius: 20px;
+  padding: 11px 15px;
+  font-size: 13.5px;
+  font-weight: 400;
+  cursor: pointer;
+  backdrop-filter: blur(14px);
+  transition:
+    background 0.2s,
+    color 0.2s;
+  background: var(--bg-chip);
+  color: var(--text-chip);
+}
+.chip.selected {
+  background: var(--accent);
+  color: var(--btn-primary-fg);
+}
+.chip-dashed {
+  flex: none;
+  white-space: nowrap;
+  border: 1px dashed var(--border-dashed);
+  border-radius: 20px;
+  padding: 10px 15px;
+  font-size: 13.5px;
+  font-weight: 400;
+  color: oklch(0.805 0.018 275);
+  background: oklch(0.28 0.036 265 / 0.3);
+  backdrop-filter: blur(12px);
+  cursor: pointer;
+}
+.chip-dashed:hover {
+  background: oklch(0.32 0.04 265 / 0.5);
+}
+
+/* Duration segments. */
+.seg {
+  flex: 1;
+  border: none;
+  border-radius: 16px;
+  padding: 15px 0;
+  font-size: 14px;
+  font-weight: 400;
+  cursor: pointer;
+  transition:
+    background 0.2s,
+    color 0.2s;
+  background: var(--bg-duration);
+  color: var(--text-chip);
+}
+.seg.selected {
+  background: var(--accent);
+  color: var(--btn-primary-fg);
+}
+
+/* Glass input (home panel's own-words fields). */
 .text-input {
+  width: 100%;
+  box-sizing: border-box;
+  background: var(--bg-input-glass);
+  backdrop-filter: blur(16px);
+  border: 1px solid var(--border-input);
+  border-radius: 16px;
+  padding: 16px 18px;
+  font-size: 16px;
+  font-weight: 300;
+  color: var(--text-primary);
+  outline: none;
+}
+
+/* Solid input (signup / verify, over the dimmed cloud). */
+.text-input-solid {
   width: 100%;
   box-sizing: border-box;
   background: var(--bg-raised);
@@ -133,7 +239,7 @@ input::placeholder {
 
 .label-mono {
   font: 500 10px var(--font-mono);
-  letter-spacing: 0.14em;
+  letter-spacing: 0.16em;
   color: var(--text-faint);
 }
 

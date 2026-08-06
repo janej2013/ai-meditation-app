@@ -71,6 +71,21 @@ Deliberate deferrals, recorded so they read as decisions rather than oversights.
   the wildcard for a weaker separation of concerns. Worth revisiting if the audio bucket ever holds
   anything a leak would be expensive.
 
+- **"Drift from a picture" ships client-side only; the keywords screen waits for a vision step.**
+  The picture path is open to every user (no gate): the chosen file becomes an object URL that
+  `ParticleCloud` cover-crops and samples into the dreamscape, dissolving into stardust — it never
+  leaves the browser, which is what the chooser's privacy line promises. What the prototype shows
+  beyond that is not built, deliberately: `POST /generate` accepts only mood text and the pipeline
+  has no vision step, so the "In your picture, we found…" keywords screen would have to fake its
+  keywords. Instead the picture flow lands on the mood panel and the script is driven by the
+  user's words; the keyword moment unlocks when the pipeline grows an image-understanding task.
+
+- **The prototype's passwordless sign-in and player captions stay aspirational.** Cognito's
+  standard flow needs a password (the signup screen says so honestly), and there is no caption
+  track in the pipeline, so the player omits the prototype's dead "Captions" label. The
+  generating screen likewise drops the prototype's mute pill — it refers to a guided-breathing
+  preview sound that does not exist.
+
 ## Architecture — data layer
 
 `infra/stacks/data_stack.py` provisions the two persistent resources:
@@ -567,9 +582,28 @@ other, which CDK rejects as a cycle.
 
 ### The PWA (`frontend/`)
 
-React + Vite + TypeScript; pages/components/api/auth/audio split. Visuals and
-flow follow the Claude Design prototype (warm dark oklch palette, DM Sans/DM
-Mono — see `src/styles/tokens.css`).
+React + Vite + TypeScript; pages/scene/api/auth/audio split. Visuals and flow
+follow the *revised* Claude Design prototype ("Drift": a cool indigo/violet
+oklch palette over a three.js particle cloud, DM Sans/DM Mono — see
+`src/styles/tokens.css`; every token value appears verbatim in the prototype).
+
+- **Scene** (`src/scene/`): `ParticleCloud.tsx` is the prototype's
+  `particle-cloud.js` ported to a typed React component — same shaders,
+  breathing erosion, wind dispersion, mood tiers (hero/ambient/whisper/settle)
+  and picture-sampling logic. `SceneLayer` derives per-route cloud opacity,
+  mood and scrim from the prototype's mapping; `SceneContext` carries the two
+  page-owned signals (home's press-hint focus, the player's playing state,
+  which pulses/calms the cloud). three.js is code-split behind `React.lazy`
+  so the entry chunk stays ~110 kB gzipped; the cloud fades in when its chunk
+  arrives, and honours `prefers-reduced-motion` with a static arrangement.
+- **Home** is the prototype's sentence — "Drift from words · or · a picture"
+  — over the full cloud, opening into the panel: mood chips (two at most) or
+  own words, a destination ("Where would you like to drift to?"), duration,
+  Begin drifting. The destination folds into the single `mood` string sent to
+  `POST /generate`, so the API contract is unchanged. The picture path (open
+  to all users) samples the chosen image into the cloud entirely client-side
+  and then continues through the same panel — see Known gaps for what still
+  waits on a pipeline vision step.
 
 - **Auth**: `amazon-cognito-identity-js` (SRP; no Amplify). Sign-up with the
   emailed six-digit code, sign-in, sign-out. Every API call carries the **ID
