@@ -13,6 +13,10 @@
     ]
   },
   "context": {
+    "allowed_origins": [
+      "http://localhost:5173",
+      "https://dmq5vmvlt11yw.cloudfront.net"
+    ],
     "env": "dev",
     "@aws-cdk/aws-lambda:recognizeLayerVersion": true,
     "@aws-cdk/core:checkSecretUsage": true,
