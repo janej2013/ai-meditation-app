@@ -68,13 +68,13 @@ export default function VerifyPage() {
         style={{
           marginTop: 14,
           font: '400 14px/1.6 var(--font-sans)',
-          color: 'oklch(0.74 0.01 60)',
+          color: 'var(--text-body)',
         }}
       >
         Sent to {email}.
       </div>
       <input
-        className="text-input"
+        className="text-input-solid"
         style={{
           marginTop: 28,
           padding: '20px 18px',
@@ -100,7 +100,7 @@ export default function VerifyPage() {
       <div style={{ marginTop: 20, textAlign: 'center' }}>
         <button
           className="btn-ghost"
-          style={{ color: 'var(--accent-bright)', fontSize: 12.5 }}
+          style={{ color: 'var(--accent-text)', fontSize: 12.5 }}
           onClick={() => {
             void resendCode(email).then(() => setResent(true))
           }}

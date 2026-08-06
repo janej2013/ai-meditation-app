@@ -50,7 +50,7 @@ export default function AccountPage() {
             marginTop: 18,
             borderRadius: 14,
             padding: '13px 16px',
-            background: 'var(--accent-soft-10)',
+            background: 'var(--accent-soft-11)',
             font: '400 13px var(--font-sans)',
             color: 'var(--accent-text)',
           }}
@@ -70,7 +70,7 @@ export default function AccountPage() {
           gap: 6,
         }}
       >
-        <div style={{ font: '400 56px/1 var(--font-mono)', color: 'var(--accent-text)' }}>
+        <div style={{ font: '400 56px/1 var(--font-mono)', color: 'var(--accent-plus)' }}>
           {account ? account.available : '–'}
         </div>
         <div style={{ font: '400 13.5px var(--font-sans)', color: 'var(--text-secondary)' }}>
@@ -82,7 +82,7 @@ export default function AccountPage() {
         <div
           style={{
             padding: '15px 0',
-            borderBottom: '1px solid var(--border-subtle)',
+            borderBottom: '1px solid var(--border-row)',
             display: 'flex',
             justifyContent: 'space-between',
             font: '400 13.5px var(--font-sans)',
@@ -90,8 +90,23 @@ export default function AccountPage() {
           }}
         >
           <span>Plan</span>
-          <span style={{ color: 'oklch(0.92 0.008 80)', textTransform: 'capitalize' }}>
+          <span style={{ color: 'var(--text-bright)', textTransform: 'capitalize' }}>
             {account?.plan ?? '…'}
+          </span>
+        </div>
+        <div
+          style={{
+            padding: '15px 0',
+            borderBottom: '1px solid var(--border-row)',
+            display: 'flex',
+            justifyContent: 'space-between',
+            font: '400 13.5px var(--font-sans)',
+            color: 'var(--text-secondary)',
+          }}
+        >
+          <span>In progress</span>
+          <span style={{ color: 'var(--text-bright)' }}>
+            {account ? (account.frozen > 0 ? '1 session generating' : 'none') : '…'}
           </span>
         </div>
         <div
@@ -103,10 +118,8 @@ export default function AccountPage() {
             color: 'var(--text-secondary)',
           }}
         >
-          <span>In progress</span>
-          <span style={{ color: 'oklch(0.92 0.008 80)' }}>
-            {account ? (account.frozen > 0 ? '1 session generating' : 'none') : '…'}
-          </span>
+          <span>Voice</span>
+          <span style={{ color: 'var(--text-bright)' }}>Soft, low</span>
         </div>
       </div>
 

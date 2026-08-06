@@ -82,7 +82,7 @@ export default function SignupPage() {
         style={{
           marginTop: 14,
           font: '400 14px/1.6 var(--font-sans)',
-          color: 'oklch(0.74 0.01 60)',
+          color: 'var(--text-body)',
         }}
       >
         {mode === 'signup'
@@ -91,7 +91,7 @@ export default function SignupPage() {
       </div>
 
       <input
-        className="text-input"
+        className="text-input-solid"
         style={{ marginTop: 28 }}
         type="email"
         autoComplete="email"
@@ -103,7 +103,7 @@ export default function SignupPage() {
         placeholder="you@example.com"
       />
       <input
-        className="text-input"
+        className="text-input-solid"
         style={{ marginTop: 12 }}
         type="password"
         autoComplete={mode === 'signup' ? 'new-password' : 'current-password'}
@@ -123,7 +123,7 @@ export default function SignupPage() {
       <div style={{ marginTop: 20, textAlign: 'center' }}>
         <button
           className="btn-ghost"
-          style={{ color: 'var(--accent-bright)', fontSize: 12.5 }}
+          style={{ color: 'var(--accent-text)', fontSize: 12.5 }}
           onClick={() => {
             setMode(mode === 'signup' ? 'signin' : 'signup')
             setError(null)

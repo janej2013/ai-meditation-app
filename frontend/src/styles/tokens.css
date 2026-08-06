@@ -1,56 +1,114 @@
-/* Design tokens, lifted from the Claude Design prototype
-   (Meditation PWA Prototype.dc.html). The palette is a warm dark scheme in
-   oklch; keep edits in sync with the prototype rather than inventing values. */
+/* Design tokens, lifted from the revised Claude Design prototype
+   (Meditation PWA Prototype.dc.html) — the cool indigo/violet scheme behind
+   the particle cloud. Every value here appears verbatim in the prototype;
+   keep edits in sync with it rather than inventing values. */
 
 :root {
   /* Surfaces */
-  --bg-page: oklch(0.16 0.01 60);
-  --bg-shell: oklch(0.245 0.012 60);
-  --bg-raised: oklch(0.29 0.012 60);
-  --bg-chip: oklch(0.3 0.012 60);
-  --bg-chip-hover: oklch(0.34 0.012 60);
-  --bg-selected: oklch(0.32 0.014 60);
+  --bg-page: oklch(0.145 0.03 265);
+  --bg-shell: oklch(0.2 0.032 265);
+  --shell-line: oklch(0.34 0.036 265);
+  --bg-raised: oklch(0.265 0.032 265); /* solid inputs, account card, refund row */
+  --bg-raised-2: oklch(0.285 0.034 265); /* failed badge circle */
+  --bg-chip: oklch(0.3 0.038 265 / 0.5); /* glass chips */
+  --bg-chip-hover: oklch(0.345 0.038 265);
+  --bg-input-glass: oklch(0.3 0.038 265 / 0.55);
+  --bg-duration: oklch(0.32 0.04 265 / 0.5);
+  --bg-plan: oklch(0.255 0.032 265);
+  --bg-plan-selected: oklch(0.315 0.04 265);
 
   /* Text */
-  --text-primary: oklch(0.94 0.008 80);
-  --text-secondary: oklch(0.78 0.01 60);
-  --text-muted: oklch(0.66 0.01 60);
-  --text-faint: oklch(0.62 0.01 60);
-  --text-disabled: oklch(0.52 0.01 60);
+  --text-hero: oklch(0.965 0.014 275);
+  --text-primary: oklch(0.945 0.014 275);
+  --text-bright: oklch(0.925 0.014 275);
+  --text-back: oklch(0.845 0.016 275);
+  --text-chip: oklch(0.87 0.018 275);
+  --text-secondary: oklch(0.79 0.018 275);
+  --text-body: oklch(0.755 0.018 275);
+  --text-hint: oklch(0.735 0.018 275);
+  --text-muted: oklch(0.715 0.018 275);
+  --text-soft: oklch(0.685 0.018 275);
+  --text-faint: oklch(0.65 0.018 275);
+  --text-dim: oklch(0.585 0.018 275);
 
-  /* Accent — the warm amber the prototype uses everywhere */
-  --accent: oklch(0.78 0.05 70);
-  --accent-bright: oklch(0.84 0.05 70);
-  --accent-text: oklch(0.86 0.04 70);
-  --accent-soft-06: oklch(0.78 0.05 70 / 0.06);
-  --accent-soft-10: oklch(0.78 0.05 70 / 0.1);
-  --accent-soft-22: oklch(0.78 0.05 70 / 0.22);
+  /* Accent — the violet glow the prototype uses everywhere */
+  --accent: oklch(0.8 0.085 285);
+  --accent-text: oklch(0.865 0.075 285);
+  --accent-hover: oklch(0.92 0.05 285);
+  --accent-plus: oklch(0.88 0.065 285);
+  --accent-soft-07: oklch(0.8 0.085 285 / 0.07);
+  --accent-soft-11: oklch(0.8 0.085 285 / 0.11);
+  --accent-soft-24: oklch(0.8 0.085 285 / 0.24);
+  --accent-soft-30: oklch(0.8 0.085 285 / 0.3);
+  --accent-underline: oklch(0.8 0.085 285 / 0.6);
+  --accent-glow-22: oklch(0.8 0.085 285 / 0.55);
+  --accent-glow-hero: oklch(0.8 0.085 285 / 0.35);
 
   /* Action buttons */
-  --btn-primary-bg: oklch(0.94 0.008 80);
-  --btn-primary-bg-hover: oklch(0.98 0.008 80);
-  --btn-primary-fg: oklch(0.22 0.012 60);
-  --btn-disabled-bg: oklch(0.32 0.012 60);
+  --btn-primary-bg: oklch(0.945 0.014 275);
+  --btn-primary-bg-hover: oklch(0.985 0.012 275);
+  --btn-primary-fg: oklch(0.18 0.03 265);
+  --btn-disabled-bg: oklch(0.32 0.04 265 / 0.55);
+  --btn-disabled-fg: oklch(0.66 0.018 275);
 
   /* Lines & errors */
-  --border-subtle: oklch(0.32 0.012 60);
-  --error: oklch(0.8 0.06 40);
+  --border-subtle: oklch(0.315 0.034 265); /* scrubber + ring track */
+  --border-row: oklch(0.3 0.034 265); /* account rows */
+  --border-input: oklch(0.72 0.02 275 / 0.22);
+  --border-dashed: oklch(0.72 0.02 275 / 0.32);
+  --error: oklch(0.8 0.09 25);
 
-  /* Radial washes behind the generating / player / plans screens */
-  --wash-top: radial-gradient(
+  /* Whole-screen washes (painted by the screens themselves, over the cloud) */
+  --wash-generating: radial-gradient(
     120% 60% at 50% 26%,
-    oklch(0.33 0.03 70) 0%,
-    oklch(0.245 0.012 60) 62%
+    oklch(0.33 0.06 285) 0%,
+    oklch(0.2 0.032 265) 62%
   );
-  --wash-bottom: radial-gradient(
-    110% 58% at 50% 82%,
-    oklch(0.32 0.03 70) 0%,
-    oklch(0.245 0.012 60) 60%
+  --wash-generating-picture: linear-gradient(
+    to bottom,
+    oklch(0.2 0.032 265 / 0.3) 0%,
+    oklch(0.2 0.032 265 / 0.1) 26%,
+    oklch(0.2 0.032 265 / 0.62) 44%,
+    oklch(0.2 0.032 265 / 0.88) 58%,
+    oklch(0.2 0.032 265 / 0.92) 88%,
+    oklch(0.2 0.032 265 / 0.8) 100%
   );
+  --wash-player:
+    linear-gradient(
+      to bottom,
+      oklch(0.2 0.032 265 / 0.46) 0%,
+      oklch(0.2 0.032 265 / 0.38) 36%,
+      oklch(0.2 0.032 265 / 0.52) 68%,
+      oklch(0.2 0.032 265 / 0.76) 100%
+    ),
+    radial-gradient(
+      90% 44% at 50% 88%,
+      oklch(0.32 0.06 285 / 0.42) 0%,
+      oklch(0.32 0.06 285 / 0) 100%
+    );
   --wash-plans: radial-gradient(
     120% 55% at 50% 20%,
-    oklch(0.31 0.026 70) 0%,
-    oklch(0.245 0.012 60) 62%
+    oklch(0.31 0.055 285) 0%,
+    oklch(0.2 0.032 265) 62%
+  );
+
+  /* The scrim between the cloud and the content (SceneLayer). */
+  --scrim: linear-gradient(
+    to bottom,
+    oklch(0.2 0.032 265 / 0.62) 0%,
+    oklch(0.2 0.032 265 / 0.22) 22%,
+    oklch(0.2 0.032 265 / 0.44) 52%,
+    oklch(0.2 0.032 265 / 0.93) 76%,
+    oklch(0.2 0.032 265) 100%
+  );
+
+  /* The gradient that keeps panel content readable as it scrolls under the
+     bottom action area (home panel / keywords in the prototype). */
+  --fade-bottom: linear-gradient(
+    to bottom,
+    oklch(0.2 0.032 265 / 0) 0%,
+    oklch(0.2 0.032 265 / 0.92) 32%,
+    oklch(0.2 0.032 265) 100%
   );
 
   /* Type */

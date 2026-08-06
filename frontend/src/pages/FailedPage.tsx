@@ -22,7 +22,7 @@ export default function FailedPage() {
             width: 96,
             height: 96,
             borderRadius: '50%',
-            background: 'var(--bg-chip)',
+            background: 'var(--bg-raised-2)',
             display: 'flex',
             alignItems: 'center',
             justifyContent: 'center',
@@ -50,7 +50,7 @@ export default function FailedPage() {
           marginTop: 16,
           textAlign: 'center',
           font: '400 14px/1.6 var(--font-sans)',
-          color: 'oklch(0.74 0.01 60)',
+          color: 'var(--text-body)',
         }}
       >
         Something interrupted the generation. Nothing was charged.
@@ -65,11 +65,11 @@ export default function FailedPage() {
           justifyContent: 'space-between',
           alignItems: 'center',
           font: '400 13px var(--font-sans)',
-          color: 'oklch(0.82 0.01 60)',
+          color: 'oklch(0.825 0.018 275)',
         }}
       >
         <span>Credit refunded</span>
-        <span style={{ font: '500 13px var(--font-mono)', color: 'var(--accent-bright)' }}>
+        <span style={{ font: '500 13px var(--font-mono)', color: 'var(--accent-text)' }}>
           {creditsLabel}
         </span>
       </div>

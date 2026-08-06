@@ -3,7 +3,9 @@
  * returned Stripe-hosted URL — no payment UI of our own, ever.
  *
  * Product keys must match backend/api/products.py; the price shown is display
- * copy, the amount charged is whatever the Stripe price object says.
+ * copy, the amount charged is whatever the Stripe price object says. (The
+ * prototype's "Unlimited" tier stays aspirational — the real monthly product
+ * grants 20 sessions, and the copy says so.)
  */
 import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
@@ -76,7 +78,7 @@ export default function PlansPage() {
         style={{
           marginTop: 14,
           font: '400 14px/1.6 var(--font-sans)',
-          color: 'oklch(0.74 0.01 60)',
+          color: 'var(--text-body)',
         }}
       >
         {out
@@ -100,7 +102,7 @@ export default function PlansPage() {
               display: 'flex',
               justifyContent: 'space-between',
               alignItems: 'center',
-              background: p.key === selected ? 'var(--bg-selected)' : 'oklch(0.28 0.012 60)',
+              background: p.key === selected ? 'var(--bg-plan-selected)' : 'var(--bg-plan)',
               boxShadow: p.key === selected ? 'inset 0 0 0 1.5px var(--accent)' : 'none',
             }}
           >
@@ -108,11 +110,11 @@ export default function PlansPage() {
               <span style={{ font: '400 15px var(--font-sans)', color: 'var(--text-primary)' }}>
                 {p.label}
               </span>
-              <span style={{ font: '400 12px var(--font-sans)', color: 'oklch(0.72 0.01 60)' }}>
+              <span style={{ font: '400 12px var(--font-sans)', color: 'var(--text-hint)' }}>
                 {p.note}
               </span>
             </span>
-            <span style={{ font: '500 15px var(--font-mono)', color: 'var(--accent-text)' }}>
+            <span style={{ font: '500 15px var(--font-mono)', color: 'var(--accent-plus)' }}>
               {p.price}
             </span>
           </button>
