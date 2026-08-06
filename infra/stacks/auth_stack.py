@@ -4,6 +4,7 @@ from aws_cdk import CfnOutput, Duration, RemovalPolicy, Stack
 from aws_cdk import aws_cognito as cognito
 from aws_cdk import aws_dynamodb as dynamodb
 from aws_cdk import aws_lambda as lambda_
+from aws_cdk import aws_logs as logs
 from constructs import Construct
 
 from stacks.paths import BACKEND_DIR
@@ -41,6 +42,15 @@ class AuthStack(Stack):
             # Cognito abandons a synchronous trigger after 5s regardless of
             # this value; the extra headroom lets a slow write still land.
             timeout=Duration.seconds(10),
+            # An explicit log group, like the pipeline's task Lambdas: the
+            # default one is created on first invoke with retention "never
+            # expire", which grows storage cost forever.
+            log_group=logs.LogGroup(
+                self,
+                "InitUserFunctionLogs",
+                retention=logs.RetentionDays.ONE_MONTH,
+                removal_policy=RemovalPolicy.DESTROY,
+            ),
             environment={"TABLE_NAME": table.table_name},
             description="Cognito post-confirmation: create PROFILE + ENTITLEMENT.",
         )

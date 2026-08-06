@@ -73,6 +73,14 @@ class DataStack(Stack):
                 s3.LifecycleRule(
                     id="ExpireGeneratedAudio",
                     enabled=True,
+                    # jobs/ only. The bucket also holds the shared BGM under
+                    # assets/, uploaded once by hand and referenced by every
+                    # session -- an unprefixed rule would silently delete it
+                    # after AUDIO_RETENTION_DAYS and leave the player
+                    # voice-only. Multipart uploads only ever target jobs/
+                    # (the synthesize step), so the abort rule loses nothing
+                    # by being scoped down with it.
+                    prefix="jobs/",
                     expiration=Duration.days(AUDIO_RETENTION_DAYS),
                     abort_incomplete_multipart_upload_after=Duration.days(7),
                 )
