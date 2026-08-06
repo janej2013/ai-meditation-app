@@ -575,6 +575,11 @@ Only the private key's ARN reaches the Lambda; the public half becomes a
 CloudFront `PublicKey` + `KeyGroup`. Without the context value the stack still
 synthesises — `jobs/*` simply has no key group until the key is wired.
 
+`make deploy` wires the context itself: it reads `./cf-signing.pub.pem`
+(gitignored, override with `AUDIO_PUB_KEY=…`) and **refuses to deploy when the
+file is missing**, because a deploy without it silently strips the key group —
+`ALLOW_UNSIGNED=1` overrides when that is genuinely intended.
+
 **One CDK trap, documented in `data_stack.py`:** the OAC bucket policy must
 live in the *data* stack and name `distribution/*` rather than the specific
 distribution ARN — pinning it would make Data and Frontend reference each

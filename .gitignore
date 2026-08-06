@@ -45,6 +45,9 @@ dev-dist/
 .env
 .env.*
 !.env.example
+# The CloudFront URL-signing key pair (README: frontend delivery). The private
+# key lives in Secrets Manager; the public half stays local for `make deploy`.
+cf-signing*.pem
 
 # IDE / OS
 .idea/
