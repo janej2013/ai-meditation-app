@@ -13,8 +13,11 @@ PY := $(VENV)/python
 RUFF := $(VENV)/ruff
 
 # Deployment selectors: `make diff ENV=prod`, `make deploy STACKS=Meditation-dev-Api`.
+# Empty STACKS means every stack: `cdk diff` does that natively (and rejects
+# --all with a warning), while `cdk deploy` needs the explicit flag -- so only
+# the deploy recipe substitutes it.
 ENV ?= dev
-STACKS ?= --all
+STACKS ?=
 
 .DEFAULT_GOAL := help
 .PHONY: help check lint test synth layers diff deploy fe-check fe-lint fe-test fe-build \
@@ -60,7 +63,7 @@ endif
 	# fails at runtime, which synth only warns about. Docker must be running --
 	# the API Lambda is a container image built here. CDK's own approval prompt
 	# for IAM changes is deliberately left on.
-	cd infra && PATH="$(VENV):$$PATH" npm run cdk --silent -- deploy -c env=$(ENV) $(STACKS)
+	cd infra && PATH="$(VENV):$$PATH" npm run cdk --silent -- deploy -c env=$(ENV) $(if $(STACKS),$(STACKS),--all)
 
 # ----------------------------------------------------------------------
 # Frontend
