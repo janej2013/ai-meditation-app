@@ -2,6 +2,7 @@
 import react from '@vitejs/plugin-react'
 import { defineConfig } from 'vite'
 import { VitePWA } from 'vite-plugin-pwa'
+import { configDefaults } from 'vitest/config'
 
 // https://vite.dev/config/
 export default defineConfig({
@@ -76,5 +77,8 @@ export default defineConfig({
     environment: 'jsdom',
     setupFiles: ['src/test/setup.ts'],
     globals: true,
+    // e2e/ is Playwright's, not vitest's — the default include pattern would
+    // otherwise pick up its *.spec.ts and fail on the foreign test runner.
+    exclude: [...configDefaults.exclude, 'e2e/**'],
   },
 })
