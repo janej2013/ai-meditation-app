@@ -20,7 +20,7 @@ still synthesises and deploys, using the CloudFront default domains -- so
 ``cdk synth`` never depends on a real hosted zone.
 """
 
-from aws_cdk import CfnOutput, Duration, RemovalPolicy, Stack
+from aws_cdk import Annotations, CfnOutput, Duration, RemovalPolicy, Stack
 from aws_cdk import aws_certificatemanager as acm
 from aws_cdk import aws_cloudfront as cloudfront
 from aws_cdk import aws_cloudfront_origins as origins
@@ -159,6 +159,14 @@ class FrontendStack(Stack):
             region=self.region,
         )
         audio_origin = origins.S3BucketOrigin.with_origin_access_control(origin_bucket)
+        # The warning this silences says CDK cannot write the imported bucket's
+        # policy -- which is the arrangement, not an oversight: see the comment
+        # above and the OAC grant in data_stack.py.
+        Annotations.of(self).acknowledge_warning(
+            "@aws-cdk/aws-cloudfront-origins:updateImportedBucketPolicyOac",
+            "The OAC read policy is written by data_stack.py on the real bucket; "
+            "adding it here would create a cross-stack cycle.",
+        )
 
         key_group = None
         # Empty until a public key is configured. The API surfaces that as a
