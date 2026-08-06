@@ -12,6 +12,7 @@ in one account.
 """
 
 import os
+from pathlib import Path
 
 import aws_cdk as cdk
 
@@ -47,6 +48,25 @@ DEV_ORIGINS = ["http://localhost:5173"]  # Vite dev server
 # and override with `-c bedrock_model_id=...`. A changed geo prefix also needs a
 # matching entry in pipeline_stack._bedrock_resources.
 DEFAULT_BEDROCK_MODEL_ID = "au.anthropic.claude-haiku-4-5-20251001-v1:0"
+
+
+def resolve_audio_public_key(app: cdk.App) -> str | None:
+    """The CloudFront URL-signing public key, PEM text or None.
+
+    Two spellings: ``audio_public_key_file`` names a file and is the one
+    `make deploy` uses -- a single-line path survives every shell and npm
+    layer, where the raw multiline PEM of ``audio_public_key_pem`` gets
+    flattened to its first line by ``npm run``'s argument re-quoting and
+    CloudFront then rejects the "key". The inline form is kept for tests and
+    for callers that already hold the text.
+    """
+    pem = app.node.try_get_context("audio_public_key_pem")
+    if pem:
+        return pem
+    path = app.node.try_get_context("audio_public_key_file")
+    if path:
+        return Path(path).read_text()
+    return None
 
 
 def resolve_allowed_origins(app: cdk.App, env_name: str, domain_name: str | None) -> list[str]:
@@ -143,7 +163,7 @@ def main() -> None:
         f"Meditation-{env_name}-Frontend",
         env_name=env_name,
         audio_bucket=data.audio_bucket,
-        audio_public_key_pem=app.node.try_get_context("audio_public_key_pem"),
+        audio_public_key_pem=resolve_audio_public_key(app),
         domain_name=domain_name,
         hosted_zone_id=app.node.try_get_context("hosted_zone_id"),
         env=env,

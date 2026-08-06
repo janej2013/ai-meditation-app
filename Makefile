@@ -78,8 +78,11 @@ endif
 	# fails at runtime, which synth only warns about. Docker must be running --
 	# the API Lambda is a container image built here. CDK's own approval prompt
 	# for IAM changes is deliberately left on.
+	# The key travels as a file path, not as inline PEM: `npm run` re-quotes
+	# child arguments and flattens a multiline value to its first line, which
+	# CloudFront rejects as an invalid key.
 	cd infra && PATH="$(VENV):$$PATH" npm run cdk --silent -- deploy -c env=$(ENV) \
-		$(if $(wildcard $(AUDIO_PUB_KEY)),-c audio_public_key_pem="$$(cat $(abspath $(AUDIO_PUB_KEY)))",) \
+		$(if $(wildcard $(AUDIO_PUB_KEY)),-c audio_public_key_file="$(abspath $(AUDIO_PUB_KEY))",) \
 		$(if $(STACKS),$(STACKS),--all)
 
 # ----------------------------------------------------------------------

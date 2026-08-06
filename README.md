@@ -568,8 +568,13 @@ openssl rsa -in cf-signing.pem -pubout -out cf-signing.pub.pem
 
 aws secretsmanager create-secret --name meditation/cloudfront-signing-key   --region ap-southeast-2 --secret-string file://cf-signing.pem
 
-cd infra && npm run cdk -- deploy -c audio_public_key_pem="$(cat ../cf-signing.pub.pem)"
+cd infra && npm run cdk -- deploy -c audio_public_key_file=../cf-signing.pub.pem
 ```
+
+The context is a file *path*, not the PEM text: `npm run` re-quotes child
+arguments and flattens a multiline `-c` value to its first line, which
+CloudFront then rejects as an invalid key. (`audio_public_key_pem` still
+accepts inline text for tests and non-npm callers.)
 
 Only the private key's ARN reaches the Lambda; the public half becomes a
 CloudFront `PublicKey` + `KeyGroup`. Without the context value the stack still
