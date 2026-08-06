@@ -637,6 +637,21 @@ npm run dev                  # or: test / lint / format:check / build
 Deploying the built app is `aws s3 sync dist/ s3://<SiteBucketName>` plus a
 CloudFront invalidation — both human-run, like every deploy in this repo.
 
+### Housekeeping
+
+Two costs grow quietly with every deploy and are bounded by convention, not by
+the templates:
+
+- **ECR image assets.** Each deploy pushes new digests of the two container
+  images into the CDK bootstrap repository and nothing deletes the old ones.
+  `cd infra && npm run gc` (CDK's `gc --unstable=gc`) deletes assets no stack
+  references any more. It touches live resources, so it is human-run, like
+  every deploy.
+- **Lambda log groups.** Every function now declares its own log group with
+  one-month retention (the implicit default is *never expire*). If a new
+  function is added, give it a log group — `test_cost_hygiene.py` guards the
+  existing ones.
+
 ## Local setup
 
 **Run every command from WSL (Ubuntu), never from Windows PowerShell or cmd.**
