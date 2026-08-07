@@ -223,7 +223,8 @@ def test_generate_validation_error_is_not_retryable(
 
     bedrock = MagicMock()
     bedrock.converse.side_effect = ClientError(
-        {"Error": {"Code": "ValidationException"}}, "Converse"
+        {"Error": {"Code": "ValidationException", "Message": "Access to Bedrock models denied"}},
+        "Converse",
     )
     monkeypatch.setattr(generate_handler, "_get_bedrock", lambda: bedrock)
     monkeypatch.setattr(generate_handler, "_get_s3", lambda: s3_bucket)
@@ -231,6 +232,9 @@ def test_generate_validation_error_is_not_retryable(
     with pytest.raises(ScriptGenerationError) as excinfo:
         generate_handler.lambda_handler(state, None)
     assert not isinstance(excinfo.value, BedrockTransientError)
+    # The vendor's message must survive into the log, or every failure is an
+    # opaque error code that needs a CLI reproduction to decode.
+    assert "Access to Bedrock models denied" in str(excinfo.value)
 
 
 def test_generate_rejects_a_too_short_script(

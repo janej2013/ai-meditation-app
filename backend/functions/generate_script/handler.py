@@ -131,10 +131,16 @@ def _generate(mood_text: str, duration_minutes: int) -> str:
             },
         )
     except ClientError as exc:
-        code = exc.response.get("Error", {}).get("Code", "")
+        error = exc.response.get("Error", {})
+        code = error.get("Code", "")
+        # The message names the rejected parameter or account restriction --
+        # e.g. "Access to Bedrock models is not allowed for this account" --
+        # and never echoes the prompt, so it is safe to surface (constraint 7)
+        # and indispensable: the code alone turns every failure into a hunt.
+        detail = f"{code}: {error.get('Message', '')}"
         if code in _TRANSIENT_CODES:
-            raise BedrockTransientError(f"bedrock transient failure: {code}") from exc
-        raise ScriptGenerationError(f"bedrock call failed: {code}") from exc
+            raise BedrockTransientError(f"bedrock transient failure: {detail}") from exc
+        raise ScriptGenerationError(f"bedrock call failed: {detail}") from exc
 
     return _extract_text(response, duration_minutes)
 
