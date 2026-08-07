@@ -1,0 +1,7 @@
+# Keeps the pinned actions current. Pinning without an update path just decays.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly

@@ -1,0 +1,86 @@
+# Checks for every PR and for main. No job here holds AWS credentials: this
+# is a public repository, so anything a fork can trigger must be safe to run
+# on hostile code. The deploy-dev job (docs/cicd.md P4) joins this file once
+# the GitHub environments and OIDC roles are verified.
+#
+# Every step defers to the Makefile, so CI failures reproduce locally with the
+# same command.
+
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  # New pushes supersede a PR's running checks; a main run is never cancelled.
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.12' # matches the Lambda runtime
+          cache: pip
+          cache-dependency-path: |
+            backend/pyproject.toml
+            infra/requirements.txt
+      # Node because `make synth` drives the CDK CLI, and because the infra
+      # tests skip themselves without it -- with it, they actually run.
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '22' # matches .prototools
+          cache: npm
+          cache-dependency-path: infra/package-lock.json
+      - run: pip install -e "backend[dev,api]" ruff -r infra/requirements.txt
+      - run: npm ci
+        working-directory: infra
+      # VENV points make at setup-python's bin instead of ~/.venvs/meditation.
+      - run: make lint test synth VENV="$(dirname "$(which python)")"
+
+  frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+        working-directory: frontend
+      - run: make fe-check
+
+  e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+        working-directory: frontend
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ hashFiles('frontend/package-lock.json') }}
+      # Cheap on a cache hit: the browser download is skipped and only the
+      # apt-installed libraries are (re)confirmed.
+      - run: npx playwright install --with-deps chromium
+        working-directory: frontend
+      - run: make e2e
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: failure()
+        with:
+          name: playwright-traces
+          path: frontend/test-results/
