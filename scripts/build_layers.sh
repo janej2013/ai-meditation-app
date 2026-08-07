@@ -31,6 +31,10 @@ build_shared() {
   # The API and functions ship their own code; the layer only carries `shared`
   # and its dependencies.
   rm -rf "$target"/api "$target"/functions
+  # The rm -rf above also removed the *tracked* .gitkeep that holds this
+  # directory open in git; without it every build leaves a deletion sitting in
+  # git status, waiting to ride along with an unrelated commit.
+  touch "$target/.gitkeep"
   echo "    $(du -sh "$target" | cut -f1)"
 }
 

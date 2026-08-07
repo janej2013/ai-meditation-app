@@ -122,6 +122,14 @@ class FrontendStack(Stack):
             value=f"https://{domain_name or self.site_distribution.distribution_domain_name}",
             description="Public URL of the PWA.",
         )
+        # CI publishes a new PWA build with `aws s3 sync` + an invalidation,
+        # and the invalidation API wants the id, which no other output carries.
+        CfnOutput(
+            self,
+            "SiteDistributionId",
+            value=self.site_distribution.distribution_id,
+            description="For cache invalidation after uploading a new PWA build.",
+        )
         CfnOutput(
             self,
             "AudioDomainName",

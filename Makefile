@@ -19,6 +19,26 @@ RUFF := $(VENV)/ruff
 ENV ?= dev
 STACKS ?=
 
+# CI overrides. APPROVAL=never because CI has no TTY for CDK's
+# IAM prompt; the review happens on the PR and in the deploy job's diff log.
+APPROVAL ?= broadening
+
+# The CloudFront URL-signing public key (README: frontend delivery). A deploy
+# that omits it silently removes the key group and leaves jobs/* unsigned --
+# the compound gap in README Known gaps -- so deploy refuses to run without
+# the file unless ALLOW_UNSIGNED=1 states that is intentional. CI materialises
+# this file from a GitHub Actions variable before calling deploy.
+AUDIO_PUB_KEY ?= cf-signing.pub.pem
+
+# CDK context shared by diff and deploy, so both synthesise the same world: a
+# diff run without the key would print the signing key group being torn down --
+# noise that would drown the real changes it exists to surface. The key
+# travels as a file path, never inline PEM (`npm run` flattens multi-line
+# arguments to their first line, which CloudFront rejects). ALLOWED_ORIGINS is
+# required for prod and reaches CI as a GitHub Actions variable.
+CONTEXT = $(if $(wildcard $(AUDIO_PUB_KEY)),-c audio_public_key_file="$(abspath $(AUDIO_PUB_KEY))",) \
+          $(if $(ALLOWED_ORIGINS),-c allowed_origins="$$ALLOWED_ORIGINS")
+
 .DEFAULT_GOAL := help
 .PHONY: help check lint test synth layers diff deploy fe-check fe-lint fe-test fe-build \
         e2e e2e-ui e2e-install e2e-auth smoke dev
@@ -49,7 +69,7 @@ layers: ## Build the shared Lambda layer (synth only warns when it is missing)
 	PATH="$(VENV):$$PATH" scripts/build_layers.sh
 
 diff: ## cdk diff $(ENV) against what is deployed. Needs AWS credentials.
-	cd infra && PATH="$(VENV):$$PATH" npm run diff --silent -- -c env=$(ENV) $(STACKS)
+	cd infra && PATH="$(VENV):$$PATH" npm run diff --silent -- -c env=$(ENV) $(CONTEXT) $(STACKS)
 
 deploy: layers ## cdk deploy $(ENV) -- HUMAN-ONLY (CLAUDE.md 8): spends money, needs Docker
 ifeq ($(ENV),prod)
@@ -59,11 +79,25 @@ ifndef CONFIRM
 	@exit 1
 endif
 endif
+ifeq ($(wildcard $(AUDIO_PUB_KEY)),)
+ifndef ALLOW_UNSIGNED
+	@echo "Refusing to deploy: $(AUDIO_PUB_KEY) not found."
+	@echo "Deploying without the signing public key removes the CloudFront key"
+	@echo "group and leaves jobs/* unsigned (README: Known gaps). Generate it"
+	@echo "(README: frontend delivery) or re-run with ALLOW_UNSIGNED=1."
+	@exit 1
+endif
+endif
 	# Depends on `layers`: a deploy without the shared layer succeeds and then
 	# fails at runtime, which synth only warns about. Docker must be running --
-	# the API Lambda is a container image built here. CDK's own approval prompt
-	# for IAM changes is deliberately left on.
-	cd infra && PATH="$(VENV):$$PATH" npm run cdk --silent -- deploy -c env=$(ENV) $(if $(STACKS),$(STACKS),--all)
+	# the API Lambda is a container image built here. The IAM approval prompt
+	# stays on locally (APPROVAL defaults to broadening); only CI passes never.
+	# The outputs file feeds the frontend publish step and .env generation.
+	cd infra && PATH="$(VENV):$$PATH" npm run cdk --silent -- deploy \
+		-c env=$(ENV) $(CONTEXT) \
+		--require-approval $(APPROVAL) \
+		--outputs-file ../cdk-outputs.json \
+		$(if $(STACKS),$(STACKS),--all)
 
 # ----------------------------------------------------------------------
 # Frontend
