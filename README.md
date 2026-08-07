@@ -216,6 +216,14 @@ Execution timeout 10 minutes; per-state timeouts 30 s / 120 s / 180 s / 30 s.
 
 There is no mix step — see [Mixing happens in the browser](#mixing-happens-in-the-browser).
 
+**Dev caps generation cost.** Outside prod, `GenerateScript` carries
+`DURATION_MINUTES_OVERRIDE=1`: whatever duration the user picked, the script is
+generated as if 1 minute had been requested, so an end-to-end dev run costs
+almost no Bedrock or TTS spend. The override lives only in that Lambda's
+environment — the API contract, the picker (5/10/15) and the stored job are
+identical across environments, and prod templates carry no override at all
+(pinned by `infra/tests/test_duration_override.py`).
+
 **Retries name concrete exception classes, never `States.ALL`.** `generate_script`
 retries `BedrockTransientError`, `synthesize` retries `TTSTransientError`, and
 both add the four Lambda transport errors — 3 attempts, 2 s base, ×2 backoff. A

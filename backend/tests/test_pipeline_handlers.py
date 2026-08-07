@@ -279,6 +279,38 @@ def test_the_length_floor_scales_with_the_requested_duration(
         generate_handler.lambda_handler({**state, "duration_minutes": 30}, None)
 
 
+def test_generate_honors_the_dev_duration_override(
+    store, dynamodb_client, s3_bucket, audio_env, monkeypatch, state
+):
+    """DURATION_MINUTES_OVERRIDE (dev only) shrinks generation, not the job.
+
+    The user asked for 10 minutes; with the override at 1 the prompt and the
+    length floor are both sized for 1 minute, so a 1-minute script passes --
+    while the payload keeps the duration the user picked.
+    """
+    from .conftest import seed_entitlement
+
+    seed_entitlement(dynamodb_client, available=1)
+    store.create_job(USER_ID, JOB, MOOD, 10)
+    store.freeze_credit(USER_ID, JOB)
+    patch_store(monkeypatch, generate_handler, store)
+    monkeypatch.setenv("DURATION_MINUTES_OVERRIDE", "1")
+
+    script = plausible_script(1)
+    assert len(script.strip()) < min_script_chars(10)  # would fail without the override
+
+    bedrock = MagicMock()
+    bedrock.converse.return_value = bedrock_response(script)
+    monkeypatch.setattr(generate_handler, "_get_bedrock", lambda: bedrock)
+    monkeypatch.setattr(generate_handler, "_get_s3", lambda: s3_bucket)
+
+    result = generate_handler.lambda_handler(state, None)
+
+    assert result["duration_minutes"] == 10  # the record keeps the request
+    sent = bedrock.converse.call_args.kwargs["messages"][0]["content"][0]["text"]
+    assert f"{target_word_count(1)} words" in sent
+
+
 # ----------------------------------------------------------------------
 # The prompt
 # ----------------------------------------------------------------------

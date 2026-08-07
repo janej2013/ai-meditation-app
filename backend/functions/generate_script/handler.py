@@ -23,6 +23,12 @@ from .prompt import SYSTEM_PROMPT, build_user_message, min_script_chars, target_
 logger = logging.getLogger()
 logger.setLevel(os.environ.get("LOG_LEVEL", "INFO"))
 
+# Set only outside prod (pipeline_stack): every script is generated as if this
+# many minutes had been requested, so an end-to-end dev run costs almost no
+# LLM or TTS spend. Applied after validation, and only here -- the request, the
+# JOB item and the state machine payload all keep the duration the user picked.
+_DURATION_OVERRIDE_ENV = "DURATION_MINUTES_OVERRIDE"
+
 # Roughly 1.4 tokens per word, plus headroom for the model's own pacing.
 _TOKENS_PER_WORD = 2
 
@@ -79,7 +85,7 @@ def lambda_handler(event: dict[str, Any], context: object) -> dict[str, Any]:  #
 
     store.mark_job_generating(state.user_id, state.job_id)
 
-    script = _generate(job.mood_text, state.duration_minutes)
+    script = _generate(job.mood_text, _effective_duration(state.duration_minutes))
 
     key = script_key(state.job_id)
     _get_s3().put_object(
@@ -95,6 +101,16 @@ def lambda_handler(event: dict[str, Any], context: object) -> dict[str, Any]:  #
 
     state.script_key = key
     return state.model_dump()
+
+
+def _effective_duration(requested_minutes: int) -> int:
+    """The duration to generate for, after the dev cost cap."""
+    override = os.environ.get(_DURATION_OVERRIDE_ENV)
+    if not override:
+        return requested_minutes
+    minutes = int(override)
+    logger.info("duration override active: requested=%d generating=%d", requested_minutes, minutes)
+    return minutes
 
 
 def _generate(mood_text: str, duration_minutes: int) -> str:
