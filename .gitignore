@@ -28,6 +28,10 @@ frontend/playwright-report/
 frontend/test-results/
 frontend/e2e/.auth/
 
+# Scratch space for one-off artefacts (IAM policy documents fed to the
+# aws CLI, captured outputs, ...). Never source, never committed.
+tmp/
+
 # CDK
 cdk.out/
 .cdk.staging/
