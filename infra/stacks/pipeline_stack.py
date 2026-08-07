@@ -66,6 +66,12 @@ DEFAULT_TASK_TIMEOUT = Duration.seconds(30)
 # fallback, reachable with `-c tts_provider=polly`.
 DEFAULT_TTS_PROVIDER = "volcano"
 
+# Outside prod, every job is generated as if this short duration had been
+# requested, so a full end-to-end run costs almost no LLM or TTS spend. The UI
+# and the stored job are untouched -- only generate_script reads this, and the
+# request keeps the duration the user picked.
+DEV_DURATION_OVERRIDE_MINUTES = 1
+
 # The secret is created by hand in the console and merely *referenced* here:
 # CDK generating it would put the value in the CloudFormation template and in
 # `cdk diff` output, which is exactly what constraint 4 forbids. Contents:
@@ -123,11 +129,14 @@ class PipelineStack(Stack):
         rollback = self._task_function(
             "RollbackCredit", "rollback_credit", shared_layer, common_env
         )
+        generate_env = {**common_env, "BEDROCK_MODEL_ID": bedrock_model_id}
+        if not is_prod:
+            generate_env["DURATION_MINUTES_OVERRIDE"] = str(DEV_DURATION_OVERRIDE_MINUTES)
         generate = self._task_function(
             "GenerateScript",
             "generate_script",
             shared_layer,
-            {**common_env, "BEDROCK_MODEL_ID": bedrock_model_id},
+            generate_env,
             memory_size=512,
             timeout=Duration.seconds(120),
         )
