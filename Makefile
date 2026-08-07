@@ -19,7 +19,7 @@ RUFF := $(VENV)/ruff
 ENV ?= dev
 STACKS ?=
 
-# CI overrides (docs/cicd.md). APPROVAL=never because CI has no TTY for CDK's
+# CI overrides. APPROVAL=never because CI has no TTY for CDK's
 # IAM prompt; the review happens on the PR and in the deploy job's diff log.
 APPROVAL ?= broadening
 
