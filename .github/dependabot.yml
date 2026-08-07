@@ -1,7 +1,12 @@
 # Keeps the pinned actions current. Pinning without an update path just decays.
+# Grouped: one PR per interval instead of one per action -- each merge to main
+# is a full dev deploy, so update PRs are batched to deploy once.
 version: 2
 updates:
   - package-ecosystem: github-actions
     directory: /
     schedule:
       interval: monthly
+    groups:
+      actions:
+        patterns: ["*"]
