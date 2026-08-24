@@ -26,6 +26,16 @@ export interface Job {
   job_id: string
   status: JobStatus
   audio_url: string | null
+  /** Set once the pipeline has described the user's picture; null until then. */
+  picture_keywords: string[] | null
+}
+
+/** A one-shot S3 POST, signed by the API, for one JPEG. */
+export interface PictureUpload {
+  picture_id: string
+  url: string
+  fields: Record<string, string>
+  expires_in: number
 }
 
 export interface CheckoutResponse {
@@ -88,11 +98,38 @@ export function getAccount(): Promise<Account> {
 export function startGeneration(
   mood: string,
   durationMinutes: number,
+  pictureId?: string,
 ): Promise<GenerateResponse> {
   return request<GenerateResponse>('/generate', {
     method: 'POST',
-    body: JSON.stringify({ mood, duration_minutes: durationMinutes }),
+    body: JSON.stringify({
+      mood,
+      duration_minutes: durationMinutes,
+      ...(pictureId ? { picture_id: pictureId } : {}),
+    }),
   })
+}
+
+export function createPictureUpload(): Promise<PictureUpload> {
+  return request<PictureUpload>('/pictures/upload', { method: 'POST' })
+}
+
+/**
+ * Upload a prepared JPEG straight to S3 and return the id to hand to
+ * `startGeneration`. The bytes never touch the API: it only signs the policy,
+ * and the policy is what S3 enforces (one key, one content type, a size cap).
+ */
+export async function uploadPicture(picture: Blob): Promise<string> {
+  const upload = await createPictureUpload()
+
+  const form = new FormData()
+  for (const [name, value] of Object.entries(upload.fields)) form.append(name, value)
+  // S3 ignores everything after the file part, so it goes last.
+  form.append('file', picture)
+
+  const response = await fetch(upload.url, { method: 'POST', body: form })
+  if (!response.ok) throw new ApiError(response.status, 'Picture upload failed')
+  return upload.picture_id
 }
 
 export function getJob(jobId: string): Promise<Job> {

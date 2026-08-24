@@ -10,7 +10,14 @@ vi.mock('../auth/cognito', () => ({
 }))
 
 import { getIdToken } from '../auth/cognito'
-import { ApiError, NotSignedInError, getAccount, pollJob, startGeneration } from './client'
+import {
+  ApiError,
+  NotSignedInError,
+  getAccount,
+  pollJob,
+  startGeneration,
+  uploadPicture,
+} from './client'
 
 const mockToken = vi.mocked(getIdToken)
 
@@ -75,6 +82,43 @@ describe('request plumbing', () => {
       mood: 'anxious',
       duration_minutes: 10,
     })
+  })
+})
+
+describe('uploadPicture', () => {
+  it('posts the signed form to S3 with the file last and returns the id', async () => {
+    const fetchMock = vi.mocked(fetch)
+    fetchMock
+      .mockResolvedValueOnce(
+        jsonResponse(200, {
+          picture_id: 'pic-1',
+          url: 'https://bucket.s3.amazonaws.com/',
+          fields: { key: 'pictures/u/pic-1.jpg', policy: 'p', 'Content-Type': 'image/jpeg' },
+          expires_in: 300,
+        }),
+      )
+      .mockResolvedValueOnce(new Response(null, { status: 204 }))
+
+    const id = await uploadPicture(new Blob(['jpeg'], { type: 'image/jpeg' }))
+
+    expect(id).toBe('pic-1')
+    const [url, init] = fetchMock.mock.calls[1]
+    expect(url).toBe('https://bucket.s3.amazonaws.com/')
+    const form = init?.body as FormData
+    // Every signed field travels, and the file is the last part.
+    expect([...form.keys()]).toEqual(['key', 'policy', 'Content-Type', 'file'])
+    // No bearer token to S3: the policy is the authorisation.
+    expect(init?.headers).toBeUndefined()
+  })
+
+  it('surfaces a rejected policy as an ApiError', async () => {
+    vi.mocked(fetch)
+      .mockResolvedValueOnce(
+        jsonResponse(200, { picture_id: 'p', url: 'https://s3/', fields: {}, expires_in: 300 }),
+      )
+      .mockResolvedValueOnce(new Response('<Error/>', { status: 403 }))
+
+    await expect(uploadPicture(new Blob(['x']))).rejects.toMatchObject({ status: 403 })
   })
 })
 

@@ -56,7 +56,12 @@ function renderPlayer(state?: { audioUrl?: string }) {
 }
 
 function job(audioUrl: string | null) {
-  return { job_id: JOB_ID, status: 'DONE' as const, audio_url: audioUrl }
+  return {
+    job_id: JOB_ID,
+    status: 'DONE' as const,
+    audio_url: audioUrl,
+    picture_keywords: null,
+  }
 }
 
 beforeEach(() => {

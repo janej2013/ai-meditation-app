@@ -2,9 +2,11 @@
  * The waiting screen: polling GET /jobs/{id} while the pipeline runs. Words
  * mode shows the breathing circle + rotating captions over its own radial
  * wash; picture mode keeps the user's dreamscape in view ("Weaving your
- * picture into a dream…" — the prototype's picMode). DONE swaps the caption
- * for "Your dreamscape is ready", fades the screen out and hands the signed
- * audio_url to the player; FAILED goes to the refund screen.
+ * picture into a dream…" — the prototype's picMode), and once the pipeline
+ * has described the picture, the keywords it found ("In your picture, we
+ * found…"). DONE swaps the caption for "Your dreamscape is ready", fades the
+ * screen out and hands the signed audio_url to the player; FAILED goes to the
+ * refund screen.
  *
  * The background music started on the home screen keeps playing here; this
  * page only silences it on the way out to anywhere but the player.
@@ -33,6 +35,7 @@ export default function GeneratingPage() {
   const [capOpacity, setCapOpacity] = useState(1)
   const [ready, setReady] = useState(false)
   const [fade, setFade] = useState(1)
+  const [keywords, setKeywords] = useState<string[] | null>(null)
   const abortRef = useRef<AbortController | null>(null)
 
   useEffect(() => {
@@ -53,7 +56,12 @@ export default function GeneratingPage() {
     abortRef.current = controller
     const timers: ReturnType<typeof setTimeout>[] = []
 
-    pollJob(jobId, { signal: controller.signal })
+    pollJob(jobId, {
+      signal: controller.signal,
+      onUpdate: (job) => {
+        if (job.picture_keywords?.length) setKeywords(job.picture_keywords)
+      },
+    })
       .then((job) => {
         if (job.status === 'DONE' && job.audio_url) {
           // The prototype's arrival beat: caption swap, screen fade, player.
@@ -151,11 +159,31 @@ export default function GeneratingPage() {
       >
         {ready
           ? 'Your dreamscape is ready'
-          : pic
-            ? 'Weaving your picture into a dream…'
-            : CAPTIONS[capIdx]}
+          : keywords
+            ? 'In your picture, we found…'
+            : pic
+              ? 'Weaving your picture into a dream…'
+              : CAPTIONS[capIdx]}
       </div>
-      {pic && !ready && (
+      {keywords && !ready && (
+        <div
+          style={{
+            marginTop: 14,
+            display: 'flex',
+            flexWrap: 'wrap',
+            justifyContent: 'center',
+            gap: 9,
+            padding: '0 30px',
+          }}
+        >
+          {keywords.map((k) => (
+            <span key={k} className="chip selected">
+              {k}
+            </span>
+          ))}
+        </div>
+      )}
+      {pic && !ready && !keywords && (
         <div
           style={{
             marginTop: 12,
