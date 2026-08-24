@@ -178,12 +178,34 @@ def test_the_public_key_reaches_a_key_group(template):
 
 
 def test_audio_behaviors_send_cors_headers(template):
-    """Web Audio needs crossOrigin reads; without CORS the mix is silent."""
+    """Web Audio needs crossOrigin reads; without CORS the mix is silent.
+
+    Not the managed SimpleCORS policy: that one skips any request carrying a
+    non-safelisted header, and modern Chromium sends ``Priority`` on every
+    fetch -- so under SimpleCORS the mix worked in curl and failed in every
+    real browser. Two things are pinned here: the policy allows *every*
+    request header so no request shape can be disqualified, and both
+    behaviours actually reference it (a managed policy id would be a bare
+    string, not a Ref).
+    """
     config = distribution(template, "audio")
     jobs = next(b for b in config["CacheBehaviors"] if b["PathPattern"] == "jobs/*")
 
-    assert config["DefaultCacheBehavior"].get("ResponseHeadersPolicyId")
-    assert jobs.get("ResponseHeadersPolicyId")
+    # Locate the policy through the behaviours rather than by counting: a
+    # security-headers policy on the site distribution must not break this.
+    ref = config["DefaultCacheBehavior"]["ResponseHeadersPolicyId"]
+    assert isinstance(ref, dict) and "Ref" in ref, "managed policy id instead of our own"
+    assert jobs["ResponseHeadersPolicyId"] == ref
+
+    policies = template.find_resources("AWS::CloudFront::ResponseHeadersPolicy")
+    cors = policies[ref["Ref"]]["Properties"]["ResponseHeadersPolicyConfig"]["CorsConfig"]
+    assert cors == {
+        "AccessControlAllowCredentials": False,
+        "AccessControlAllowHeaders": {"Items": ["*"]},
+        "AccessControlAllowMethods": {"Items": ["GET", "HEAD", "OPTIONS"]},
+        "AccessControlAllowOrigins": {"Items": ["*"]},
+        "OriginOverride": True,
+    }
 
 
 def test_without_a_public_key_nothing_is_signed():

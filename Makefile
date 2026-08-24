@@ -36,8 +36,16 @@ AUDIO_PUB_KEY ?= cf-signing.pub.pem
 # travels as a file path, never inline PEM (`npm run` flattens multi-line
 # arguments to their first line, which CloudFront rejects). ALLOWED_ORIGINS is
 # required for prod and reaches CI as a GitHub Actions variable.
+#
+# BEDROCK_MODEL swaps the generation model for a debugging session, e.g.
+#   make deploy ENV=dev STACKS=Meditation-dev-Pipeline BEDROCK_MODEL=amazon.nova-micro-v1:0
+# Deliberately persisted nowhere: CI deploys without it, so ANY merge to main
+# reverts dev to the default (Nova Lite). Debug configuration cannot linger.
+BEDROCK_MODEL ?=
+
 CONTEXT = $(if $(wildcard $(AUDIO_PUB_KEY)),-c audio_public_key_file="$(abspath $(AUDIO_PUB_KEY))",) \
-          $(if $(ALLOWED_ORIGINS),-c allowed_origins="$$ALLOWED_ORIGINS")
+          $(if $(ALLOWED_ORIGINS),-c allowed_origins="$$ALLOWED_ORIGINS") \
+          $(if $(BEDROCK_MODEL),-c bedrock_model_id="$(BEDROCK_MODEL)")
 
 .DEFAULT_GOAL := help
 .PHONY: help check lint test synth layers diff deploy fe-check fe-lint fe-test fe-build \

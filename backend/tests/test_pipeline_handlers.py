@@ -65,7 +65,10 @@ def s3_bucket(dynamodb_client):
 @pytest.fixture
 def audio_env(monkeypatch):
     monkeypatch.setenv("AUDIO_BUCKET", BUCKET)
-    monkeypatch.setenv("BEDROCK_MODEL_ID", "apac.anthropic.claude-3-5-haiku-20241022-v1:0")
+    monkeypatch.setenv("BEDROCK_MODEL_ID", "amazon.nova-lite-v1:0")
+    # A developer's shell may export the dev cost cap; it would shrink every
+    # generation under test and break the maxTokens arithmetic below.
+    monkeypatch.delenv("DURATION_MINUTES_OVERRIDE", raising=False)
 
 
 def patch_store(monkeypatch, module, store):
@@ -115,8 +118,11 @@ def test_freeze_rejects_a_malformed_payload(monkeypatch, store):
 # ----------------------------------------------------------------------
 
 
-def bedrock_response(text: str) -> dict:
-    return {"output": {"message": {"content": [{"text": text}]}}}
+def bedrock_response(text: str, stop_reason: str = "end_turn") -> dict:
+    return {
+        "output": {"message": {"content": [{"text": text}]}},
+        "stopReason": stop_reason,
+    }
 
 
 def plausible_script(duration_minutes: int = 10) -> str:
@@ -175,6 +181,54 @@ def test_generate_reads_mood_from_dynamodb_not_the_payload(
 
     sent = bedrock.converse.call_args.kwargs["messages"][0]["content"][0]["text"]
     assert MOOD in sent  # ...yet the prompt still got it, via the JOB item
+
+
+@pytest.mark.parametrize(
+    ("minutes", "expected"),
+    [(10, 10 * 95 * 2), (30, 5000)],
+    ids=["under-cap", "capped"],
+)
+def test_generate_caps_max_tokens_at_the_model_limit(
+    store, dynamodb_client, s3_bucket, audio_env, monkeypatch, state, minutes, expected
+):
+    """Nova Lite rejects maxTokens > 5000 outright, which would fail every
+    long request permanently instead of generating a script."""
+    from .conftest import seed_entitlement
+
+    seed_entitlement(dynamodb_client, available=1)
+    store.create_job(USER_ID, JOB, MOOD, minutes)
+    store.freeze_credit(USER_ID, JOB)
+    patch_store(monkeypatch, generate_handler, store)
+
+    bedrock = MagicMock()
+    bedrock.converse.return_value = bedrock_response(plausible_script(minutes))
+    monkeypatch.setattr(generate_handler, "_get_bedrock", lambda: bedrock)
+    monkeypatch.setattr(generate_handler, "_get_s3", lambda: s3_bucket)
+
+    generate_handler.lambda_handler({**state, "duration_minutes": minutes}, None)
+
+    assert bedrock.converse.call_args.kwargs["inferenceConfig"]["maxTokens"] == expected
+
+
+def test_generate_rejects_a_script_truncated_at_max_tokens(
+    store, dynamodb_client, s3_bucket, audio_env, monkeypatch, state
+):
+    """A max_tokens stop is a truncated script even when it clears the length
+    floor; letting it through would pay for TTS on prose that ends mid-sentence."""
+    from .conftest import seed_entitlement
+
+    seed_entitlement(dynamodb_client, available=1)
+    store.create_job(USER_ID, JOB, MOOD, 10)
+    store.freeze_credit(USER_ID, JOB)
+    patch_store(monkeypatch, generate_handler, store)
+
+    bedrock = MagicMock()
+    bedrock.converse.return_value = bedrock_response(plausible_script(), stop_reason="max_tokens")
+    monkeypatch.setattr(generate_handler, "_get_bedrock", lambda: bedrock)
+    monkeypatch.setattr(generate_handler, "_get_s3", lambda: s3_bucket)
+
+    with pytest.raises(ScriptGenerationError, match="truncated"):
+        generate_handler.lambda_handler(state, None)
 
 
 def test_generate_without_a_mood_fails(

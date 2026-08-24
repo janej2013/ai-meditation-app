@@ -31,23 +31,24 @@ VALID_ENVS = ("dev", "prod")
 REGION = "ap-southeast-2"  # Sydney, per CLAUDE.md
 DEV_ORIGINS = ["http://localhost:5173"]  # Vite dev server
 
-# Invocation goes through a cross-region inference profile rather than the bare
-# model id (CLAUDE.md). The model is listed in ap-southeast-2, but current
-# Anthropic models on Bedrock are invoked on demand through a profile, and the
-# profile also gives the request more than one region of capacity to land in.
+# Amazon Nova Lite, invoked directly by its bare model id. It is served
+# on demand from ap-southeast-2 itself (`list-foundation-models` reports
+# ON_DEMAND alongside INFERENCE_PROFILE), so the mood text a user submits -- a
+# description of their emotional state -- is processed in Sydney and nowhere
+# else. The alternative `apac.` profile would spread the request over Tokyo,
+# Seoul, Mumbai and Singapore for more capacity; the state machine's
+# exponential backoff on the Bedrock task absorbs single-region throttling
+# instead, so residency wins.
 #
-# Haiku 4.5 offers an `au.` and a `global.` profile; `au.` is the deliberate
-# choice. The mood text a user submits
-# is a description of their emotional state, and `global.` would route it to any
-# commercial region worldwide, while `au.` keeps inference in Australia. The
-# smaller `au.` capacity pool throttles sooner, which the state machine's
-# exponential backoff on the Bedrock task already absorbs.
+# Nova Lite replaced Claude Haiku 4.5 as the default on cost: a guided
+# meditation is short, formulaic prose, and the pipeline calls the model once
+# per job, so the cheaper model covers it. Haiku still works -- override with
+# `-c bedrock_model_id=au.anthropic.claude-haiku-4-5-20251001-v1:0`; a profile
+# from a geo not in pipeline_stack._bedrock_resources also needs an entry there.
 #
 # Availability is per-account -- confirm with
-#     aws bedrock list-inference-profiles --region ap-southeast-2
-# and override with `-c bedrock_model_id=...`. A changed geo prefix also needs a
-# matching entry in pipeline_stack._bedrock_resources.
-DEFAULT_BEDROCK_MODEL_ID = "au.anthropic.claude-haiku-4-5-20251001-v1:0"
+#     aws bedrock list-foundation-models --region ap-southeast-2 --by-provider Amazon
+DEFAULT_BEDROCK_MODEL_ID = "amazon.nova-lite-v1:0"
 
 
 def resolve_audio_public_key(app: cdk.App) -> str | None:

@@ -176,6 +176,32 @@ class FrontendStack(Stack):
             "adding it here would create a cross-stack cycle.",
         )
 
+        # Replaces the managed SimpleCORS policy, which was the playback bug:
+        # SimpleCORS only acts on requests CloudFront classifies as *simple*
+        # CORS, and modern Chromium sends ``Priority: u=1, i`` on every fetch.
+        # That header is not CORS-safelisted, so CloudFront withheld
+        # Access-Control-Allow-Origin from exactly the browsers users run,
+        # while curl -- which sends no Priority header -- kept seeing it.
+        # ``allow_headers=["*"]`` is the load-bearing difference: no request
+        # header can disqualify a request from getting the CORS response
+        # headers. (A static custom header would sidestep classification
+        # entirely, but the CloudFront API rejects ACAO as a custom header,
+        # so the CORS section is the only route.) ``*`` origins is right for
+        # both behaviours: access control on jobs/* is the signed URL, not
+        # CORS, and assets/* is deliberately public.
+        cors_headers = cloudfront.ResponseHeadersPolicy(
+            self,
+            "AudioCorsHeaders",
+            comment=f"meditation-{env_name} audio CORS allow-all",
+            cors_behavior=cloudfront.ResponseHeadersCorsBehavior(
+                access_control_allow_credentials=False,
+                access_control_allow_headers=["*"],
+                access_control_allow_methods=["GET", "HEAD", "OPTIONS"],
+                access_control_allow_origins=["*"],
+                origin_override=True,
+            ),
+        )
+
         key_group = None
         # Empty until a public key is configured. The API surfaces that as a
         # runtime signing error rather than a synth failure, so `cdk synth`
@@ -209,7 +235,7 @@ class FrontendStack(Stack):
                 cache_policy=cloudfront.CachePolicy.CACHING_OPTIMIZED,
                 # The PWA fetches BGM with crossOrigin="anonymous" so Web Audio
                 # can read the buffer; without these headers the mix is silent.
-                response_headers_policy=cloudfront.ResponseHeadersPolicy.CORS_ALLOW_ALL_ORIGINS,
+                response_headers_policy=cors_headers,
                 compress=False,  # already-compressed audio
             ),
             additional_behaviors={
@@ -221,9 +247,7 @@ class FrontendStack(Stack):
                     # not move the path.
                     trusted_key_groups=[key_group] if key_group else None,
                     cache_policy=cloudfront.CachePolicy.CACHING_OPTIMIZED,
-                    response_headers_policy=(
-                        cloudfront.ResponseHeadersPolicy.CORS_ALLOW_ALL_ORIGINS
-                    ),
+                    response_headers_policy=cors_headers,
                     compress=False,
                 ),
             },

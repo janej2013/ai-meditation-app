@@ -161,6 +161,7 @@ jobs:
               env.write(f"SITE_BUCKET={flat['SiteBucketName']}\n")
               env.write(f"SITE_DISTRIBUTION_ID={flat['SiteDistributionId']}\n")
               env.write(f"API_URL={flat['ApiUrl']}\n")
+              env.write(f"AUDIO_DOMAIN={flat['AudioDomainName']}\n")
           PY
 
       - name: Build and publish the PWA
@@ -170,5 +171,15 @@ jobs:
           aws cloudfront create-invalidation \
             --distribution-id "$SITE_DISTRIBUTION_ID" --paths '/*'
 
+      # Two smokes: the API is alive, and the audio edge serves CORS to a
+      # browser-shaped request. The Priority header is load-bearing: managed
+      # SimpleCORS withheld Access-Control-Allow-Origin from requests carrying
+      # it (every modern Chromium fetch) -- a failure mode plain curl cannot
+      # see, which is how it shipped the first time.
       - name: Smoke
-        run: curl -fsS "$API_URL/health"
+        run: |
+          curl -fsS "$API_URL/health"
+          curl -fsS -o /dev/null -D - \
+            -H "Origin: https://smoke-test.invalid" -H "Priority: u=1, i" \
+            "https://$AUDIO_DOMAIN/assets/bgm/silence.mp3" \
+            | grep -i "access-control-allow-origin: \*"

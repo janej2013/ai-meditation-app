@@ -11,7 +11,7 @@ This is a real product AND a portfolio project demonstrating AWS + GenAI enginee
 - **IaC**: AWS CDK v2, Python. Region `ap-southeast-2` (Sydney). CloudFront ACM certs in `us-east-1`.
 - **Backend API**: FastAPI + Mangum on Lambda (container image, built with Docker).
 - **Pipeline**: AWS Step Functions (Standard) orchestrating small single-purpose zip Lambdas.
-- **LLM**: Amazon Bedrock, Claude Haiku (use cross-region inference profile if the model is unavailable in ap-southeast-2).
+- **LLM**: Amazon Bedrock, Amazon Nova Lite by default, invoked on demand in ap-southeast-2 (bare model id, no cross-region profile, so user text stays in Sydney). Claude Haiku remains a supported override via `-c bedrock_model_id=`; use a cross-region inference profile only if a chosen model is unavailable in ap-southeast-2.
 - **TTS**: Volcano Engine TTS (primary) and Amazon Polly (fallback), behind a `TTSProvider` abstraction. Never call a TTS vendor SDK/API directly from business logic.
 - **Data**: DynamoDB, single-table design, on-demand billing.
 - **Auth**: Cognito User Pool, JWT authorizer on API Gateway HTTP API.
