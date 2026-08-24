@@ -22,13 +22,13 @@ if shutil.which("node") is None:  # pragma: no cover - environment guard
 
 import aws_cdk as cdk
 from aws_cdk import assertions
+from conftest import build_data_stack
 
 from stacks.data_stack import DataStack
 from stacks.frontend_stack import FrontendStack
 
 ACCOUNT = "111122223333"
 REGION = "ap-southeast-2"
-ORIGINS = ["http://localhost:5173"]
 
 # A syntactically valid RSA public key. Never used to sign anything -- CDK only
 # passes the PEM through to CloudFront.
@@ -47,7 +47,7 @@ def build(**overrides) -> tuple[DataStack, FrontendStack]:
     app = cdk.App()
     env = cdk.Environment(account=ACCOUNT, region=REGION)
 
-    data = DataStack(app, "Data", env_name="dev", upload_origins=ORIGINS, env=env)
+    data = build_data_stack(app=app)
     frontend = FrontendStack(
         app,
         "Frontend",

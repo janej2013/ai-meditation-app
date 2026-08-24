@@ -26,17 +26,16 @@ if shutil.which("node") is None:  # pragma: no cover - environment guard
 import aws_cdk as cdk
 from aws_cdk import assertions
 from aws_cdk import aws_dynamodb as dynamodb
+from conftest import build_data_stack
 
 from stacks.auth_stack import AuthStack
-from stacks.data_stack import AUDIO_RETENTION_DAYS, DataStack
+from stacks.data_stack import AUDIO_RETENTION_DAYS
 
 ENV = cdk.Environment(account="111122223333", region="ap-southeast-2")
-ORIGINS = ["http://localhost:5173"]
 
 
 def test_audio_expiry_only_touches_jobs() -> None:
-    app = cdk.App()
-    stack = DataStack(app, "Data", env_name="dev", upload_origins=ORIGINS, env=ENV)
+    stack = build_data_stack()
     template = assertions.Template.from_stack(stack)
 
     buckets = template.find_resources("AWS::S3::Bucket")

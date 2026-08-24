@@ -15,21 +15,19 @@ import pytest
 if shutil.which("node") is None:  # pragma: no cover - environment guard
     pytest.skip("aws-cdk-lib needs node on PATH", allow_module_level=True)
 
-import aws_cdk as cdk
 from aws_cdk import assertions
-from conftest import state_machine_definition
+from conftest import build_data_stack
 
-from stacks.data_stack import PICTURE_RETENTION_DAYS, DataStack
+from stacks.data_stack import PICTURE_RETENTION_DAYS
 
-ENV = cdk.Environment(account="111122223333", region="ap-southeast-2")
 ORIGINS = ["https://app.example.com"]
 
 
 def audio_bucket_properties() -> dict:
-    app = cdk.App()
-    stack = DataStack(app, "Data", env_name="dev", upload_origins=ORIGINS, env=ENV)
+    stack = build_data_stack(upload_origins=ORIGINS)
     template = assertions.Template.from_stack(stack)
-    return next(iter(template.find_resources("AWS::S3::Bucket").values()))["Properties"]
+    [bucket] = template.find_resources("AWS::S3::Bucket").values()
+    return bucket["Properties"]
 
 
 def test_pictures_expire_by_lifecycle_after_a_year() -> None:
@@ -49,11 +47,6 @@ def test_bucket_cors_admits_only_the_upload_post() -> None:
     assert len(rules) == 1
     assert rules[0]["AllowedMethods"] == ["POST"]
     assert rules[0]["AllowedOrigins"] == ORIGINS
-
-
-@pytest.fixture(scope="module")
-def states(pipeline_stack) -> dict:
-    return state_machine_definition(pipeline_stack)["States"]
 
 
 def test_freeze_routes_through_a_choice_on_has_picture(states) -> None:
