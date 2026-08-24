@@ -17,7 +17,7 @@ This is a real product AND a portfolio project demonstrating AWS + GenAI enginee
 - **Auth**: Cognito User Pool, JWT authorizer on API Gateway HTTP API.
 - **Payments**: Stripe Checkout + webhooks. Never build custom payment UI.
 - **Frontend**: React + Vite, PWA (manifest + service worker), hosted on S3 + CloudFront.
-- **Audio mixing**: in the browser, via the Web Audio API. The pipeline delivers narration only; the PWA mixes a user-selectable BGM track under it at playback time, so the listener can switch tracks or change the music volume mid-session. Pre-bundled royalty-free BGM ships to `assets/` on the audio bucket. `backend/functions/mix_audio/` still holds a server-side ffmpeg mixer for a future download/share feature — it is kept green by its unit tests but is **not deployed**; see README.
+- **Audio mixing**: in the browser, via the Web Audio API. The pipeline delivers narration only; the PWA mixes a user-selectable BGM track under it at playback time, so the listener can switch tracks or change the music volume mid-session. BGM is licensed from Pixabay and lives under `assets/` on the audio bucket, uploaded by hand via `make upload-bgm` (the licence forbids redistributing the files, so they are not in git and not in the CDK asset; only the CI probe `silence.mp3` ships with a deploy). `backend/functions/mix_audio/` still holds a server-side ffmpeg mixer for a future download/share feature — it is kept green by its unit tests but is **not deployed**; see README.
 - **Python**: 3.12, type hints everywhere, Pydantic v2 models, `ruff` for lint/format, `pytest` for tests.
 
 ## Repository layout
@@ -54,7 +54,7 @@ frontend/           React + Vite PWA
 6. **Audio delivery**: CloudFront signed URLs to S3 objects. Never stream audio bytes through Lambda. Applies to per-job narration under `jobs/`; the shared BGM under `assets/` carries no user content and is served as ordinary cached CloudFront objects so the browser can switch tracks without a round trip for a new signature.
 7. **No PII in prompts or logs.** The LLM prompt must instruct the model not to repeat user personal details verbatim in the script; the vision prompt must not describe people or transcribe text in the picture. Keywords and summaries derived from a user's picture are user content: they live on the JOB item like `mood_text`, never in the state machine payload, and never in INFO logs. Log `job_id`s, status and counts only.
 8. **`cdk deploy` and any command that spends money or touches live AWS resources is human-only.** Claude may run `cdk synth`, `cdk diff`, `ruff`, `pytest`, and local builds.
-9. **Uploaded pictures are written only under `pictures/<cognito_sub>/` via a presigned S3 POST that fixes key, content type and size.** They are kept for the planned replay feature and expire by the bucket's lifecycle rule alone — no business code deletes a user's object, and no Lambda holds `s3:DeleteObject` on them.
+9. **Uploaded pictures are written only under `pictures/<cognito_sub>/` via a presigned S3 POST that fixes key, content type and size.** They are kept for the planned replay feature and expire by the bucket's lifecycle rule alone — no business code deletes a user's object, and no pipeline or API Lambda holds `s3:DeleteObject` on them. (Deployment custodians are the exception: dev's `auto_delete_objects` on stack destroy, and the BucketDeployment handler's default grant.)
 
 ## DynamoDB single-table conventions
 
