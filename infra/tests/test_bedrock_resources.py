@@ -129,3 +129,22 @@ def test_only_generate_script_may_invoke_bedrock(stack):
 
     assert len(with_bedrock) == 1
     assert with_bedrock[0].startswith("GenerateScript")
+
+
+# ----------------------------------------------------------------------
+# The shipped default
+# ----------------------------------------------------------------------
+
+
+def test_the_default_model_id_is_nova_lite_served_from_sydney(stack):
+    """Nova Lite is invoked by its bare id, which keeps inference in the deploy
+    region. Reading the default from app.py rather than restating it here means
+    a change there must also survive the IAM helper -- the two drift silently
+    otherwise, and the failure is a runtime AccessDenied.
+    """
+    from app import DEFAULT_BEDROCK_MODEL_ID
+
+    assert DEFAULT_BEDROCK_MODEL_ID == "amazon.nova-lite-v1:0"
+    assert stack._bedrock_resources(DEFAULT_BEDROCK_MODEL_ID) == [
+        f"arn:aws:bedrock:{REGION}::foundation-model/{DEFAULT_BEDROCK_MODEL_ID}"
+    ]

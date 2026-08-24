@@ -1,4 +1,4 @@
-"""Step 2: generate the meditation script with Bedrock (Claude Haiku).
+"""Step 2: generate the meditation script with Bedrock (Amazon Nova Lite).
 
 Reads the mood from the JOB item rather than the state machine payload, so
 user input never reaches the execution history (constraint 7). Writes the
@@ -31,6 +31,12 @@ _DURATION_OVERRIDE_ENV = "DURATION_MINUTES_OVERRIDE"
 
 # Roughly 1.4 tokens per word, plus headroom for the model's own pacing.
 _TOKENS_PER_WORD = 2
+
+# Nova Lite refuses `maxTokens` above 5000 with a ValidationException, which is
+# permanent and rolls the credit back. A 30-minute script asks for 5700 by the
+# rule above, so the budget is capped rather than the duration. 5000 tokens is
+# still ~3500 words against a 2850-word target, so nothing is truncated.
+_MAX_OUTPUT_TOKENS = 5000
 
 # Bedrock signals overload and throttling with these. Everything else --
 # ValidationException, AccessDeniedException, a malformed response -- is
@@ -126,7 +132,7 @@ def _generate(mood_text: str, duration_minutes: int) -> str:
                 }
             ],
             inferenceConfig={
-                "maxTokens": words * _TOKENS_PER_WORD,
+                "maxTokens": min(words * _TOKENS_PER_WORD, _MAX_OUTPUT_TOKENS),
                 "temperature": 0.7,
             },
         )

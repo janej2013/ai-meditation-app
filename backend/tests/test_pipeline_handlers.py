@@ -65,7 +65,7 @@ def s3_bucket(dynamodb_client):
 @pytest.fixture
 def audio_env(monkeypatch):
     monkeypatch.setenv("AUDIO_BUCKET", BUCKET)
-    monkeypatch.setenv("BEDROCK_MODEL_ID", "apac.anthropic.claude-3-5-haiku-20241022-v1:0")
+    monkeypatch.setenv("BEDROCK_MODEL_ID", "amazon.nova-lite-v1:0")
 
 
 def patch_store(monkeypatch, module, store):
@@ -175,6 +175,33 @@ def test_generate_reads_mood_from_dynamodb_not_the_payload(
 
     sent = bedrock.converse.call_args.kwargs["messages"][0]["content"][0]["text"]
     assert MOOD in sent  # ...yet the prompt still got it, via the JOB item
+
+
+@pytest.mark.parametrize(
+    ("minutes", "expected"),
+    [(10, 10 * 95 * 2), (30, 5000)],
+    ids=["under-cap", "capped"],
+)
+def test_generate_caps_max_tokens_at_the_model_limit(
+    store, dynamodb_client, s3_bucket, audio_env, monkeypatch, state, minutes, expected
+):
+    """Nova Lite rejects maxTokens > 5000 outright, which would fail every
+    long request permanently instead of generating a script."""
+    from .conftest import seed_entitlement
+
+    seed_entitlement(dynamodb_client, available=1)
+    store.create_job(USER_ID, JOB, MOOD, minutes)
+    store.freeze_credit(USER_ID, JOB)
+    patch_store(monkeypatch, generate_handler, store)
+
+    bedrock = MagicMock()
+    bedrock.converse.return_value = bedrock_response(plausible_script(minutes))
+    monkeypatch.setattr(generate_handler, "_get_bedrock", lambda: bedrock)
+    monkeypatch.setattr(generate_handler, "_get_s3", lambda: s3_bucket)
+
+    generate_handler.lambda_handler({**state, "duration_minutes": minutes}, None)
+
+    assert bedrock.converse.call_args.kwargs["inferenceConfig"]["maxTokens"] == expected
 
 
 def test_generate_without_a_mood_fails(

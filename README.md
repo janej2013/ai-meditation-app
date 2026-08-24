@@ -416,18 +416,27 @@ fade and tail values are what the browser mixer should reproduce.
 
 ### Bedrock model id
 
-Claude Haiku is not available directly in `ap-southeast-2`, so the default is
-the APAC cross-region inference profile. **Availability is per-account** —
-confirm yours and override if it differs:
+The default is Amazon Nova Lite, `amazon.nova-lite-v1:0`, called by its bare
+model id: it is served on demand from `ap-southeast-2` itself, so the mood
+text never leaves Sydney. It replaced Claude Haiku 4.5 on cost — one short,
+formulaic prose generation per job does not need the larger model.
+`generate_script` caps `maxTokens` at 5000, Nova Lite's output limit, because a
+30-minute request would otherwise ask for more and be rejected outright.
+
+Any Converse-API model works. Claude Haiku is still wired for IAM and can be
+restored per deployment; **availability is per-account**, so confirm first:
 
 ```bash
+aws bedrock list-foundation-models --region ap-southeast-2 --by-provider Amazon
 aws bedrock list-inference-profiles --region ap-southeast-2
-cd infra && npm run synth -- -c bedrock_model_id=<your-profile-id>
+cd infra && npm run synth -- -c bedrock_model_id=au.anthropic.claude-haiku-4-5-20251001-v1:0
 ```
 
 A cross-region profile needs `bedrock:InvokeModel` on **both** the profile ARN
 and the foundation-model ARN in every region the profile can route to; granting
-only the profile fails at runtime with an opaque `AccessDenied`.
+only the profile fails at runtime with an opaque `AccessDenied`. A bare model id
+needs only the model ARN in the deploy region. `_bedrock_resources` in
+`pipeline_stack.py` derives both cases from the id's geo prefix.
 
 ## Architecture — billing
 
