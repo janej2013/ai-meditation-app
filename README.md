@@ -71,15 +71,6 @@ Deliberate deferrals, recorded so they read as decisions rather than oversights.
   the wildcard for a weaker separation of concerns. Worth revisiting if the audio bucket ever holds
   anything a leak would be expensive.
 
-- **"Drift from a picture" ships client-side only; the keywords screen waits for a vision step.**
-  The picture path is open to every user (no gate): the chosen file becomes an object URL that
-  `ParticleCloud` cover-crops and samples into the dreamscape, dissolving into stardust — it never
-  leaves the browser, which is what the chooser's privacy line promises. What the prototype shows
-  beyond that is not built, deliberately: `POST /generate` accepts only mood text and the pipeline
-  has no vision step, so the "In your picture, we found…" keywords screen would have to fake its
-  keywords. Instead the picture flow lands on the mood panel and the script is driven by the
-  user's words; the keyword moment unlocks when the pipeline grows an image-understanding task.
-
 - **The prototype's passwordless sign-in and player captions stay aspirational.** Cognito's
   standard flow needs a password (the signup screen says so honestly), and there is no caption
   track in the pipeline, so the player omits the prototype's dead "Captions" label. The
@@ -100,14 +91,19 @@ PK = USER#<cognito_sub>
   SK = PROFILE
   SK = ENTITLEMENT          available, frozen, plan, period_end
   SK = SUB#<stripe_subscription_id>
-  SK = JOB#<job_id>         status, audio_key, created_at, updated_at
+  SK = JOB#<job_id>         status, audio_key, picture_key, picture_keywords,
+                            picture_summary, created_at, updated_at
 ```
 
-**S3 `AudioBucket`** — generated audio. All public access blocked, SSE-S3, TLS enforced, objects
-expire after 90 days. The bucket stays private and audio bytes never stream through Lambda:
-delivery is a CloudFront signed URL for `jobs/*` and plain cached CloudFront objects for
-`assets/*` — see *frontend delivery* below. CORS lives on the distribution's response headers
-policy, not the bucket.
+**S3 `AudioBucket`** — generated audio and uploaded pictures. All public access blocked, SSE-S3,
+TLS enforced. `jobs/*` (script + narration) expires after 90 days; `pictures/*` after 365 — the
+pictures are kept for the planned replay feature (re-listen without spending a credit), nothing
+in the pipeline deletes them, and when replay lands the audio retention should move to match.
+The bucket stays private and audio bytes never stream through Lambda: delivery is a CloudFront
+signed URL for `jobs/*` and plain cached CloudFront objects for `assets/*` — see *frontend
+delivery* below. Download CORS lives on the distribution's response headers policy; the bucket
+itself carries one CORS rule, `POST` only from the site origins, for the browser's direct
+picture upload (see *Drift from a picture* below).
 
 Both resources use `RemovalPolicy.DESTROY` in dev and `RETAIN` in prod, selected by the `env`
 context value. Stacks are named `Meditation-<env>-<Concern>` so dev and prod coexist in one account.
@@ -200,19 +196,24 @@ Images are built at `cdk deploy`.
 
 ## Architecture — the generation pipeline
 
-`infra/stacks/pipeline_stack.py` builds a Standard state machine over five small
+`infra/stacks/pipeline_stack.py` builds a Standard state machine over six small
 zip Lambdas:
 
 ```
-FreezeCredit ──► GenerateScript ──► Synthesize ──► CommitCredit ──► Succeed
-     │                  │                │              │
-     │ InsufficientCreditsError          └──────────────┤ States.ALL
-     ▼                                                  ▼
-InsufficientCredits (Fail)                    RollbackCredit ──► GenerationFailed (Fail)
+FreezeCredit ──► HasPicture? ──yes──► DescribePicture ──► GenerateScript ──► Synthesize ──► CommitCredit ──► Succeed
+     │                │  no                   │                  │                │              │
+     │                └───────────────────────┼──────────────────┘                │              │
+     │ InsufficientCreditsError               └───────────────────────────────────┴──────────────┤ States.ALL
+     ▼                                                                                           ▼
+InsufficientCredits (Fail)                                                RollbackCredit ──► GenerationFailed (Fail)
    no refund — nothing was frozen
 ```
 
-Execution timeout 10 minutes; per-state timeouts 30 s / 120 s / 180 s / 30 s.
+Execution timeout 35 minutes (`test_state_machine` proves it covers every retry
+policy's worst case); per-state timeouts 30 s / 60 s / 120 s / 180 s / 30 s.
+`HasPicture` is a Choice on the execution input's `has_picture` flag — guarded
+by `IsPresent`, because a Choice cannot Catch and a comparison against a
+missing path would terminate the execution with the credit still frozen.
 
 There is no mix step — see [Mixing happens in the browser](#mixing-happens-in-the-browser).
 
@@ -225,8 +226,8 @@ identical across environments, and prod templates carry no override at all
 (pinned by `infra/tests/test_duration_override.py`).
 
 **Retries name concrete exception classes, never `States.ALL`.** `generate_script`
-retries `BedrockTransientError`, `synthesize` retries `TTSTransientError`, and
-both add the four Lambda transport errors — 3 attempts, 2 s base, ×2 backoff. A
+and `describe_picture` retry `BedrockTransientError`, `synthesize` retries
+`TTSTransientError`, and all add the four Lambda transport errors — 3 attempts, 2 s base, ×2 backoff. A
 Pydantic `ValidationError` or a Bedrock `ValidationException` is permanent, so it
 falls straight to `Catch` instead of burning three attempts on something that
 cannot succeed.
@@ -265,14 +266,47 @@ class PipelineState(BaseModel):
     user_id: str
     job_id: str
     duration_minutes: int
+    has_picture: bool  # routes the Choice; the key itself stays on the item
     script_key: str | None  # set by generate_script
     narration_key: str | None  # set by synthesize — what the file is
     audio_key: str | None  # set by synthesize — what the client plays
 ```
 
-`POST /generate` writes `mood_text` onto the JOB item and `generate_script`
-reads it back from DynamoDB. The generated script goes to S3 for the same
-reason. Handlers log lengths and ids, never content.
+`POST /generate` writes `mood_text` (and `picture_key`, when there is one) onto
+the JOB item; `describe_picture` and `generate_script` read them back from
+DynamoDB, and the picture's keywords and summary go onto the same item. The
+generated script goes to S3 for the same reason. Handlers log lengths, counts
+and ids, never content.
+
+### Drift from a picture
+
+The picture path is open to every user, and the picture is real input to the
+pipeline. See [docs/describe-picture-step.md](docs/describe-picture-step.md)
+for the design; the shape:
+
+1. The browser normalises the chosen file to one JPEG ≤ 1568 px
+   (`frontend/src/picture/prepare.ts`) — Nova reads JPEG/PNG/WebP/GIF only,
+   iPhone HEIC needs decoding first, and a canvas re-encode drops EXIF.
+2. `POST /pictures/upload` returns a **presigned S3 POST** for
+   `pictures/<sub>/<uuid>.jpg`. A POST policy, unlike a presigned PUT, lets
+   the server enforce the size cap (4 MB), the content type and the exact key;
+   the API Lambda is granted `s3:PutObject` on `pictures/*` and nothing else
+   there. The upload starts as soon as the picture is chosen and runs while
+   the user fills in the mood panel.
+3. `POST /generate` takes an optional `picture_id`. The key is rebuilt from
+   the caller's own subject, so a client cannot point a job at anyone else's
+   picture, and it is stored on the JOB item — the execution input carries
+   only `has_picture`.
+4. `describe_picture` asks Amazon Nova Lite (the same model id as the script)
+   for 3–5 keywords and a one-sentence summary as strict JSON, validated by
+   `PictureDescription`. The prompt describes mood, light and place only —
+   never people, never text in the picture (constraint 7 on the vision side).
+   An answer outside the contract fails the step and refunds the credit; it is
+   never silently downgraded to a words-only meditation. The picture is **not
+   deleted** afterwards — that Lambda holds `s3:GetObject` only.
+5. `generate_script` weaves the summary and keywords into its prompt, and
+   `GET /jobs/{id}` exposes `picture_keywords` so the waiting screen can show
+   "In your picture, we found…" while the narration is still being made.
 
 ### TTS providers — Volcano primary, Polly fallback
 
@@ -787,7 +821,10 @@ backend/
   shared/         models.py, db.py (credit ledger), pipeline.py (step
                   contracts), tts/ (provider abstraction)
   api/            FastAPI app + Mangum handler, Dockerfile
-  functions/      one folder per single-purpose Lambda
+  functions/      one folder per single-purpose Lambda (freeze_credit,
+                  describe_picture, generate_script, synthesize, commit_credit,
+                  rollback_credit; init_user is the Cognito trigger; mix_audio
+                  is kept but not deployed)
   tests/          pytest + moto
 layers/           generated Lambda layers (gitignored)
 assets/bgm/       background music synced to the audio bucket, mixed in-browser
