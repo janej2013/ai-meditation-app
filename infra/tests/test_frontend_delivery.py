@@ -191,26 +191,21 @@ def test_audio_behaviors_send_cors_headers(template):
     config = distribution(template, "audio")
     jobs = next(b for b in config["CacheBehaviors"] if b["PathPattern"] == "jobs/*")
 
-    policies = template.find_resources("AWS::CloudFront::ResponseHeadersPolicy")
-    assert len(policies) == 1, "expected exactly the audio CORS policy"
-    [policy_id] = policies.keys()
-    assert config["DefaultCacheBehavior"]["ResponseHeadersPolicyId"] == {"Ref": policy_id}
-    assert jobs["ResponseHeadersPolicyId"] == {"Ref": policy_id}
+    # Locate the policy through the behaviours rather than by counting: a
+    # security-headers policy on the site distribution must not break this.
+    ref = config["DefaultCacheBehavior"]["ResponseHeadersPolicyId"]
+    assert isinstance(ref, dict) and "Ref" in ref, "managed policy id instead of our own"
+    assert jobs["ResponseHeadersPolicyId"] == ref
 
-    template.has_resource_properties(
-        "AWS::CloudFront::ResponseHeadersPolicy",
-        {
-            "ResponseHeadersPolicyConfig": {
-                "CorsConfig": {
-                    "AccessControlAllowCredentials": False,
-                    "AccessControlAllowHeaders": {"Items": ["*"]},
-                    "AccessControlAllowMethods": {"Items": ["GET", "HEAD", "OPTIONS"]},
-                    "AccessControlAllowOrigins": {"Items": ["*"]},
-                    "OriginOverride": True,
-                }
-            }
-        },
-    )
+    policies = template.find_resources("AWS::CloudFront::ResponseHeadersPolicy")
+    cors = policies[ref["Ref"]]["Properties"]["ResponseHeadersPolicyConfig"]["CorsConfig"]
+    assert cors == {
+        "AccessControlAllowCredentials": False,
+        "AccessControlAllowHeaders": {"Items": ["*"]},
+        "AccessControlAllowMethods": {"Items": ["GET", "HEAD", "OPTIONS"]},
+        "AccessControlAllowOrigins": {"Items": ["*"]},
+        "OriginOverride": True,
+    }
 
 
 def test_without_a_public_key_nothing_is_signed():

@@ -158,6 +158,16 @@ def _extract_text(response: dict[str, Any], duration_minutes: int) -> str:
     except (KeyError, TypeError) as exc:
         raise ScriptGenerationError("bedrock response had no output message") from exc
 
+    # A generation that ran into maxTokens stops mid-sentence, yet is usually
+    # long enough to clear the character floor below -- so without this check
+    # it would be synthesised, paid for, and end abruptly on the listener.
+    # Failing here rolls the credit back before any TTS spend.
+    if response.get("stopReason") == "max_tokens":
+        raise ScriptGenerationError(
+            f"bedrock hit the maxTokens ceiling for {duration_minutes} minutes; "
+            "the script is truncated"
+        )
+
     text = "\n".join(block["text"] for block in blocks if "text" in block).strip()
 
     minimum = min_script_chars(duration_minutes)
