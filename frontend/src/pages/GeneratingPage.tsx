@@ -8,8 +8,10 @@
  * screen out and hands the signed audio_url to the player; FAILED goes to the
  * refund screen.
  *
- * The background music started on the home screen keeps playing here; this
- * page only silences it on the way out to anywhere but the player.
+ * The background music started on the home screen keeps playing here. One
+ * exit rule, enforced in the poll effect's cleanup so back-navigation and
+ * cancels behave alike: unmounting stops the music unless the session was
+ * handed to the player.
  */
 import { useEffect, useRef, useState } from 'react'
 import { useLocation, useNavigate, useParams } from 'react-router-dom'
@@ -37,6 +39,7 @@ export default function GeneratingPage() {
   const [fade, setFade] = useState(1)
   const [keywords, setKeywords] = useState<string[] | null>(null)
   const abortRef = useRef<AbortController | null>(null)
+  const handedOff = useRef(false)
 
   useEffect(() => {
     if (ready || pic) return
@@ -64,6 +67,7 @@ export default function GeneratingPage() {
     })
       .then((job) => {
         if (job.status === 'DONE' && job.audio_url) {
+          handedOff.current = true
           // The prototype's arrival beat: caption swap, screen fade, player.
           setReady(true)
           setCapOpacity(1)
@@ -79,19 +83,17 @@ export default function GeneratingPage() {
             ),
           )
         } else {
-          mixer.stopAmbient()
           navigate('/failed', { replace: true })
         }
       })
       .catch((e: unknown) => {
-        if ((e as Error).name === 'AbortError') return
-        mixer.stopAmbient()
-        navigate('/failed', { replace: true })
+        if ((e as Error).name !== 'AbortError') navigate('/failed', { replace: true })
       })
 
     return () => {
       controller.abort()
       timers.forEach(clearTimeout)
+      if (!handedOff.current) mixer.stopAmbient()
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps -- poll once per job
   }, [jobId, navigate])
@@ -222,7 +224,6 @@ export default function GeneratingPage() {
             // refunds) on its own, and the session stays available under the
             // account either way.
             abortRef.current?.abort()
-            mixer.stopAmbient()
             navigate('/')
           }}
         >

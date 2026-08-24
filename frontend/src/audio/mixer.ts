@@ -119,11 +119,19 @@ export class DualTrackMixer {
     this.stopBgm()
   }
 
-  /** Forget the current session's narration; the context and BGM survive. */
-  releaseNarration(): void {
+  /**
+   * The player is done: stop narration and music, forget the narration, and
+   * suspend the context so the browser releases audio focus (iOS keeps the
+   * "playing audio" state alive for a running context). Decoded BGM and the
+   * context itself survive -- the next session's Begin resumes and reuses
+   * them without a refetch.
+   */
+  endSession(): void {
     this.stopSources()
     this.narrationBuffer = null
     this.offset = 0
+    this.playing = false
+    void this.ctx?.suspend()
   }
 
   setBgmVolume(volume: number): void {
@@ -219,15 +227,6 @@ export class DualTrackMixer {
   private stopSources(): void {
     this.stopNarration()
     this.stopBgm()
-  }
-
-  dispose(): void {
-    this.stopSources()
-    this.narrationBuffer = null
-    this.bgmBuffer = null
-    this.bgmUrl = null
-    void this.ctx?.close()
-    this.ctx = null
   }
 }
 

@@ -113,6 +113,9 @@ export default function HomePage() {
 
   const onFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const f = e.target.files && e.target.files[0]
+    // Clear the input now: browsers fire no change event when the same file
+    // is re-picked, which would dead-end the "please choose it again" path.
+    e.target.value = ''
     if (!f) return
     let picture: Blob
     try {
@@ -172,6 +175,7 @@ export default function HomePage() {
           pictureId = await upload.current
         } catch (e) {
           if (e instanceof NotSignedInError) throw e
+          mixer.stopAmbient()
           setError("Your picture didn't finish uploading. Please choose it again.")
           return
         }
@@ -242,6 +246,12 @@ export default function HomePage() {
           <button
             onClick={() => {
               setFocus('idle')
+              // Taking the words path drops any picture chosen earlier: the
+              // upload id must not ride along into a words-only session.
+              if (cloudSrc) URL.revokeObjectURL(cloudSrc)
+              setCloudSrc('')
+              upload.current = null
+              setDissolve(1)
               setView('panel')
             }}
             onPointerDown={() => setFocus('lines')}

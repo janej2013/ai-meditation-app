@@ -153,7 +153,7 @@ export function createCheckout(productKey: string): Promise<CheckoutResponse> {
  * The fallback is the CDK default, and deliberately errs long: waiting too
  * long costs a spinner, waiting too little costs a credit.
  */
-const DEFAULT_JOB_TIMEOUT_MS = 30 * 60 * 1000
+const DEFAULT_JOB_TIMEOUT_MS = 35 * 60 * 1000 // pipeline_stack EXECUTION_TIMEOUT
 
 function jobTimeoutMs(): number {
   const configured = Number(import.meta.env.VITE_JOB_TIMEOUT_MS)

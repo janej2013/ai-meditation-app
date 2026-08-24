@@ -33,6 +33,9 @@ class FakeContext {
   resume = vi.fn(async () => {
     this.state = 'running'
   })
+  suspend = vi.fn(async () => {
+    this.state = 'suspended'
+  })
   close = vi.fn(async () => {})
   createGain = () => ({
     gain: { value: 0, linearRampToValueAtTime: vi.fn() },
@@ -105,6 +108,24 @@ describe('ambient background music', () => {
     expect(first.stopped).toBe(1)
     expect(running()).toHaveLength(1)
     expect(running()[0]).not.toBe(first)
+  })
+
+  it('endSession stops everything, resets playing, and keeps the context reusable', async () => {
+    const mixer = new DualTrackMixer()
+    await mixer.startAmbient('https://cdn/assets/bgm/default_bgm.mp3')
+    await mixer.loadNarration('https://cdn/jobs/j/narration.mp3?sig')
+    await mixer.play()
+
+    mixer.endSession()
+
+    expect(running()).toHaveLength(0)
+    expect(mixer.isPlaying()).toBe(false)
+    expect(ctx.suspend).toHaveBeenCalled()
+    expect(ctx.close).not.toHaveBeenCalled()
+
+    // The next session's Begin reuses the same context and cached buffer.
+    await mixer.startAmbient('https://cdn/assets/bgm/default_bgm.mp3')
+    expect(running()).toHaveLength(1)
   })
 
   it('stopAmbient silences the music and leaves the context for the player', async () => {

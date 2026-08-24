@@ -31,8 +31,7 @@ vi.mock('../audio/mixer', async (importOriginal) => {
       duration: () => 600,
       elapsed: () => 0,
       isPlaying: () => false,
-      releaseNarration: vi.fn(),
-      stopAmbient: vi.fn(),
+      endSession: vi.fn(),
     },
   }
 })

@@ -101,12 +101,23 @@ export default function PlayerPage() {
       await mixer.loadNarration(await freshNarrationUrl())
     }
 
+    /** Best-effort: a missing or unfetchable BGM object must never take the
+     * paid narration down with it -- the session just plays voice-only. */
+    const loadBgmQuietly = async (): Promise<void> => {
+      const initial = BGM_TRACKS.find((t) => t.id === trackId) ?? BGM_TRACKS[0]
+      const url = bgmUrl(initial)
+      if (!url) return
+      try {
+        await mixer.loadBgm(url)
+      } catch {
+        // e.g. `make upload-bgm` was never run against this environment.
+      }
+    }
+
     void (async () => {
       try {
-        await loadNarration()
-        const initial = BGM_TRACKS.find((t) => t.id === trackId) ?? BGM_TRACKS[0]
-        const url = bgmUrl(initial)
-        if (url) await mixer.loadBgm(url)
+        // Independent downloads; decoding them in parallel halves time-to-ready.
+        await Promise.all([loadNarration(), loadBgmQuietly()])
         if (!cancelled) {
           setDuration(mixer.duration())
           setReady(true)
@@ -124,8 +135,7 @@ export default function PlayerPage() {
       cancelled = true
       mixer.onEnded = null
       // Leaving the player ends the session: narration and music both stop.
-      mixer.releaseNarration()
-      mixer.stopAmbient()
+      mixer.endSession()
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps -- mount-only load
   }, [jobId])
