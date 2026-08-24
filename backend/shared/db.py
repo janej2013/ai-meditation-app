@@ -33,6 +33,7 @@ from shared.models import (
     Entitlement,
     Job,
     JobStatus,
+    PictureDescription,
     event_sk,
     job_sk,
     subscription_sk,
@@ -212,25 +213,44 @@ class EntitlementStore:
         job_id: str,
         mood_text: str,
         duration_minutes: int,
+        picture_key: str | None = None,
     ) -> bool:
         """Create a PENDING job. False if the job_id was already used.
 
-        ``mood_text`` is stored here rather than passed through the state
-        machine, keeping user input out of the execution history (constraint 7).
+        ``mood_text`` and ``picture_key`` are stored here rather than passed
+        through the state machine, keeping user input out of the execution
+        history (constraint 7).
         """
         now = _now_iso()
-        return self._put_if_absent(
-            {
-                "PK": user_pk(user_id),
-                "SK": job_sk(job_id),
-                "entity_type": "JOB",
-                "job_id": job_id,
-                "status": JobStatus.PENDING.value,
-                "mood_text": mood_text,
-                "duration_minutes": duration_minutes,
-                "created_at": now,
-                "updated_at": now,
-            }
+        item: dict[str, Any] = {
+            "PK": user_pk(user_id),
+            "SK": job_sk(job_id),
+            "entity_type": "JOB",
+            "job_id": job_id,
+            "status": JobStatus.PENDING.value,
+            "mood_text": mood_text,
+            "duration_minutes": duration_minutes,
+            "created_at": now,
+            "updated_at": now,
+        }
+        if picture_key:
+            item["picture_key"] = picture_key
+        return self._put_if_absent(item)
+
+    def set_job_picture_description(
+        self, user_id: str, job_id: str, description: PictureDescription
+    ) -> None:
+        """Record what the vision model saw, for generate_script to read."""
+        self._update_job(
+            user_id,
+            job_id,
+            update="SET picture_keywords = :kw, picture_summary = :summary, updated_at = :now",
+            condition="attribute_exists(PK)",
+            values={
+                ":kw": description.keywords,
+                ":summary": description.summary,
+                ":now": _now_iso(),
+            },
         )
 
     def mark_job_generating(self, user_id: str, job_id: str) -> None:

@@ -122,6 +122,9 @@ def main() -> None:
         app,
         f"Meditation-{env_name}-Data",
         env_name=env_name,
+        # The same origins the API accepts: the PWA uploads pictures to the
+        # bucket directly, so the bucket's CORS must admit it too.
+        upload_origins=allowed_origins,
         env=env,
         description="DynamoDB single table and generated-audio bucket.",
     )

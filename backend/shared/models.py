@@ -6,7 +6,7 @@ Key schema (see CLAUDE.md):
     SK = PROFILE
     SK = ENTITLEMENT          available, frozen, plan, period_end
     SK = SUB#<stripe_subscription_id>
-    SK = JOB#<job_id>         status, audio_key, timestamps
+    SK = JOB#<job_id>         status, audio_key, picture_*, timestamps
 
 These models are the contract between Step Functions tasks: every task Lambda
 validates its payload on entry.
@@ -17,7 +17,7 @@ from __future__ import annotations
 from datetime import datetime
 from enum import StrEnum
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 ENTITLEMENT_SK = "ENTITLEMENT"
 PROFILE_SK = "PROFILE"
@@ -25,6 +25,15 @@ PROFILE_SK = "PROFILE"
 # Freemium rule: one free generation granted at signup.
 FREE_SIGNUP_CREDITS = 1
 DEFAULT_PLAN = "free"
+
+
+# Where an uploaded picture lives in the audio bucket: one prefix per user,
+# so the presigned upload policy and the IAM grants can both be scoped by it.
+PICTURE_PREFIX = "pictures"
+
+
+def picture_key(user_id: str, picture_id: str) -> str:
+    return f"{PICTURE_PREFIX}/{user_id}/{picture_id}.jpg"
 
 
 def user_pk(user_id: str) -> str:
@@ -95,10 +104,38 @@ class Job(BaseModel):
     status: JobStatus
     mood_text: str | None = None
     duration_minutes: int | None = None
+    # Set by the API when the user drifted from a picture; the object is kept
+    # for the planned replay feature and only ever expires by S3 lifecycle.
+    picture_key: str | None = None
+    # Written by describe_picture. Derived from user content, so they follow
+    # mood_text's rules: on the item, never in the execution history or logs.
+    picture_keywords: list[str] | None = None
+    picture_summary: str | None = None
     script_key: str | None = None
     audio_key: str | None = None
     created_at: datetime | None = None
     updated_at: datetime | None = None
+
+
+class PictureDescription(BaseModel):
+    """What the vision model saw, shaped for the script prompt.
+
+    The bounds are the contract with the model: a description outside them is
+    a failed generation, not something to trim into shape.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    keywords: list[str] = Field(min_length=3, max_length=5)
+    summary: str = Field(min_length=10, max_length=240)
+
+    @field_validator("keywords")
+    @classmethod
+    def _keywords_are_short_phrases(cls, keywords: list[str]) -> list[str]:
+        cleaned = [k.strip() for k in keywords]
+        if any(not k or len(k) > 24 for k in cleaned):
+            raise ValueError("each keyword must be 1-24 characters")
+        return cleaned
 
 
 class BillingOperationResult(BaseModel):

@@ -11,6 +11,7 @@ import logging
 import os
 import uuid
 from typing import Any
+from uuid import UUID
 
 import boto3
 from botocore.exceptions import ClientError
@@ -19,7 +20,7 @@ from pydantic import BaseModel, Field
 
 from api import cloudfront_signer
 from api.deps import CurrentUserDep, StoreDep
-from shared.models import JobStatus
+from shared.models import JobStatus, picture_key
 from shared.pipeline import MAX_DURATION_MINUTES, MIN_DURATION_MINUTES
 
 logger = logging.getLogger(__name__)
@@ -41,6 +42,9 @@ class GenerateRequest(BaseModel):
 
     mood: str = Field(min_length=1, max_length=500)
     duration_minutes: int = Field(ge=MIN_DURATION_MINUTES, le=MAX_DURATION_MINUTES)
+    # From POST /pictures/upload. The key is rebuilt from the caller's own
+    # subject, so a client cannot point a job at anyone else's picture.
+    picture_id: UUID | None = None
 
 
 class GenerateResponse(BaseModel):
@@ -52,6 +56,8 @@ class JobResponse(BaseModel):
     job_id: str
     status: JobStatus
     audio_url: str | None = None
+    # Present once describe_picture has run; the waiting screen shows them.
+    picture_keywords: list[str] | None = None
 
 
 @router.post(
@@ -70,7 +76,8 @@ def generate(payload: GenerateRequest, user: CurrentUserDep, store: StoreDep) ->
     _reject_if_job_in_flight(entitlement.frozen)
 
     job_id = str(uuid.uuid4())
-    if not store.create_job(user.sub, job_id, payload.mood, payload.duration_minutes):
+    key = picture_key(user.sub, str(payload.picture_id)) if payload.picture_id else None
+    if not store.create_job(user.sub, job_id, payload.mood, payload.duration_minutes, key):
         # A uuid4 collision is not a thing; this means a retry replayed.
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="That job already exists.")
 
@@ -83,6 +90,9 @@ def generate(payload: GenerateRequest, user: CurrentUserDep, store: StoreDep) ->
                     "user_id": user.sub,
                     "job_id": job_id,
                     "duration_minutes": payload.duration_minutes,
+                    # A flag, never the key: it routes the Choice state and
+                    # keeps the execution history free of user content.
+                    "has_picture": key is not None,
                 }
             ),
         )
@@ -96,7 +106,12 @@ def generate(payload: GenerateRequest, user: CurrentUserDep, store: StoreDep) ->
         ) from None
 
     # Never the mood text (constraint 7).
-    logger.info("generation started job_id=%s duration=%d", job_id, payload.duration_minutes)
+    logger.info(
+        "generation started job_id=%s duration=%d picture=%s",
+        job_id,
+        payload.duration_minutes,
+        key is not None,
+    )
     return GenerateResponse(job_id=job_id, status=JobStatus.PENDING)
 
 
@@ -118,6 +133,7 @@ def get_job(job_id: str, user: CurrentUserDep, store: StoreDep) -> JobResponse:
         # need to know it failed.
         status=JobStatus.FAILED if job.status is JobStatus.ROLLED_BACK else job.status,
         audio_url=audio_url,
+        picture_keywords=job.picture_keywords,
     )
 
 

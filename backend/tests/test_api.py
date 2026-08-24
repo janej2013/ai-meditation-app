@@ -168,6 +168,7 @@ def test_generate_accepts_and_starts_the_pipeline(client, dynamodb_client, store
         "user_id": USER_ID,
         "job_id": body["job_id"],
         "duration_minutes": 10,
+        "has_picture": False,
     }
 
 
@@ -242,6 +243,84 @@ def test_generate_without_claims_is_unauthorized(anonymous_client):
 # ----------------------------------------------------------------------
 
 
+def test_generate_with_a_picture_stores_the_key_and_flags_the_execution(
+    client, dynamodb_client, store, sfn_client
+):
+    """The key lives on the JOB item; the execution input carries only a flag."""
+    seed_entitlement(dynamodb_client, available=1)
+    picture_id = "3f0c9f8e-6a3b-4c1d-9e2f-1a2b3c4d5e6f"
+
+    response = client.post("/generate", json={**GOOD_BODY, "picture_id": picture_id})
+
+    assert response.status_code == 202
+    job_id = response.json()["job_id"]
+    # Scoped to the caller's subject: a client cannot name another user's key.
+    assert store.get_job(USER_ID, job_id).picture_key == f"pictures/{USER_ID}/{picture_id}.jpg"
+
+    payload = json.loads(sfn_client.start_execution.call_args.kwargs["input"])
+    assert payload["has_picture"] is True
+    assert "pictures/" not in json.dumps(payload)
+
+
+def test_generate_rejects_a_malformed_picture_id(client, dynamodb_client, sfn_client):
+    seed_entitlement(dynamodb_client, available=1)
+
+    response = client.post("/generate", json={**GOOD_BODY, "picture_id": "../other-user"})
+
+    assert response.status_code == 422
+    sfn_client.start_execution.assert_not_called()
+
+
+def test_job_status_reports_picture_keywords_once_described(
+    client, dynamodb_client, store, sfn_client
+):
+    from shared.models import PictureDescription
+
+    seed_entitlement(dynamodb_client, available=1)
+    job_id = client.post("/generate", json=GOOD_BODY).json()["job_id"]
+    store.set_job_picture_description(
+        USER_ID,
+        job_id,
+        PictureDescription(keywords=["dusk", "still water", "pines"], summary="Quiet dusk lake."),
+    )
+
+    body = client.get(f"/jobs/{job_id}").json()
+
+    assert body["picture_keywords"] == ["dusk", "still water", "pines"]
+    # The summary is prompt material only.
+    assert "summary" not in json.dumps(body)
+
+
+# ----------------------------------------------------------------------
+# POST /pictures/upload
+# ----------------------------------------------------------------------
+
+
+def test_picture_upload_is_a_presigned_post_scoped_to_the_caller(client, monkeypatch):
+    monkeypatch.setenv("AUDIO_BUCKET", "meditation-test-audio")
+
+    response = client.post("/pictures/upload")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["fields"]["key"] == f"pictures/{USER_ID}/{body['picture_id']}.jpg"
+    assert body["fields"]["Content-Type"] == "image/jpeg"
+    assert body["expires_in"] == 300
+    assert "meditation-test-audio" in body["url"]
+
+    import base64
+
+    policy = json.loads(base64.b64decode(body["fields"]["policy"]))
+    conditions = policy["conditions"]
+    # The policy is what S3 enforces: size and type are not client suggestions.
+    assert ["content-length-range", 1, 4_000_000] in conditions
+    assert {"Content-Type": "image/jpeg"} in conditions
+
+
+def test_picture_upload_without_claims_is_unauthorized(anonymous_client):
+    assert anonymous_client.post("/pictures/upload").status_code == 401
+
+
 def test_job_status_while_running(client, dynamodb_client, store, sfn_client):
     seed_entitlement(dynamodb_client, available=1)
     job_id = client.post("/generate", json=GOOD_BODY).json()["job_id"]
@@ -250,7 +329,12 @@ def test_job_status_while_running(client, dynamodb_client, store, sfn_client):
     response = client.get(f"/jobs/{job_id}")
 
     assert response.status_code == 200
-    assert response.json() == {"job_id": job_id, "status": "FROZEN", "audio_url": None}
+    assert response.json() == {
+        "job_id": job_id,
+        "status": "FROZEN",
+        "audio_url": None,
+        "picture_keywords": None,
+    }
 
 
 def test_done_job_returns_a_cloudfront_signed_url(

@@ -6,6 +6,7 @@ from aws_cdk import aws_apigatewayv2_authorizers as authorizers
 from aws_cdk import aws_apigatewayv2_integrations as integrations
 from aws_cdk import aws_cognito as cognito
 from aws_cdk import aws_dynamodb as dynamodb
+from aws_cdk import aws_iam as iam
 from aws_cdk import aws_lambda as lambda_
 from aws_cdk import aws_logs as logs
 from aws_cdk import aws_s3 as s3
@@ -108,6 +109,17 @@ class ApiStack(Stack):
         # served from the edge, and the bucket is reachable only through OAC
         # (constraint 6).
         cloudfront_key_secret.grant_read(self.api_function)
+
+        # POST /pictures/upload signs an S3 POST policy with the Lambda's own
+        # credentials, so the Lambda itself must be allowed to put the object.
+        # Write-only, and only under pictures/: it never reads a picture back,
+        # and it never touches jobs/.
+        self.api_function.add_to_role_policy(
+            iam.PolicyStatement(
+                actions=["s3:PutObject"],
+                resources=[audio_bucket.arn_for_objects("pictures/*")],
+            )
+        )
 
         # The authorizer validates signature, issuer, audience and expiry before
         # the Lambda is invoked, so the app only reads claims.
