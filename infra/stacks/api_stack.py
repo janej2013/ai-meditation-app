@@ -123,6 +123,24 @@ class ApiStack(Stack):
             )
         )
 
+        # DELETE /dreamscapes/{id} sweeps the job's audio objects. Delete is
+        # granted on jobs/* only -- never pictures/*, whose objects expire by
+        # lifecycle rule alone (constraint 9); the listing is likewise fenced
+        # to the jobs/ prefix by condition.
+        self.api_function.add_to_role_policy(
+            iam.PolicyStatement(
+                actions=["s3:DeleteObject"],
+                resources=[audio_bucket.arn_for_objects("jobs/*")],
+            )
+        )
+        self.api_function.add_to_role_policy(
+            iam.PolicyStatement(
+                actions=["s3:ListBucket"],
+                resources=[audio_bucket.bucket_arn],
+                conditions={"StringLike": {"s3:prefix": "jobs/*"}},
+            )
+        )
+
         # The authorizer validates signature, issuer, audience and expiry before
         # the Lambda is invoked, so the app only reads claims.
         #
@@ -191,6 +209,16 @@ class ApiStack(Stack):
         self.http_api.add_routes(
             path="/jobs/{job_id}",
             methods=[apigwv2.HttpMethod.GET],
+            integration=integration,
+        )
+        self.http_api.add_routes(
+            path="/dreamscapes",
+            methods=[apigwv2.HttpMethod.GET],
+            integration=integration,
+        )
+        self.http_api.add_routes(
+            path="/dreamscapes/{job_id}",
+            methods=[apigwv2.HttpMethod.DELETE],
             integration=integration,
         )
 

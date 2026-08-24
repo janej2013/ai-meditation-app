@@ -135,6 +135,8 @@ def test_every_fastapi_route_is_registered_on_the_gateway(api_template):
         "POST /generate",
         "POST /pictures/upload",
         "GET /jobs/{job_id}",
+        "GET /dreamscapes",
+        "DELETE /dreamscapes/{job_id}",
         "POST /billing/checkout",
         "POST /billing/webhook",
     }

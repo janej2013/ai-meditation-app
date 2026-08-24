@@ -104,6 +104,9 @@ def lambda_handler(event: dict[str, Any], context: object) -> dict[str, Any]:  #
         Key=key,
         Body=script.encode("utf-8"),
         ContentType="text/plain; charset=utf-8",
+        # The bucket's ExpireJobIntermediates lifecycle rule keys on this tag:
+        # script.txt is transient, narration.mp3 (untagged) never expires.
+        Tagging="transient=true",
     )
     store.set_job_script_key(state.user_id, state.job_id, key)
 

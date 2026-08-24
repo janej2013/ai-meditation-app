@@ -34,19 +34,34 @@ from stacks.data_stack import AUDIO_RETENTION_DAYS
 ENV = cdk.Environment(account="111122223333", region="ap-southeast-2")
 
 
-def test_audio_expiry_only_touches_jobs() -> None:
+def test_audio_expiry_only_touches_transient_job_objects() -> None:
+    """narration.mp3 is a paid deliverable dreamscapes replay: nothing may
+    expire it. Only tag-marked intermediates (script.txt) expire, and every
+    rule stays scoped to jobs/ -- an unprefixed rule would also delete the
+    shared BGM under assets/."""
     stack = build_data_stack()
     template = assertions.Template.from_stack(stack)
 
     buckets = template.find_resources("AWS::S3::Bucket")
     assert len(buckets) == 1, "data stack should own exactly the audio bucket"
-    rules = next(iter(buckets.values()))["Properties"]["LifecycleConfiguration"]["Rules"]
-    rule = next(r for r in rules if r["Id"] == "ExpireGeneratedAudio")
+    rules = {
+        r["Id"]: r
+        for r in next(iter(buckets.values()))["Properties"]["LifecycleConfiguration"]["Rules"]
+    }
 
-    # The prefix is the assertion that matters: without it the rule expires
-    # assets/ (the shared BGM) along with the per-job narration.
-    assert rule["Prefix"] == "jobs/"
-    assert rule["ExpirationInDays"] == AUDIO_RETENTION_DAYS
+    transient = rules.pop("ExpireJobIntermediates")
+    assert transient["ExpirationInDays"] == AUDIO_RETENTION_DAYS
+    assert transient["Prefix"] == "jobs/"
+    assert transient["TagFilters"] == [{"Key": "transient", "Value": "true"}]
+
+    abort = rules.pop("AbortJobUploads")
+    assert abort["Prefix"] == "jobs/"
+    assert "ExpirationInDays" not in abort, "untagged narration must never expire"
+
+    pictures = rules.pop("ExpireUploadedPictures")
+    assert pictures["Prefix"] == "pictures/"
+
+    assert not rules, f"unexpected lifecycle rules: {list(rules)}"
 
 
 def test_init_user_log_retention_is_bounded() -> None:
