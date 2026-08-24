@@ -40,7 +40,7 @@ AUDIO_PUB_KEY ?= cf-signing.pub.pem
 # BEDROCK_MODEL swaps the generation model for a debugging session, e.g.
 #   make deploy ENV=dev STACKS=Meditation-dev-Pipeline BEDROCK_MODEL=amazon.nova-micro-v1:0
 # Deliberately persisted nowhere: CI deploys without it, so ANY merge to main
-# reverts dev to the default (Claude). Debug configuration cannot linger.
+# reverts dev to the default (Nova Lite). Debug configuration cannot linger.
 BEDROCK_MODEL ?=
 
 CONTEXT = $(if $(wildcard $(AUDIO_PUB_KEY)),-c audio_public_key_file="$(abspath $(AUDIO_PUB_KEY))",) \
