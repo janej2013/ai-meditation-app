@@ -19,7 +19,7 @@ from fastapi import APIRouter
 from pydantic import BaseModel
 
 from api.deps import CurrentUserDep
-from shared.models import picture_key
+from shared.models import MAX_PICTURE_BYTES, PICTURE_CONTENT_TYPE, picture_key
 
 logger = logging.getLogger(__name__)
 
@@ -28,11 +28,6 @@ router = APIRouter(tags=["pictures"])
 # Long enough to survive a slow mobile upload, short enough that a leaked form
 # is useless by the time anyone could reuse it.
 UPLOAD_EXPIRES_SECONDS = 300
-
-# Mirrors describe_picture.MAX_PICTURE_BYTES; the browser downsizes to well
-# under this before uploading.
-MAX_PICTURE_BYTES = 4_000_000
-PICTURE_CONTENT_TYPE = "image/jpeg"
 
 _s3: Any = None
 

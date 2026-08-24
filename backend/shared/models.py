@@ -36,6 +36,15 @@ def picture_key(user_id: str, picture_id: str) -> str:
     return f"{PICTURE_PREFIX}/{user_id}/{picture_id}.jpg"
 
 
+# The upload contract, shared by its two enforcement points: the presigned
+# POST policy (api/routers/pictures) and the vision step's re-check
+# (functions/describe_picture). One value, so they cannot drift apart --
+# a policy admitting more than the pipeline accepts would freeze a credit
+# and then roll it back on every oversized upload.
+MAX_PICTURE_BYTES = 4_000_000
+PICTURE_CONTENT_TYPE = "image/jpeg"
+
+
 def user_pk(user_id: str) -> str:
     """Partition key for a user, keyed on the Cognito subject."""
     return f"USER#{user_id}"

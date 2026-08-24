@@ -11,7 +11,6 @@ from __future__ import annotations
 import json
 from unittest.mock import MagicMock
 
-import boto3
 import pytest
 from botocore.exceptions import ClientError
 
@@ -19,10 +18,9 @@ from functions.describe_picture import handler
 from functions.describe_picture.prompt import SYSTEM_PROMPT
 from shared.pipeline import BedrockTransientError, PictureDescriptionError
 
-from .conftest import USER_ID, seed_entitlement
+from .conftest import BUCKET, USER_ID, bedrock_response, seed_entitlement
 
 JOB = "job-picture"
-BUCKET = "meditation-test-audio"
 KEY = f"pictures/{USER_ID}/0f0e0d0c-0b0a-4908-8706-050403020100.jpg"
 GOOD_ANSWER = {
     "keywords": ["dusk", "still water", "pine shore"],
@@ -36,22 +34,10 @@ def state() -> dict:
 
 
 @pytest.fixture
-def s3_bucket(dynamodb_client):
-    client = boto3.client("s3", region_name="ap-southeast-2")
-    client.create_bucket(
-        Bucket=BUCKET, CreateBucketConfiguration={"LocationConstraint": "ap-southeast-2"}
-    )
-    return client
-
-
-@pytest.fixture
 def env(monkeypatch):
     monkeypatch.setenv("AUDIO_BUCKET", BUCKET)
     monkeypatch.setenv("BEDROCK_MODEL_ID", "amazon.nova-lite-v1:0")
-
-
-def bedrock_answer(text: str) -> dict:
-    return {"output": {"message": {"content": [{"text": text}]}}, "stopReason": "end_turn"}
+    monkeypatch.delenv("DURATION_MINUTES_OVERRIDE", raising=False)
 
 
 def prepare(store, dynamodb_client, s3_bucket, monkeypatch, *, upload: bool = True):
@@ -73,7 +59,7 @@ def test_describes_the_picture_onto_the_job_item(
     store, dynamodb_client, s3_bucket, env, monkeypatch, state
 ):
     bedrock = prepare(store, dynamodb_client, s3_bucket, monkeypatch)
-    bedrock.converse.return_value = bedrock_answer(json.dumps(GOOD_ANSWER))
+    bedrock.converse.return_value = bedrock_response(json.dumps(GOOD_ANSWER))
 
     result = handler.lambda_handler(state, None)
 
@@ -92,7 +78,7 @@ def test_describes_the_picture_onto_the_job_item(
 def test_the_picture_is_never_deleted(store, dynamodb_client, s3_bucket, env, monkeypatch, state):
     """It backs the replay feature and expires by lifecycle rule alone."""
     bedrock = prepare(store, dynamodb_client, s3_bucket, monkeypatch)
-    bedrock.converse.return_value = bedrock_answer(json.dumps(GOOD_ANSWER))
+    bedrock.converse.return_value = bedrock_response(json.dumps(GOOD_ANSWER))
     spy = MagicMock(wraps=s3_bucket)
     monkeypatch.setattr(handler, "_get_s3", lambda: spy)
 
@@ -106,7 +92,7 @@ def test_tolerates_prose_or_a_code_fence_around_the_json(
     store, dynamodb_client, s3_bucket, env, monkeypatch, state
 ):
     bedrock = prepare(store, dynamodb_client, s3_bucket, monkeypatch)
-    bedrock.converse.return_value = bedrock_answer(
+    bedrock.converse.return_value = bedrock_response(
         "Here you go:\n```json\n" + json.dumps(GOOD_ANSWER) + "\n```"
     )
 
@@ -157,7 +143,7 @@ def test_an_oversized_picture_is_permanent(
     bedrock = prepare(store, dynamodb_client, s3_bucket, monkeypatch)
     monkeypatch.setattr(handler, "MAX_PICTURE_BYTES", 4)
 
-    with pytest.raises(PictureDescriptionError, match="over 4"):
+    with pytest.raises(PictureDescriptionError, match="exceeds 4"):
         handler.lambda_handler(state, None)
     bedrock.converse.assert_not_called()
 
@@ -178,7 +164,7 @@ def test_an_off_contract_answer_is_permanent_not_downgraded(
     store, dynamodb_client, s3_bucket, env, monkeypatch, state, text
 ):
     bedrock = prepare(store, dynamodb_client, s3_bucket, monkeypatch)
-    bedrock.converse.return_value = bedrock_answer(text)
+    bedrock.converse.return_value = bedrock_response(text)
 
     with pytest.raises(PictureDescriptionError):
         handler.lambda_handler(state, None)

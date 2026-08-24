@@ -23,6 +23,8 @@ between modules is safe; renaming it is not.
 
 from __future__ import annotations
 
+from typing import NoReturn
+
 from pydantic import BaseModel, ConfigDict, Field
 
 MIN_DURATION_MINUTES = 3
@@ -67,6 +69,37 @@ class TransientError(PipelineError):
 
 class BedrockTransientError(TransientError):
     """Bedrock throttled the request or returned a server-side error."""
+
+
+# Bedrock signals overload and throttling with these. Everything else --
+# ValidationException, AccessDeniedException, a malformed response -- is
+# permanent, so it must fall through to Catch instead of burning retries.
+# One list for every Bedrock step: a code added here changes retry behaviour
+# for generate_script and describe_picture at once.
+BEDROCK_TRANSIENT_CODES = frozenset(
+    {
+        "ThrottlingException",
+        "ServiceUnavailableException",
+        "InternalServerException",
+        "ModelTimeoutException",
+        "ModelNotReadyException",
+    }
+)
+
+
+def raise_for_bedrock_error(exc: Exception, permanent: type[PipelineError]) -> NoReturn:
+    """Re-raise a botocore ClientError from Converse as transient or permanent.
+
+    The vendor message names the rejected parameter or account restriction --
+    never the prompt or the picture -- so it is safe to surface (constraint 7)
+    and indispensable: the code alone turns every failure into a hunt.
+    """
+    error = getattr(exc, "response", {}).get("Error", {})
+    code = error.get("Code", "")
+    detail = f"{code}: {error.get('Message', '')}"
+    if code in BEDROCK_TRANSIENT_CODES:
+        raise BedrockTransientError(f"bedrock transient failure: {detail}") from exc
+    raise permanent(f"bedrock call failed: {detail}") from exc
 
 
 # ``TTSTransientError`` is deliberately not here. It has to be both a

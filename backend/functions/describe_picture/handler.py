@@ -19,29 +19,13 @@ from botocore.exceptions import ClientError
 from pydantic import ValidationError
 
 from shared.db import EntitlementStore
-from shared.models import PictureDescription
-from shared.pipeline import BedrockTransientError, PictureDescriptionError, PipelineState
+from shared.models import MAX_PICTURE_BYTES, PictureDescription
+from shared.pipeline import PictureDescriptionError, PipelineState, raise_for_bedrock_error
 
 from .prompt import SYSTEM_PROMPT, USER_MESSAGE
 
 logger = logging.getLogger()
 logger.setLevel(os.environ.get("LOG_LEVEL", "INFO"))
-
-# The presigned upload policy already caps the object at this size; checking
-# again here guards the Lambda's memory against a policy that drifts, and
-# stays under Nova's own per-image limit.
-MAX_PICTURE_BYTES = 4_000_000
-
-# Same taxonomy as generate_script: only these are worth a retry.
-_TRANSIENT_CODES = frozenset(
-    {
-        "ThrottlingException",
-        "ServiceUnavailableException",
-        "InternalServerException",
-        "ModelTimeoutException",
-        "ModelNotReadyException",
-    }
-)
 
 _store: EntitlementStore | None = None
 _bedrock: Any = None
@@ -93,17 +77,18 @@ def _fetch(key: str) -> bytes:
     s3 = _get_s3()
     bucket = os.environ["AUDIO_BUCKET"]
     try:
-        head = s3.head_object(Bucket=bucket, Key=key)
-        size = int(head["ContentLength"])
-        if size > MAX_PICTURE_BYTES:
-            raise PictureDescriptionError(f"picture is {size} bytes, over {MAX_PICTURE_BYTES}")
-        return s3.get_object(Bucket=bucket, Key=key)["Body"].read()
+        # One read, capped: the presigned POST policy already limits the size
+        # (shared MAX_PICTURE_BYTES), so the +1 only guards the Lambda's
+        # memory against an object that somehow bypassed the policy.
+        body = s3.get_object(Bucket=bucket, Key=key)["Body"].read(MAX_PICTURE_BYTES + 1)
     except ClientError as exc:
         code = exc.response.get("Error", {}).get("Code", "")
-        # head_object reports a missing key as a bare 404.
         if code in {"NoSuchKey", "404", "NotFound"}:
             raise PictureDescriptionError("picture was never uploaded") from exc
         raise PictureDescriptionError(f"could not read picture: {code}") from exc
+    if len(body) > MAX_PICTURE_BYTES:
+        raise PictureDescriptionError(f"picture exceeds {MAX_PICTURE_BYTES} bytes")
+    return body
 
 
 def _describe(image: bytes) -> PictureDescription:
@@ -123,14 +108,7 @@ def _describe(image: bytes) -> PictureDescription:
             inferenceConfig={"maxTokens": 300, "temperature": 0.3},
         )
     except ClientError as exc:
-        error = exc.response.get("Error", {})
-        code = error.get("Code", "")
-        # Vendor messages name the rejected parameter or account restriction
-        # and never echo the input, so they are safe to surface (constraint 7).
-        detail = f"{code}: {error.get('Message', '')}"
-        if code in _TRANSIENT_CODES:
-            raise BedrockTransientError(f"bedrock transient failure: {detail}") from exc
-        raise PictureDescriptionError(f"bedrock call failed: {detail}") from exc
+        raise_for_bedrock_error(exc, PictureDescriptionError)
 
     return _parse(response)
 
