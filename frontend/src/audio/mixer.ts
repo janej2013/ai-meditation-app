@@ -17,6 +17,12 @@
  *
  * The narration drives the clock: elapsed/duration/onEnded all follow it, and
  * the BGM simply loops underneath for as long as the narration runs.
+ *
+ * One mixer is shared by the whole app (`mixer` below) so the background
+ * track can start on the home screen -- inside the click that begins a
+ * session, which is what mobile autoplay rules require -- keep playing through
+ * the waiting screen, and carry on unbroken when the narration joins it in
+ * the player.
  */
 
 export interface MixerState {
@@ -34,6 +40,7 @@ export class DualTrackMixer {
 
   private narrationSource: AudioBufferSourceNode | null = null
   private bgmSource: AudioBufferSourceNode | null = null
+  private bgmUrl: string | null = null // what bgmBuffer was decoded from
   private narrationGain: GainNode | null = null
   private bgmGain: GainNode | null = null
 
@@ -68,7 +75,7 @@ export class DualTrackMixer {
 
   /** Load the narration (signed URL). Resets position to the start. */
   async loadNarration(url: string): Promise<void> {
-    this.stopSources()
+    this.stopNarration()
     this.narrationBuffer = await this.fetchBuffer(url)
     this.offset = 0
     this.playing = false
@@ -77,15 +84,46 @@ export class DualTrackMixer {
   /**
    * Load (or switch) the background track — callable mid-session. Playback
    * of the narration is never interrupted: only the BGM source is replaced.
+   * A track that is already decoded is not fetched again, so arriving in the
+   * player with the ambient track running costs nothing.
    */
   async loadBgm(url: string | null): Promise<void> {
-    if (this.bgmSource) {
-      this.bgmSource.stop()
-      this.bgmSource.disconnect()
-      this.bgmSource = null
-    }
+    if (url && url === this.bgmUrl && this.bgmBuffer) return
+    const wasRunning = this.bgmSource !== null
+    this.stopBgm()
     this.bgmBuffer = url ? await this.fetchBuffer(url) : null
-    if (this.playing && this.bgmBuffer) this.startBgm()
+    this.bgmUrl = url
+    if ((this.playing || wasRunning) && this.bgmBuffer) this.startBgm()
+  }
+
+  /**
+   * Start the background track on its own, before there is a narration.
+   * Must be called from a user gesture: the context is created and resumed
+   * synchronously here, and the fetch that follows is allowed to outlive the
+   * gesture. Never throws -- a session without music is still a session.
+   */
+  async startAmbient(url: string | null): Promise<void> {
+    if (!url) return
+    try {
+      const ctx = this.ensureContext()
+      if (ctx.state === 'suspended') await ctx.resume()
+      await this.loadBgm(url)
+      if (!this.bgmSource) this.startBgm()
+    } catch {
+      // No AudioContext (tests), a blocked fetch, a decode failure: silence.
+    }
+  }
+
+  /** Stop the background track without touching the narration. */
+  stopAmbient(): void {
+    this.stopBgm()
+  }
+
+  /** Forget the current session's narration; the context and BGM survive. */
+  releaseNarration(): void {
+    this.stopSources()
+    this.narrationBuffer = null
+    this.offset = 0
   }
 
   setBgmVolume(volume: number): void {
@@ -102,7 +140,7 @@ export class DualTrackMixer {
 
   private startBgm(): void {
     const ctx = this.ensureContext()
-    if (!this.bgmBuffer || !this.bgmGain) return
+    if (!this.bgmBuffer || !this.bgmGain || this.bgmSource) return
     this.bgmSource = ctx.createBufferSource()
     this.bgmSource.buffer = this.bgmBuffer
     this.bgmSource.loop = true
@@ -168,29 +206,43 @@ export class DualTrackMixer {
     return { playing: this.playing, elapsed: this.elapsed(), duration: this.duration() }
   }
 
-  private stopSources(): void {
-    for (const source of [this.narrationSource, this.bgmSource]) {
-      if (source) {
-        try {
-          source.stop()
-        } catch {
-          // Already stopped — harmless.
-        }
-        source.disconnect()
-      }
-    }
+  private stopNarration(): void {
+    stopSource(this.narrationSource)
     this.narrationSource = null
+  }
+
+  private stopBgm(): void {
+    stopSource(this.bgmSource)
     this.bgmSource = null
+  }
+
+  private stopSources(): void {
+    this.stopNarration()
+    this.stopBgm()
   }
 
   dispose(): void {
     this.stopSources()
     this.narrationBuffer = null
     this.bgmBuffer = null
+    this.bgmUrl = null
     void this.ctx?.close()
     this.ctx = null
   }
 }
+
+function stopSource(source: AudioBufferSourceNode | null): void {
+  if (!source) return
+  try {
+    source.stop()
+  } catch {
+    // Already stopped — harmless.
+  }
+  source.disconnect()
+}
+
+/** The app-wide mixer. Lazy: no AudioContext exists until something plays. */
+export const mixer = new DualTrackMixer()
 
 /** The built-in BGM tracks under assets/ on the audio distribution. */
 export interface BgmTrack {
@@ -199,10 +251,17 @@ export interface BgmTrack {
   path: string | null // null = narration only
 }
 
+// The first entry is the default: it starts on the home screen when a session
+// begins and runs through the waiting screen into the player. The tracks are
+// licensed from Pixabay and uploaded to the bucket by hand (`make upload-bgm`),
+// never committed -- see assets/bgm/README.md. silence.mp3 also lives under
+// assets/ but is a CI probe, not something to offer a listener.
 export const BGM_TRACKS: BgmTrack[] = [
-  { id: 'silence', label: 'Soft pad', path: 'assets/bgm/silence.mp3' },
+  { id: 'default', label: 'Meditation', path: 'assets/bgm/default_bgm.mp3' },
   { id: 'none', label: 'Voice only', path: null },
 ]
+
+export const DEFAULT_BGM_TRACK: BgmTrack = BGM_TRACKS[0]
 
 export function bgmUrl(track: BgmTrack): string | null {
   const domain: string = import.meta.env.VITE_AUDIO_DOMAIN ?? ''

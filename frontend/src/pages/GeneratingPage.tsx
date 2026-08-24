@@ -5,10 +5,14 @@
  * picture into a dream…" — the prototype's picMode). DONE swaps the caption
  * for "Your dreamscape is ready", fades the screen out and hands the signed
  * audio_url to the player; FAILED goes to the refund screen.
+ *
+ * The background music started on the home screen keeps playing here; this
+ * page only silences it on the way out to anywhere but the player.
  */
 import { useEffect, useRef, useState } from 'react'
 import { useLocation, useNavigate, useParams } from 'react-router-dom'
 import { pollJob } from '../api/client'
+import { mixer } from '../audio/mixer'
 
 const CAPTIONS = ['Creating your meditation…', 'Breathe in…', 'And release…']
 
@@ -67,11 +71,14 @@ export default function GeneratingPage() {
             ),
           )
         } else {
+          mixer.stopAmbient()
           navigate('/failed', { replace: true })
         }
       })
       .catch((e: unknown) => {
-        if ((e as Error).name !== 'AbortError') navigate('/failed', { replace: true })
+        if ((e as Error).name === 'AbortError') return
+        mixer.stopAmbient()
+        navigate('/failed', { replace: true })
       })
 
     return () => {
@@ -187,6 +194,7 @@ export default function GeneratingPage() {
             // refunds) on its own, and the session stays available under the
             // account either way.
             abortRef.current?.abort()
+            mixer.stopAmbient()
             navigate('/')
           }}
         >

@@ -18,6 +18,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { ApiError, NotSignedInError, getAccount, startGeneration } from '../api/client'
+import { DEFAULT_BGM_TRACK, bgmUrl, mixer } from '../audio/mixer'
 import { isSignedIn } from '../auth/cognito'
 import { useScene } from '../scene/SceneContext'
 
@@ -135,12 +136,16 @@ export default function HomePage() {
     setError(null)
     if (dissolveTimer.current) clearInterval(dissolveTimer.current)
     setDissolve(1)
+    // Still inside the click: the only place a mobile browser lets audio
+    // start. The music then runs through the waiting screen into the player.
+    void mixer.startAmbient(bgmUrl(DEFAULT_BGM_TRACK))
     try {
       const { job_id } = await startGeneration(mood, duration)
       navigate(`/generating/${job_id}`, {
         state: { duration, feeling, destination, pic: cloudSrc !== '' },
       })
     } catch (e) {
+      mixer.stopAmbient()
       if (e instanceof NotSignedInError) {
         navigate('/signup', { state: { resume: true } })
       } else if (e instanceof ApiError && e.status === 402) {

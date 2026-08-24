@@ -377,6 +377,19 @@ cached CloudFront object — the browser can switch tracks without a round trip
 for a fresh signature. Per-job narration under `jobs/` still requires a signed
 URL (constraint 6).
 
+The music starts before there is anything to mix: the home screen's Begin
+click calls `mixer.startAmbient(...)` — inside the gesture, which is the only
+place iOS Safari and Chrome on Android let audio start — and the same shared
+mixer carries the track through the waiting screen and into the player, where
+the narration joins it without a restart. Leaving for anywhere but the player
+stops it.
+
+**BGM is licensed from Pixabay and deployed separately.** The Content License
+allows commercial use but not redistributing the file on its own, and a public
+repository is precisely that — so the tracks are gitignored, excluded from the
+CDK asset, and put in the bucket by hand with `make upload-bgm`. See
+[assets/bgm/README.md](assets/bgm/README.md).
+
 **Verify before relying on this:** on iOS Safari an `AudioContext` is suspended
 when the page is backgrounded, and listening with the screen off is the core use
 case for a meditation app. Anchoring each source in a real `<audio>` element via

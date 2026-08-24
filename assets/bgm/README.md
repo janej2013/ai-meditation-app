@@ -1,25 +1,47 @@
 # Background music
 
-`BucketDeployment` syncs this directory to `s3://<audio-bucket>/assets/bgm/`,
-and `mix_audio` reads the track named by the `BGM_KEY` environment variable.
+The PWA mixes one of these under the narration in the browser (README:
+"Mixing happens in the browser"). `frontend/src/audio/mixer.ts` lists the
+tracks offered to the listener; the first is the default and starts on the
+home screen the moment a session begins.
 
-## `silence.mp3` — placeholder
+## Licensing — tracks are deployed, not committed
 
-Three seconds of silent MPEG-1 Layer III frames, generated rather than
-licensed. It exists so the pipeline runs end-to-end and the mix filter graph is
-exercised; `-stream_loop -1` loops it under the whole narration, so the output
-is simply the narration with an inaudible bed.
-
-## Adding real tracks
-
-Drop licensed royalty-free MP3s in here and point `BGM_KEY` at one:
+The real tracks are licensed from [Pixabay](https://pixabay.com/service/terms/)
+under its Content License: commercial use, no attribution required, but **no
+standalone redistribution of the file itself**. A public repository is exactly
+that, so the tracks and their licence certificates are gitignored and uploaded
+to the audio bucket by hand:
 
 ```bash
-cd infra && npm run cdk -- deploy -c bgm_key=assets/bgm/<your-track>.mp3
+make upload-bgm ENV=dev            # assets/bgm/default_bgm.mp3
+make upload-bgm ENV=dev BGM_TRACKS="assets/bgm/a.mp3 assets/bgm/b.mp3"
 ```
 
-Requirements: MP3, 44.1 kHz, and long enough that looping isn't obvious —
-two minutes or more works well. Keep the licence file alongside each track.
+`BucketDeployment` (pipeline stack) syncs only what git holds and never prunes,
+so a later deploy leaves the uploads alone. Keep each track's Pixabay licence
+certificate beside it locally (`*license*.txt`, also gitignored) as the record
+of the grant.
 
-**Do not commit anything you don't hold redistribution rights for.** This
-repository is public-facing.
+| file | source | in git |
+|---|---|---|
+| `default_bgm.mp3` | Pixabay #322801, "Meditation – Meditation Music" by ikoliks_aj | no — `make upload-bgm` |
+| `silence.mp3` | generated: three seconds of silent MPEG frames | yes |
+
+## Preparing a track
+
+The mixer fetches the whole file and decodes it to PCM in memory, so length is
+what costs: a 10-minute stereo file decodes to ~200 MB, which a phone will not
+keep. Cut a loopable two-to-three-minute section, mono, and fade both ends so
+the loop seam is inaudible:
+
+```bash
+ffmpeg -i source.mp3 -t 180 -ac 1 -ar 44100 -b:a 96k \
+       -af "afade=t=in:d=2,afade=t=out:st=178:d=2" assets/bgm/default_bgm.mp3
+```
+
+## `silence.mp3`
+
+Not a listening option. It ships with the repository because CI's post-deploy
+smoke fetches it through the audio distribution to prove the CORS headers a
+real browser needs are present (`.github/workflows/ci.yml`).

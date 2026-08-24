@@ -58,3 +58,12 @@ cf-signing*.pem
 .vscode/
 .DS_Store
 Thumbs.db
+
+# Background music licensed from Pixabay. The Content License forbids
+# redistributing the files standalone, and a public repository is exactly
+# that -- so tracks and their licence certificates stay out of git and are
+# uploaded to the audio bucket by hand (`make upload-bgm`). silence.mp3 is
+# generated, not licensed, and is the one track that ships with the repo.
+assets/bgm/*.mp3
+!assets/bgm/silence.mp3
+assets/bgm/*license*.txt

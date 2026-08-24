@@ -108,14 +108,26 @@ class PipelineStack(Stack):
             compatible_runtimes=[lambda_.Runtime.PYTHON_3_12],
             description="shared package (models, db, tts) and its dependencies.",
         )
-        # Royalty-free background music. Deployed to the audio bucket alongside
-        # generated audio; the browser fetches these directly (they carry no
-        # user content, so they need no signed URL) and mixes one under the
+        # Background music. Deployed to the audio bucket alongside generated
+        # audio; the browser fetches these directly (they carry no user
+        # content, so they need no signed URL) and mixes one under the
         # narration.
+        #
+        # Only what git holds goes through here. The licensed tracks are
+        # gitignored (assets/bgm/README.md) and reach the bucket by hand via
+        # `make upload-bgm`; excluding them keeps this asset identical between
+        # a laptop that has the files and CI that does not, so the two do not
+        # take turns re-running the deployment. prune=False means an upload
+        # made by hand is never deleted by a later deploy.
         s3deploy.BucketDeployment(
             self,
             "BgmAssets",
-            sources=[s3deploy.Source.asset(str(ASSETS_DIR))],
+            sources=[
+                s3deploy.Source.asset(
+                    str(ASSETS_DIR),
+                    exclude=["bgm/*.mp3", "!bgm/silence.mp3", "bgm/*license*.txt"],
+                )
+            ],
             destination_bucket=audio_bucket,
             destination_key_prefix="assets",
             prune=False,  # never delete generated job audio under jobs/
