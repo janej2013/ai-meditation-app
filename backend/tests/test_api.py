@@ -360,6 +360,40 @@ def test_done_job_returns_a_cloudfront_signed_url(
     signer.signed_url.assert_called_once_with(f"jobs/{job_id}/final.mp3")
 
 
+def test_every_call_signs_a_fresh_url(client, dynamodb_client, store, sfn_client, monkeypatch):
+    """Revisiting an old dreamscape must always get a live signature: the URL
+    is minted per call, never cached on the item or in the app."""
+    from api.routers import generate as generate_router
+
+    seed_entitlement(dynamodb_client, available=1)
+    job_id = client.post("/generate", json=GOOD_BODY).json()["job_id"]
+    store.freeze_credit(USER_ID, job_id)
+    store.set_job_audio_key(USER_ID, job_id, f"jobs/{job_id}/final.mp3")
+    store.commit_credit(USER_ID, job_id)
+
+    signer = MagicMock()
+    signer.signed_url.side_effect = ["https://a?sig=1", "https://a?sig=2"]
+    monkeypatch.setattr(generate_router, "cloudfront_signer", signer)
+
+    first = client.get(f"/jobs/{job_id}").json()["audio_url"]
+    second = client.get(f"/jobs/{job_id}").json()["audio_url"]
+
+    assert (first, second) == ("https://a?sig=1", "https://a?sig=2")
+
+
+def test_deleted_job_is_gone_from_the_play_route(client, dynamodb_client, store, sfn_client):
+    """After a dreamscape delete there is nothing to sign: 404, not a URL to
+    audio the sweep has removed."""
+    seed_entitlement(dynamodb_client, available=1)
+    job_id = client.post("/generate", json=GOOD_BODY).json()["job_id"]
+    store.freeze_credit(USER_ID, job_id)
+    store.set_job_audio_key(USER_ID, job_id, f"jobs/{job_id}/final.mp3")
+    store.commit_credit(USER_ID, job_id)
+    assert store.mark_job_deleted(USER_ID, job_id)
+
+    assert client.get(f"/jobs/{job_id}").status_code == 404
+
+
 def test_rolled_back_job_is_reported_as_failed(client, dynamodb_client, store, sfn_client):
     """ROLLED_BACK is the internal truth; clients only need 'it failed'."""
     seed_entitlement(dynamodb_client, available=1)

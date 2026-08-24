@@ -7,7 +7,7 @@ Bedrock or a TTS vendor synchronously.
 from fastapi import FastAPI
 from mangum import Mangum
 
-from api.routers import account, billing, generate, health, pictures
+from api.routers import account, billing, dreamscapes, generate, health, pictures
 
 app = FastAPI(
     title="AI Meditation API",
@@ -20,6 +20,7 @@ app.include_router(health.router)
 app.include_router(account.router)
 app.include_router(generate.router)
 app.include_router(pictures.router)
+app.include_router(dreamscapes.router)
 app.include_router(billing.router)
 
 # lifespan="off": Lambda gives no startup/shutdown window worth running.

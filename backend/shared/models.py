@@ -79,6 +79,9 @@ class JobStatus(StrEnum):
     DONE = "DONE"
     FAILED = "FAILED"
     ROLLED_BACK = "ROLLED_BACK"
+    # Soft-deleted from the dreamscapes collection; the audio objects are
+    # cleaned up by the DELETE route, the item stays as the idempotency anchor.
+    DELETED = "DELETED"
 
 
 class Entitlement(BaseModel):

@@ -294,6 +294,72 @@ class EntitlementStore:
             values={":key": audio_key, ":now": _now_iso()},
         )
 
+    def list_done_jobs(self, user_id: str) -> list[Job]:
+        """Every DONE job in the caller's partition, unsorted.
+
+        Reads the whole partition on purpose: job_ids are uuid4, so SK order
+        is not time order, and the partition is hard-bounded (every job costs
+        a paid credit -- hundreds at most, a few hundred bytes each with this
+        projection). A GSI would double the write bill for a query this small;
+        per CLAUDE.md, adding one needs a proposal first, and this method is
+        the argument against. Sorting and pagination happen in the caller.
+
+        The status filter trims transport only -- correctness never depends on
+        a FilterExpression.
+        """
+        jobs: list[Job] = []
+        kwargs: dict[str, Any] = {
+            "TableName": self.table_name,
+            "KeyConditionExpression": "PK = :pk AND begins_with(SK, :job)",
+            "FilterExpression": "#status = :done",
+            "ExpressionAttributeNames": {"#status": "status"},
+            "ExpressionAttributeValues": _marshal(
+                {":pk": user_pk(user_id), ":job": "JOB#", ":done": JobStatus.DONE.value}
+            ),
+            "ProjectionExpression": (
+                "job_id, #status, picture_keywords, mood_text, "
+                "duration_minutes, picture_key, created_at"
+            ),
+        }
+        while True:
+            response = self.client.query(**kwargs)
+            jobs.extend(
+                Job.model_validate({**_unmarshal(item), "user_id": user_id})
+                for item in response.get("Items", [])
+            )
+            last = response.get("LastEvaluatedKey")
+            if not last:
+                return jobs
+            kwargs["ExclusiveStartKey"] = last
+
+    def mark_job_deleted(self, user_id: str, job_id: str) -> bool:
+        """DONE -> DELETED, idempotently. True when the job is now DELETED.
+
+        A job already DELETED passes the condition again on purpose: that is
+        the retry anchor -- the caller re-runs the S3 cleanup either way, so a
+        delete whose S3 step failed last time heals on the next attempt. False
+        means the item is missing or in flight, which the route treats as 404.
+        This is a status update, not a credit mutation (constraint 1 untouched).
+        """
+        try:
+            self.client.update_item(
+                TableName=self.table_name,
+                Key=_marshal({"PK": user_pk(user_id), "SK": job_sk(job_id)}),
+                UpdateExpression="SET #status = :deleted, updated_at = :now",
+                ConditionExpression="attribute_exists(PK) AND #status IN (:done, :deleted)",
+                ExpressionAttributeNames={"#status": "status"},
+                ExpressionAttributeValues=_marshal(
+                    {
+                        ":deleted": JobStatus.DELETED.value,
+                        ":done": JobStatus.DONE.value,
+                        ":now": _now_iso(),
+                    }
+                ),
+            )
+        except self.client.exceptions.ConditionalCheckFailedException:
+            return False
+        return True
+
     def _update_job(
         self,
         user_id: str,
