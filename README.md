@@ -567,6 +567,10 @@ The layer directories are gitignored. `cdk synth` succeeds without the shared
 layer and emits a warning; a deploy without it would fail at runtime. The ffmpeg
 layer is not deployed — see [layers/README.md](layers/README.md) for its source.
 
+This section covers only the build; the **full dev and prod runbooks — one-time
+account setup, per-environment secrets, deploy order, Stripe webhook wiring and
+post-deploy verification — live in [docs/deployment.md](docs/deployment.md).**
+
 ## Architecture — frontend delivery and the PWA
 
 `infra/stacks/frontend_stack.py` owns what the browser fetches directly:
