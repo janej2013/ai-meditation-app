@@ -178,12 +178,29 @@ def test_the_public_key_reaches_a_key_group(template):
 
 
 def test_audio_behaviors_send_cors_headers(template):
-    """Web Audio needs crossOrigin reads; without CORS the mix is silent."""
+    """Web Audio needs crossOrigin reads; without CORS the mix is silent.
+
+    The header must be *static*, not the managed SimpleCORS policy: SimpleCORS
+    skips any request carrying a non-safelisted header, and modern Chromium
+    sends ``Priority`` on every fetch -- so under SimpleCORS the mix worked in
+    curl and failed in every real browser.
+    """
     config = distribution(template, "audio")
     jobs = next(b for b in config["CacheBehaviors"] if b["PathPattern"] == "jobs/*")
 
     assert config["DefaultCacheBehavior"].get("ResponseHeadersPolicyId")
     assert jobs.get("ResponseHeadersPolicyId")
+
+    policies = template.find_resources("AWS::CloudFront::ResponseHeadersPolicy")
+    [policy] = [
+        p["Properties"]["ResponseHeadersPolicyConfig"]
+        for p in policies.values()
+        if "audio" in p["Properties"]["ResponseHeadersPolicyConfig"]["Comment"]
+    ]
+    [header] = policy["CustomHeadersConfig"]["Items"]
+    assert header["Header"] == "Access-Control-Allow-Origin"
+    assert header["Value"] == "*"
+    assert header["Override"] is True
 
 
 def test_without_a_public_key_nothing_is_signed():
