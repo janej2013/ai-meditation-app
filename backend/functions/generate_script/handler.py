@@ -16,6 +16,7 @@ import boto3
 from botocore.exceptions import ClientError
 
 from shared.db import EntitlementStore
+from shared.models import PictureDescription
 from shared.pipeline import BedrockTransientError, PipelineState, ScriptGenerationError
 
 from .prompt import SYSTEM_PROMPT, build_user_message, min_script_chars, target_word_count
@@ -91,7 +92,13 @@ def lambda_handler(event: dict[str, Any], context: object) -> dict[str, Any]:  #
 
     store.mark_job_generating(state.user_id, state.job_id)
 
-    script = _generate(job.mood_text, _effective_duration(state.duration_minutes))
+    # describe_picture ran only if the job has one; its reading rides along on
+    # the same item as the mood, and a job that skipped that step has neither.
+    picture = None
+    if job.picture_keywords and job.picture_summary:
+        picture = PictureDescription(keywords=job.picture_keywords, summary=job.picture_summary)
+
+    script = _generate(job.mood_text, _effective_duration(state.duration_minutes), picture)
 
     key = script_key(state.job_id)
     _get_s3().put_object(
@@ -119,7 +126,9 @@ def _effective_duration(requested_minutes: int) -> int:
     return minutes
 
 
-def _generate(mood_text: str, duration_minutes: int) -> str:
+def _generate(
+    mood_text: str, duration_minutes: int, picture: PictureDescription | None = None
+) -> str:
     words = target_word_count(duration_minutes)
     try:
         response = _get_bedrock().converse(
@@ -128,7 +137,7 @@ def _generate(mood_text: str, duration_minutes: int) -> str:
             messages=[
                 {
                     "role": "user",
-                    "content": [{"text": build_user_message(mood_text, duration_minutes)}],
+                    "content": [{"text": build_user_message(mood_text, duration_minutes, picture)}],
                 }
             ],
             inferenceConfig={

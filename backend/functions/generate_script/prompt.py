@@ -7,6 +7,8 @@ without invoking Bedrock.
 
 from __future__ import annotations
 
+from shared.models import PictureDescription
+
 # Slow, guided-meditation delivery. Used to convert the requested duration into
 # a word target for the model.
 WORDS_PER_MINUTE = 95
@@ -57,16 +59,29 @@ def min_script_chars(duration_minutes: int) -> int:
     return int(target_word_count(duration_minutes) * _CHARS_PER_WORD * _MIN_SCRIPT_RATIO)
 
 
-def build_user_message(mood_text: str, duration_minutes: int) -> str:
+def build_user_message(
+    mood_text: str,
+    duration_minutes: int,
+    picture: PictureDescription | None = None,
+) -> str:
     """The per-request half of the prompt.
 
     The mood is labelled rather than embedded in an instruction so the model
     treats it as material to respond to, not as directions to follow -- which
-    also blunts prompt injection from the free-text field.
+    also blunts prompt injection from the free-text field. The picture, when
+    there is one, arrives the same way: as describe_picture's reading of it,
+    already stripped of anything identifying.
     """
     words = target_word_count(duration_minutes)
-    return (
-        f"The listener described how they feel:\n\n{mood_text}\n\n"
+    parts = [f"The listener described how they feel:\n\n{mood_text}"]
+    if picture is not None:
+        parts.append(
+            f"The listener also chose a picture. It felt like: {picture.summary}\n"
+            f"Weave these images through the meditation: {', '.join(picture.keywords)}.\n"
+            "Do not mention that a picture was used."
+        )
+    parts.append(
         f"Write a meditation of roughly {words} words "
         f"(about {duration_minutes} minutes read slowly)."
     )
+    return "\n\n".join(parts)

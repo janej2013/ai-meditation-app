@@ -6,10 +6,11 @@ handler.
 
 Two things are deliberately absent from this state:
 
-* **the user's mood text** -- Step Functions persists execution input in the
+* **the user's mood text and picture** -- Step Functions persists execution input in the
   execution history, where it is visible in the console for 90 days. Constraint
-  7 forbids putting user input there, so the API writes ``mood_text`` onto the
-  JOB item and ``generate_script`` reads it from DynamoDB instead.
+  7 forbids putting user input there, so the API writes ``mood_text`` (and the
+  picture's object key) onto the JOB item and the task Lambdas read them from
+  DynamoDB instead. Only ``has_picture`` travels, to drive the Choice state.
 * **the generated script** -- same reasoning, plus it would bloat the state.
   ``generate_script`` writes it to S3 and passes only the key.
 
@@ -36,6 +37,9 @@ class PipelineState(BaseModel):
     user_id: str
     job_id: str
     duration_minutes: int = Field(ge=MIN_DURATION_MINUTES, le=MAX_DURATION_MINUTES)
+    # Routes the execution through describe_picture. The key itself stays on
+    # the JOB item.
+    has_picture: bool = False
 
     # Filled in as the pipeline progresses; each is an S3 object key.
     script_key: str | None = None
@@ -73,6 +77,11 @@ class BedrockTransientError(TransientError):
 
 class ScriptGenerationError(PipelineError):
     """Bedrock returned a response that is unusable as a meditation script."""
+
+
+class PictureDescriptionError(PipelineError):
+    """The picture could not be read or described: missing, oversized, or the
+    model's answer did not fit the PictureDescription contract."""
 
 
 class AudioMixError(PipelineError):

@@ -107,13 +107,15 @@ def test_the_arns_reach_the_synthesized_policy(stack):
         if statement.get("Action") == "bedrock:InvokeModel"
     ]
 
-    assert len(invoke_statements) == 1
-    rendered = str(invoke_statements[0]["Resource"])
-    assert f"inference-profile/{AU_PROFILE}" in rendered
-    assert "ap-southeast-4::foundation-model" in rendered
+    # One per model-calling step: the script and the picture description.
+    assert len(invoke_statements) == 2
+    for statement in invoke_statements:
+        rendered = str(statement["Resource"])
+        assert f"inference-profile/{AU_PROFILE}" in rendered
+        assert "ap-southeast-4::foundation-model" in rendered
 
 
-def test_only_generate_script_may_invoke_bedrock(stack):
+def test_only_the_model_calling_steps_may_invoke_bedrock(stack):
     """Least privilege: TTS, mixing and the ledger steps have no Bedrock access."""
     template = assertions.Template.from_stack(stack)
     policies = template.find_resources("AWS::IAM::Policy")
@@ -127,8 +129,11 @@ def test_only_generate_script_may_invoke_bedrock(stack):
         )
     ]
 
-    assert len(with_bedrock) == 1
-    assert with_bedrock[0].startswith("GenerateScript")
+    assert len(with_bedrock) == 2
+    assert {name.split("ServiceRole")[0] for name in with_bedrock} == {
+        "GenerateScript",
+        "DescribePicture",
+    }
 
 
 # ----------------------------------------------------------------------
