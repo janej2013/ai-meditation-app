@@ -26,6 +26,7 @@ import {
 } from '../api/client'
 import { DEFAULT_BGM_TRACK, bgmUrl, mixer } from '../audio/mixer'
 import { isSignedIn } from '../auth/cognito'
+import { useDreamCount } from '../dreamscapes/useDreamscapes'
 import { prepareJpeg } from '../picture/prepare'
 import { useScene } from '../scene/SceneContext'
 
@@ -66,6 +67,7 @@ export default function HomePage() {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
+  const dreamCount = useDreamCount()
   const fileRef = useRef<HTMLInputElement>(null)
   const dissolveTimer = useRef<ReturnType<typeof setInterval> | null>(null)
   // The in-flight upload of the current picture, started the moment it is
@@ -276,6 +278,26 @@ export default function HomePage() {
           >
             a picture
           </button>
+        </div>
+        {/* The collection's entry line: absent (not a spinner) until the
+            count is known, then fades in with it. */}
+        <div
+          style={{
+            marginTop: 44,
+            display: 'flex',
+            transition: 'opacity .8s ease',
+            opacity: dreamCount === null ? 0 : 1,
+          }}
+        >
+          {dreamCount !== null && (
+            <button className="dream-entry" onClick={() => navigate('/dreamscapes')}>
+              {dreamCount === 0
+                ? 'No dreamscapes yet'
+                : dreamCount === 1
+                  ? '1 dreamscape collected'
+                  : `${dreamCount} dreamscapes collected`}
+            </button>
+          )}
         </div>
       </div>
 

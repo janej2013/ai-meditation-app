@@ -38,6 +38,21 @@ export interface PictureUpload {
   expires_in: number
 }
 
+export interface DreamscapeItem {
+  job_id: string
+  /** Picture jobs only; text jobs carry mood_excerpt instead. */
+  keywords: string[] | null
+  mood_excerpt: string | null
+  duration_minutes: number | null
+  source_type: 'picture' | 'text'
+  created_at: string | null
+}
+
+export interface DreamscapeList {
+  items: DreamscapeItem[]
+  next_cursor: string | null
+}
+
 export interface CheckoutResponse {
   checkout_url: string
   product_key: string
@@ -88,6 +103,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     }
     throw new ApiError(response.status, detail)
   }
+  if (response.status === 204) return undefined as T
   return (await response.json()) as T
 }
 
@@ -130,6 +146,15 @@ export async function uploadPicture(picture: Blob): Promise<string> {
   const response = await fetch(upload.url, { method: 'POST', body: form })
   if (!response.ok) throw new ApiError(response.status, 'Picture upload failed')
   return upload.picture_id
+}
+
+export function listDreamscapes(cursor?: string): Promise<DreamscapeList> {
+  const query = cursor ? `?cursor=${encodeURIComponent(cursor)}` : ''
+  return request<DreamscapeList>(`/dreamscapes${query}`)
+}
+
+export function deleteDreamscape(jobId: string): Promise<void> {
+  return request<void>(`/dreamscapes/${encodeURIComponent(jobId)}`, { method: 'DELETE' })
 }
 
 export function getJob(jobId: string): Promise<Job> {

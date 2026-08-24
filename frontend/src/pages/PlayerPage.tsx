@@ -10,6 +10,7 @@ import { useEffect, useRef, useState } from 'react'
 import { useLocation, useNavigate, useParams } from 'react-router-dom'
 import { NotSignedInError, getJob } from '../api/client'
 import { BGM_TRACKS, DEFAULT_BGM_VOLUME, bgmUrl, mixer } from '../audio/mixer'
+import { wovenAgo } from '../dreamscapes/wovenAgo'
 import { useScene } from '../scene/SceneContext'
 
 function fmt(s: number): string {
@@ -32,6 +33,10 @@ export default function PlayerPage() {
     feeling?: string
     destination?: string
     pic?: boolean
+    from?: 'dreamscapes'
+    keywords?: string[] | null
+    moodExcerpt?: string | null
+    createdAt?: string | null
   } | null
   const handoffUrl = state?.audioUrl
 
@@ -40,12 +45,26 @@ export default function PlayerPage() {
   // reload arrives without state and gets the plain title.
   const feeling = state?.feeling
   const destination = state?.destination
-  const titleLines = feeling
-    ? [
-        `${feeling.charAt(0).toUpperCase()}${feeling.slice(1)},`,
-        destination && destination !== 'Anywhere' ? destination.toLowerCase() : 'quiet mind',
-      ]
-    : ['Your session']
+  // Revisiting from the collection: the prototype's header variant — kicker
+  // REVISITING, a woven-ago line, and the keywords as the title.
+  const revisiting = state?.from === 'dreamscapes'
+  const revisitTitle: string[] | null = revisiting
+    ? state?.keywords?.length
+      ? state.keywords.length >= 3
+        ? [`${state.keywords[0]} · ${state.keywords[1]} ·`, state.keywords.slice(2).join(' · ')]
+        : [state.keywords.join(' · ')]
+      : state?.moodExcerpt
+        ? [state.moodExcerpt]
+        : null
+    : null
+  const titleLines =
+    revisitTitle ??
+    (feeling
+      ? [
+          `${feeling.charAt(0).toUpperCase()}${feeling.slice(1)},`,
+          destination && destination !== 'Anywhere' ? destination.toLowerCase() : 'quiet mind',
+        ]
+      : ['Your session'])
 
   // The shared mixer is only ever touched from effects and event handlers --
   // never during render, which the react-hooks rules (correctly) forbid for
@@ -231,8 +250,13 @@ export default function PlayerPage() {
             color: 'var(--accent)',
           }}
         >
-          NOW PLAYING
+          {revisiting ? 'REVISITING' : 'NOW PLAYING'}
         </div>
+        {revisiting && state?.createdAt && (
+          <div style={{ font: '400 11.5px var(--font-mono)', color: 'oklch(0.740 0.018 275)' }}>
+            {wovenAgo(new Date(state.createdAt))}
+          </div>
+        )}
         <div style={{ font: '400 28px/1.35 var(--font-sans)', color: 'var(--text-primary)' }}>
           {titleLines.map((line, i) => (
             <span key={line}>
