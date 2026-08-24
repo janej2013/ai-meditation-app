@@ -15,21 +15,23 @@ vi.mock('../api/client', async (importOriginal) => {
   return { ...actual, getJob: vi.fn() }
 })
 
-const loadNarration = vi.fn()
-const loadBgm = vi.fn()
+const { loadNarration, loadBgm } = vi.hoisted(() => ({
+  loadNarration: vi.fn(),
+  loadBgm: vi.fn(),
+}))
 
 vi.mock('../audio/mixer', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../audio/mixer')>()
   return {
     ...actual,
-    DualTrackMixer: class {
-      onEnded: (() => void) | null = null
-      loadNarration = loadNarration
-      loadBgm = loadBgm
-      duration = () => 600
-      elapsed = () => 0
-      isPlaying = () => false
-      dispose = vi.fn()
+    mixer: {
+      onEnded: null as (() => void) | null,
+      loadNarration,
+      loadBgm,
+      duration: () => 600,
+      elapsed: () => 0,
+      isPlaying: () => false,
+      endSession: vi.fn(),
     },
   }
 })
@@ -53,7 +55,12 @@ function renderPlayer(state?: { audioUrl?: string }) {
 }
 
 function job(audioUrl: string | null) {
-  return { job_id: JOB_ID, status: 'DONE' as const, audio_url: audioUrl }
+  return {
+    job_id: JOB_ID,
+    status: 'DONE' as const,
+    audio_url: audioUrl,
+    picture_keywords: null,
+  }
 }
 
 beforeEach(() => {

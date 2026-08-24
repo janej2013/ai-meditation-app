@@ -73,3 +73,33 @@ def state_machine_definition(stack: Any) -> dict[str, Any]:
 @pytest.fixture(scope="module")
 def pipeline_stack() -> Any:
     return build_pipeline_stack()
+
+
+def build_data_stack(upload_origins: list[str] | None = None, app: Any = None) -> Any:
+    """A DataStack with test defaults; one call site to absorb signature changes.
+
+    Pass ``app`` when another stack in the same test must reference this one --
+    CDK refuses references across apps.
+    """
+    import aws_cdk as cdk
+
+    from stacks.data_stack import DataStack
+
+    return DataStack(
+        app or cdk.App(),
+        "Data",
+        env_name="dev",
+        upload_origins=upload_origins or ["http://localhost:5173"],
+        env=cdk.Environment(account=ACCOUNT, region=REGION),
+    )
+
+
+@pytest.fixture(scope="module")
+def definition(pipeline_stack) -> Any:
+    """The synthesized ASL document, shared so each module synthesizes once."""
+    return state_machine_definition(pipeline_stack)
+
+
+@pytest.fixture(scope="module")
+def states(definition) -> Any:
+    return definition["States"]

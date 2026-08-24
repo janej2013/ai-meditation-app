@@ -21,6 +21,17 @@ from constructs import Construct
 
 AUDIO_RETENTION_DAYS = 90
 
+# The backend twin of this constant is shared/models.PICTURE_PREFIX; infra
+# cannot import the Lambda package, so a rename must be mirrored by hand --
+# the api and pipeline stacks import this one, keeping infra to one copy.
+PICTURE_PREFIX = "pictures"
+
+# Uploaded pictures back the planned replay feature (re-listen without spending
+# a credit), so they outlive the job that used them. Nothing in the pipeline
+# deletes them; this rule is the only reaper. When replay lands, the audio
+# retention above should move to match.
+PICTURE_RETENTION_DAYS = 365
+
 
 class DataStack(Stack):
     """DynamoDB single table + S3 bucket for generated meditation audio."""
@@ -31,6 +42,7 @@ class DataStack(Stack):
         construct_id: str,
         *,
         env_name: str,
+        upload_origins: list[str],
         **kwargs,
     ) -> None:
         super().__init__(scope, construct_id, **kwargs)
@@ -62,7 +74,10 @@ class DataStack(Stack):
         )
 
         # Delivery is via CloudFront signed URLs (constraint 6), so the bucket
-        # stays fully private and needs no CORS configuration.
+        # stays fully private. The one browser-facing door is the picture
+        # upload: a presigned POST straight from the PWA, which needs CORS for
+        # POST from the site origin and nothing else -- GET never reaches the
+        # bucket directly.
         self.audio_bucket = s3.Bucket(
             self,
             "AudioBucket",
@@ -83,6 +98,21 @@ class DataStack(Stack):
                     prefix="jobs/",
                     expiration=Duration.days(AUDIO_RETENTION_DAYS),
                     abort_incomplete_multipart_upload_after=Duration.days(7),
+                ),
+                s3.LifecycleRule(
+                    id="ExpireUploadedPictures",
+                    enabled=True,
+                    prefix=f"{PICTURE_PREFIX}/",
+                    expiration=Duration.days(PICTURE_RETENTION_DAYS),
+                    abort_incomplete_multipart_upload_after=Duration.days(1),
+                ),
+            ],
+            cors=[
+                s3.CorsRule(
+                    allowed_methods=[s3.HttpMethods.POST],
+                    allowed_origins=upload_origins,
+                    allowed_headers=["content-type"],
+                    max_age=300,
                 )
             ],
             removal_policy=removal_policy,

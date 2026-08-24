@@ -2,7 +2,11 @@
 
 Chain:
 
-    FreezeCredit -> GenerateScript -> Synthesize -> CommitCredit
+    FreezeCredit -> [DescribePicture] -> GenerateScript -> Synthesize -> CommitCredit
+
+DescribePicture runs only when the execution input says ``has_picture``: a
+Choice state routes around it otherwise. The picture's key and the description
+never enter the state -- both live on the JOB item (constraint 7).
 
 Every state after the freeze succeeds catches to RollbackCredit, which refunds
 the credit and then fails the execution. FreezeCredit is the exception: an
@@ -34,6 +38,8 @@ from constructs import Construct
 
 from stacks.paths import ASSETS_DIR, BACKEND_DIR, SHARED_LAYER_DIR
 
+from .data_stack import PICTURE_PREFIX
+
 # Transport-level Lambda failures. Always worth retrying, never a code bug.
 LAMBDA_SERVICE_ERRORS = [
     "Lambda.ServiceException",
@@ -59,7 +65,9 @@ INSUFFICIENT_CREDITS = "InsufficientCreditsError"
 # frozen forever. `frozen >= 1` is also what POST /generate rejects new jobs on,
 # so a single stranded job locks the user out permanently with no way back.
 # A normal run finishes in about a minute, so the headroom costs nothing.
-EXECUTION_TIMEOUT = Duration.minutes(30)
+# test_state_machine sums the real worst case from the synthesized ASL; adding
+# DescribePicture (4 x 60s + backoff) is what pushed this past 30 minutes.
+EXECUTION_TIMEOUT = Duration.minutes(35)
 DEFAULT_TASK_TIMEOUT = Duration.seconds(30)
 
 # Volcano Engine (Doubao) Seed-TTS is the primary provider; Polly is the
@@ -81,7 +89,7 @@ DEFAULT_VOLCANO_SECRET_NAME = "meditation/volcano-tts"
 
 
 class PipelineStack(Stack):
-    """Step Functions state machine plus its five task Lambdas."""
+    """Step Functions state machine plus its six task Lambdas."""
 
     def __init__(
         self,
@@ -108,14 +116,26 @@ class PipelineStack(Stack):
             compatible_runtimes=[lambda_.Runtime.PYTHON_3_12],
             description="shared package (models, db, tts) and its dependencies.",
         )
-        # Royalty-free background music. Deployed to the audio bucket alongside
-        # generated audio; the browser fetches these directly (they carry no
-        # user content, so they need no signed URL) and mixes one under the
+        # Background music. Deployed to the audio bucket alongside generated
+        # audio; the browser fetches these directly (they carry no user
+        # content, so they need no signed URL) and mixes one under the
         # narration.
+        #
+        # Only what git holds goes through here. The licensed tracks are
+        # gitignored (assets/bgm/README.md) and reach the bucket by hand via
+        # `make upload-bgm`; excluding them keeps this asset identical between
+        # a laptop that has the files and CI that does not, so the two do not
+        # take turns re-running the deployment. prune=False means an upload
+        # made by hand is never deleted by a later deploy.
         s3deploy.BucketDeployment(
             self,
             "BgmAssets",
-            sources=[s3deploy.Source.asset(str(ASSETS_DIR))],
+            sources=[
+                s3deploy.Source.asset(
+                    str(ASSETS_DIR),
+                    exclude=["bgm/*.mp3", "!bgm/silence.mp3", "bgm/*license*.txt"],
+                )
+            ],
             destination_bucket=audio_bucket,
             destination_key_prefix="assets",
             prune=False,  # never delete generated job audio under jobs/
@@ -139,6 +159,16 @@ class PipelineStack(Stack):
             generate_env,
             memory_size=512,
             timeout=Duration.seconds(120),
+        )
+        # Same model as the script: Nova Lite reads images too, so one model
+        # id (and one IAM grant shape) covers both steps.
+        describe = self._task_function(
+            "DescribePicture",
+            "describe_picture",
+            shared_layer,
+            {**common_env, "BEDROCK_MODEL_ID": bedrock_model_id},
+            memory_size=512,
+            timeout=Duration.seconds(60),
         )
         # Referenced, never created: the value stays out of the template and
         # out of `cdk diff`. from_secret_name_v2 resolves the ARN at deploy
@@ -168,6 +198,7 @@ class PipelineStack(Stack):
             bedrock_model_id=bedrock_model_id,
             volcano_secret=volcano_secret,
             freeze=freeze,
+            describe=describe,
             generate=generate,
             synthesize=synthesize,
             commit=commit,
@@ -177,6 +208,7 @@ class PipelineStack(Stack):
         self.state_machine = self._build_state_machine(
             env_name=env_name,
             freeze=freeze,
+            describe=describe,
             generate=generate,
             synthesize=synthesize,
             commit=commit,
@@ -256,6 +288,7 @@ class PipelineStack(Stack):
         bedrock_model_id: str,
         volcano_secret: secretsmanager.ISecret,
         freeze: lambda_.Function,
+        describe: lambda_.Function,
         generate: lambda_.Function,
         synthesize: lambda_.Function,
         commit: lambda_.Function,
@@ -269,6 +302,9 @@ class PipelineStack(Stack):
         for fn in (freeze, commit, rollback):
             table.grant(fn, *ledger_actions)
         table.grant(generate, "dynamodb:GetItem", "dynamodb:UpdateItem")
+        # describe_picture reads the picture key off the JOB item and writes
+        # the description back to it.
+        table.grant(describe, "dynamodb:GetItem", "dynamodb:UpdateItem")
         # synthesize records audio_key on the JOB item now that it produces the
         # deliverable; the browser mixes the BGM, so no later step touches it.
         table.grant(synthesize, "dynamodb:UpdateItem")
@@ -285,12 +321,22 @@ class PipelineStack(Stack):
             iam.PolicyStatement(actions=["s3:GetObject", "s3:PutObject"], resources=[jobs_prefix])
         )
 
-        generate.add_to_role_policy(
+        # describe_picture reads the upload and nothing else: no PutObject, and
+        # no DeleteObject -- pictures are kept for replay and expire by
+        # lifecycle rule alone.
+        describe.add_to_role_policy(
             iam.PolicyStatement(
-                actions=["bedrock:InvokeModel"],
-                resources=self._bedrock_resources(bedrock_model_id),
+                actions=["s3:GetObject"],
+                resources=[audio_bucket.arn_for_objects(f"{PICTURE_PREFIX}/*")],
             )
         )
+
+        bedrock_invoke = iam.PolicyStatement(
+            actions=["bedrock:InvokeModel"],
+            resources=self._bedrock_resources(bedrock_model_id),
+        )
+        generate.add_to_role_policy(bedrock_invoke)
+        describe.add_to_role_policy(bedrock_invoke)
         # Both providers stay reachable: Volcano is primary, Polly is the
         # fallback that `-c tts_provider=polly` selects. Granting both means
         # switching back is a context change, not a redeploy of IAM.
@@ -345,6 +391,7 @@ class PipelineStack(Stack):
         *,
         env_name: str,
         freeze: lambda_.Function,
+        describe: lambda_.Function,
         generate: lambda_.Function,
         synthesize: lambda_.Function,
         commit: lambda_.Function,
@@ -389,6 +436,17 @@ class PipelineStack(Stack):
         freeze_task.add_catch(insufficient, errors=[INSUFFICIENT_CREDITS])
         freeze_task.add_catch(rollback_task, errors=["States.ALL"], result_path="$.error")
 
+        describe_task = self._task(
+            "DescribePictureTask", describe, "Describe the picture", Duration.seconds(60)
+        )
+        describe_task.add_retry(
+            errors=[BEDROCK_TRANSIENT, *LAMBDA_SERVICE_ERRORS],
+            interval=Duration.seconds(2),
+            max_attempts=3,
+            backoff_rate=2.0,
+        )
+        describe_task.add_catch(rollback_task, errors=["States.ALL"], result_path="$.error")
+
         generate_task = self._task(
             "GenerateScriptTask", generate, "Generate the script", Duration.seconds(120)
         )
@@ -425,9 +483,24 @@ class PipelineStack(Stack):
         # mark done.
         commit_task.add_catch(rollback_task, errors=["States.ALL"], result_path="$.error")
 
-        definition = freeze_task.next(
-            generate_task.next(synthesize_task.next(commit_task.next(succeeded)))
+        # A Choice cannot Catch, and a comparison against a path that does not
+        # exist is a States.Runtime error that terminates the execution with
+        # the credit still frozen -- so the presence check comes first. A
+        # missing or false flag takes the default branch straight to the
+        # script, which is every execution started before this step existed.
+        has_picture = (
+            sfn.Choice(self, "HasPicture")
+            .when(
+                sfn.Condition.and_(
+                    sfn.Condition.is_present("$.has_picture"),
+                    sfn.Condition.boolean_equals("$.has_picture", True),
+                ),
+                describe_task.next(generate_task),
+            )
+            .otherwise(generate_task)
         )
+        generate_task.next(synthesize_task.next(commit_task.next(succeeded)))
+        definition = freeze_task.next(has_picture)
 
         return sfn.StateMachine(
             self,

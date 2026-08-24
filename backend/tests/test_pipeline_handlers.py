@@ -18,7 +18,6 @@ from __future__ import annotations
 import json
 from unittest.mock import MagicMock
 
-import boto3
 import pytest
 from botocore.exceptions import ClientError
 from pydantic import ValidationError
@@ -39,10 +38,9 @@ from shared.db import InsufficientCreditsError
 from shared.models import JobStatus
 from shared.pipeline import BedrockTransientError, PipelineState, ScriptGenerationError
 
-from .conftest import USER_ID
+from .conftest import BUCKET, USER_ID, bedrock_response, patch_store
 
 JOB = "job-pipeline"
-BUCKET = "meditation-test-audio"
 MOOD = "I feel overwhelmed after a long week at Acme Corp with my manager Dana."
 
 
@@ -52,27 +50,12 @@ def state() -> dict:
 
 
 @pytest.fixture
-def s3_bucket(dynamodb_client):
-    """An S3 bucket inside the same moto session the DynamoDB fixture opened."""
-    client = boto3.client("s3", region_name="ap-southeast-2")
-    client.create_bucket(
-        Bucket=BUCKET,
-        CreateBucketConfiguration={"LocationConstraint": "ap-southeast-2"},
-    )
-    return client
-
-
-@pytest.fixture
 def audio_env(monkeypatch):
     monkeypatch.setenv("AUDIO_BUCKET", BUCKET)
     monkeypatch.setenv("BEDROCK_MODEL_ID", "amazon.nova-lite-v1:0")
     # A developer's shell may export the dev cost cap; it would shrink every
     # generation under test and break the maxTokens arithmetic below.
     monkeypatch.delenv("DURATION_MINUTES_OVERRIDE", raising=False)
-
-
-def patch_store(monkeypatch, module, store):
-    monkeypatch.setattr(module, "_get_store", lambda: store)
 
 
 # ----------------------------------------------------------------------
@@ -116,13 +99,6 @@ def test_freeze_rejects_a_malformed_payload(monkeypatch, store):
 # ----------------------------------------------------------------------
 # generate_script
 # ----------------------------------------------------------------------
-
-
-def bedrock_response(text: str, stop_reason: str = "end_turn") -> dict:
-    return {
-        "output": {"message": {"content": [{"text": text}]}},
-        "stopReason": stop_reason,
-    }
 
 
 def plausible_script(duration_minutes: int = 10) -> str:
@@ -185,7 +161,14 @@ def test_generate_reads_mood_from_dynamodb_not_the_payload(
 
 @pytest.mark.parametrize(
     ("minutes", "expected"),
-    [(10, 10 * 95 * 2), (30, 5000)],
+    [
+        (
+            10,
+            target_word_count(10) * generate_handler._TOKENS_PER_WORD
+            + generate_handler._TOKEN_HEADROOM,
+        ),
+        (30, generate_handler._MAX_OUTPUT_TOKENS),
+    ],
     ids=["under-cap", "capped"],
 )
 def test_generate_caps_max_tokens_at_the_model_limit(
@@ -208,6 +191,29 @@ def test_generate_caps_max_tokens_at_the_model_limit(
     generate_handler.lambda_handler({**state, "duration_minutes": minutes}, None)
 
     assert bedrock.converse.call_args.kwargs["inferenceConfig"]["maxTokens"] == expected
+
+
+def test_generate_fails_a_picture_job_whose_description_never_landed(
+    store, dynamodb_client, s3_bucket, audio_env, monkeypatch, state
+):
+    """has_picture routed the execution through describe_picture, yet the JOB
+    item carries no description (e.g. the conditional write was swallowed):
+    fail and refund rather than quietly delivering a words-only meditation."""
+    from .conftest import seed_entitlement
+
+    seed_entitlement(dynamodb_client, available=1)
+    store.create_job(USER_ID, JOB, MOOD, 10)
+    store.freeze_credit(USER_ID, JOB)
+    patch_store(monkeypatch, generate_handler, store)
+
+    bedrock = MagicMock()
+    bedrock.converse.return_value = bedrock_response(plausible_script())
+    monkeypatch.setattr(generate_handler, "_get_bedrock", lambda: bedrock)
+    monkeypatch.setattr(generate_handler, "_get_s3", lambda: s3_bucket)
+
+    with pytest.raises(ScriptGenerationError, match="lost its picture description"):
+        generate_handler.lambda_handler({**state, "has_picture": True}, None)
+    bedrock.converse.assert_not_called()
 
 
 def test_generate_rejects_a_script_truncated_at_max_tokens(
@@ -384,6 +390,47 @@ def test_prompt_forbids_repeating_personal_details():
 def test_prompt_paces_to_the_requested_duration():
     assert target_word_count(10) == 950  # 95 wpm
     assert "950 words" in build_user_message("anxious", 10)
+
+
+def test_prompt_weaves_a_picture_description_in_when_there_is_one():
+    from shared.models import PictureDescription
+
+    picture = PictureDescription(
+        keywords=["dusk", "still water", "pines"], summary="You stand by a quiet lake at dusk."
+    )
+    with_picture = build_user_message(MOOD, 10, picture)
+    without = build_user_message(MOOD, 10)
+
+    assert "still water" in with_picture
+    assert "quiet lake at dusk" in with_picture
+    assert "Do not mention that a picture was used" in with_picture
+    assert "picture" not in without
+
+
+def test_generate_passes_the_picture_description_to_the_prompt(
+    store, dynamodb_client, s3_bucket, audio_env, monkeypatch, state
+):
+    from shared.models import PictureDescription
+
+    from .conftest import seed_entitlement
+
+    seed_entitlement(dynamodb_client, available=1)
+    store.create_job(USER_ID, JOB, MOOD, 10, picture_key=f"pictures/{USER_ID}/p.jpg")
+    store.freeze_credit(USER_ID, JOB)
+    store.set_job_picture_description(
+        USER_ID, JOB, PictureDescription(keywords=["a", "b", "c"], summary="Soft morning light.")
+    )
+    patch_store(monkeypatch, generate_handler, store)
+
+    bedrock = MagicMock()
+    bedrock.converse.return_value = bedrock_response(plausible_script())
+    monkeypatch.setattr(generate_handler, "_get_bedrock", lambda: bedrock)
+    monkeypatch.setattr(generate_handler, "_get_s3", lambda: s3_bucket)
+
+    generate_handler.lambda_handler({**state, "has_picture": True}, None)
+
+    sent = bedrock.converse.call_args.kwargs["messages"][0]["content"][0]["text"]
+    assert "Soft morning light." in sent
 
 
 def test_prompt_labels_the_mood_rather_than_embedding_it_as_instruction():

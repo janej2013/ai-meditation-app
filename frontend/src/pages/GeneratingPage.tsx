@@ -2,13 +2,21 @@
  * The waiting screen: polling GET /jobs/{id} while the pipeline runs. Words
  * mode shows the breathing circle + rotating captions over its own radial
  * wash; picture mode keeps the user's dreamscape in view ("Weaving your
- * picture into a dream…" — the prototype's picMode). DONE swaps the caption
- * for "Your dreamscape is ready", fades the screen out and hands the signed
- * audio_url to the player; FAILED goes to the refund screen.
+ * picture into a dream…" — the prototype's picMode), and once the pipeline
+ * has described the picture, the keywords it found ("In your picture, we
+ * found…"). DONE swaps the caption for "Your dreamscape is ready", fades the
+ * screen out and hands the signed audio_url to the player; FAILED goes to the
+ * refund screen.
+ *
+ * The background music started on the home screen keeps playing here. One
+ * exit rule, enforced in the poll effect's cleanup so back-navigation and
+ * cancels behave alike: unmounting stops the music unless the session was
+ * handed to the player.
  */
 import { useEffect, useRef, useState } from 'react'
 import { useLocation, useNavigate, useParams } from 'react-router-dom'
 import { pollJob } from '../api/client'
+import { mixer } from '../audio/mixer'
 
 const CAPTIONS = ['Creating your meditation…', 'Breathe in…', 'And release…']
 
@@ -29,7 +37,9 @@ export default function GeneratingPage() {
   const [capOpacity, setCapOpacity] = useState(1)
   const [ready, setReady] = useState(false)
   const [fade, setFade] = useState(1)
+  const [keywords, setKeywords] = useState<string[] | null>(null)
   const abortRef = useRef<AbortController | null>(null)
+  const handedOff = useRef(false)
 
   useEffect(() => {
     if (ready || pic) return
@@ -49,9 +59,15 @@ export default function GeneratingPage() {
     abortRef.current = controller
     const timers: ReturnType<typeof setTimeout>[] = []
 
-    pollJob(jobId, { signal: controller.signal })
+    pollJob(jobId, {
+      signal: controller.signal,
+      onUpdate: (job) => {
+        if (job.picture_keywords?.length) setKeywords(job.picture_keywords)
+      },
+    })
       .then((job) => {
         if (job.status === 'DONE' && job.audio_url) {
+          handedOff.current = true
           // The prototype's arrival beat: caption swap, screen fade, player.
           setReady(true)
           setCapOpacity(1)
@@ -77,6 +93,7 @@ export default function GeneratingPage() {
     return () => {
       controller.abort()
       timers.forEach(clearTimeout)
+      if (!handedOff.current) mixer.stopAmbient()
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps -- poll once per job
   }, [jobId, navigate])
@@ -144,11 +161,31 @@ export default function GeneratingPage() {
       >
         {ready
           ? 'Your dreamscape is ready'
-          : pic
-            ? 'Weaving your picture into a dream…'
-            : CAPTIONS[capIdx]}
+          : keywords
+            ? 'In your picture, we found…'
+            : pic
+              ? 'Weaving your picture into a dream…'
+              : CAPTIONS[capIdx]}
       </div>
-      {pic && !ready && (
+      {keywords && !ready && (
+        <div
+          style={{
+            marginTop: 14,
+            display: 'flex',
+            flexWrap: 'wrap',
+            justifyContent: 'center',
+            gap: 9,
+            padding: '0 30px',
+          }}
+        >
+          {keywords.map((k) => (
+            <span key={k} className="chip selected">
+              {k}
+            </span>
+          ))}
+        </div>
+      )}
+      {pic && !ready && !keywords && (
         <div
           style={{
             marginTop: 12,

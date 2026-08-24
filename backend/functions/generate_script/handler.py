@@ -16,7 +16,8 @@ import boto3
 from botocore.exceptions import ClientError
 
 from shared.db import EntitlementStore
-from shared.pipeline import BedrockTransientError, PipelineState, ScriptGenerationError
+from shared.models import PictureDescription
+from shared.pipeline import PipelineState, ScriptGenerationError, raise_for_bedrock_error
 
 from .prompt import SYSTEM_PROMPT, build_user_message, min_script_chars, target_word_count
 
@@ -34,22 +35,14 @@ _TOKENS_PER_WORD = 2
 
 # Nova Lite refuses `maxTokens` above 5000 with a ValidationException, which is
 # permanent and rolls the credit back. A 30-minute script asks for 5700 by the
-# rule above, so the budget is capped rather than the duration. 5000 tokens is
-# still ~3500 words against a 2850-word target, so nothing is truncated.
+# rule above, so the budget is capped rather than the duration.
 _MAX_OUTPUT_TOKENS = 5000
 
-# Bedrock signals overload and throttling with these. Everything else --
-# ValidationException, AccessDeniedException, a malformed response -- is
-# permanent, so it must fall through to Catch instead of burning retries.
-_TRANSIENT_CODES = frozenset(
-    {
-        "ThrottlingException",
-        "ServiceUnavailableException",
-        "InternalServerException",
-        "ModelTimeoutException",
-        "ModelNotReadyException",
-    }
-)
+# On top of the per-word budget, room for routine overshoot: a model asked for
+# "roughly N words" reliably runs a little long, and with the dev duration
+# override the budget is tiny (1 min -> 190 tokens), where overshoot would
+# otherwise trip the max_tokens rejection below on nearly every run.
+_TOKEN_HEADROOM = 300
 
 _store: EntitlementStore | None = None
 _bedrock: Any = None
@@ -91,7 +84,19 @@ def lambda_handler(event: dict[str, Any], context: object) -> dict[str, Any]:  #
 
     store.mark_job_generating(state.user_id, state.job_id)
 
-    script = _generate(job.mood_text, _effective_duration(state.duration_minutes))
+    # describe_picture ran only if the job has one; its reading rides along on
+    # the same item as the mood, and a job that skipped that step has neither.
+    picture = None
+    if job.picture_keywords and job.picture_summary:
+        picture = PictureDescription(keywords=job.picture_keywords, summary=job.picture_summary)
+    if state.has_picture and picture is None:
+        # The Choice routed through describe_picture, yet its result never
+        # reached the item (a conditionally rejected write, most likely).
+        # Fail and refund rather than quietly delivering the words-only
+        # meditation the user did not ask for.
+        raise ScriptGenerationError(f"job {state.job_id} lost its picture description")
+
+    script = _generate(job.mood_text, _effective_duration(state.duration_minutes), picture)
 
     key = script_key(state.job_id)
     _get_s3().put_object(
@@ -119,7 +124,9 @@ def _effective_duration(requested_minutes: int) -> int:
     return minutes
 
 
-def _generate(mood_text: str, duration_minutes: int) -> str:
+def _generate(
+    mood_text: str, duration_minutes: int, picture: PictureDescription | None = None
+) -> str:
     words = target_word_count(duration_minutes)
     try:
         response = _get_bedrock().converse(
@@ -128,25 +135,16 @@ def _generate(mood_text: str, duration_minutes: int) -> str:
             messages=[
                 {
                     "role": "user",
-                    "content": [{"text": build_user_message(mood_text, duration_minutes)}],
+                    "content": [{"text": build_user_message(mood_text, duration_minutes, picture)}],
                 }
             ],
             inferenceConfig={
-                "maxTokens": min(words * _TOKENS_PER_WORD, _MAX_OUTPUT_TOKENS),
+                "maxTokens": min(words * _TOKENS_PER_WORD + _TOKEN_HEADROOM, _MAX_OUTPUT_TOKENS),
                 "temperature": 0.7,
             },
         )
     except ClientError as exc:
-        error = exc.response.get("Error", {})
-        code = error.get("Code", "")
-        # The message names the rejected parameter or account restriction --
-        # e.g. "Access to Bedrock models is not allowed for this account" --
-        # and never echoes the prompt, so it is safe to surface (constraint 7)
-        # and indispensable: the code alone turns every failure into a hunt.
-        detail = f"{code}: {error.get('Message', '')}"
-        if code in _TRANSIENT_CODES:
-            raise BedrockTransientError(f"bedrock transient failure: {detail}") from exc
-        raise ScriptGenerationError(f"bedrock call failed: {detail}") from exc
+        raise_for_bedrock_error(exc, ScriptGenerationError)
 
     return _extract_text(response, duration_minutes)
 

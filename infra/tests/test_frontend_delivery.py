@@ -22,6 +22,7 @@ if shutil.which("node") is None:  # pragma: no cover - environment guard
 
 import aws_cdk as cdk
 from aws_cdk import assertions
+from conftest import build_data_stack
 
 from stacks.data_stack import DataStack
 from stacks.frontend_stack import FrontendStack
@@ -46,7 +47,7 @@ def build(**overrides) -> tuple[DataStack, FrontendStack]:
     app = cdk.App()
     env = cdk.Environment(account=ACCOUNT, region=REGION)
 
-    data = DataStack(app, "Data", env_name="dev", env=env)
+    data = build_data_stack(app=app)
     frontend = FrontendStack(
         app,
         "Frontend",

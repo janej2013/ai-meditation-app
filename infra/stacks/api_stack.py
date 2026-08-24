@@ -6,6 +6,7 @@ from aws_cdk import aws_apigatewayv2_authorizers as authorizers
 from aws_cdk import aws_apigatewayv2_integrations as integrations
 from aws_cdk import aws_cognito as cognito
 from aws_cdk import aws_dynamodb as dynamodb
+from aws_cdk import aws_iam as iam
 from aws_cdk import aws_lambda as lambda_
 from aws_cdk import aws_logs as logs
 from aws_cdk import aws_s3 as s3
@@ -14,6 +15,8 @@ from aws_cdk import aws_stepfunctions as sfn
 from constructs import Construct
 
 from stacks.paths import BACKEND_DIR
+
+from .data_stack import PICTURE_PREFIX
 
 # Created by hand: the CloudFront URL-signing private key, whose public half
 # is registered on the audio distribution. Either a bare PEM or
@@ -109,6 +112,17 @@ class ApiStack(Stack):
         # (constraint 6).
         cloudfront_key_secret.grant_read(self.api_function)
 
+        # POST /pictures/upload signs an S3 POST policy with the Lambda's own
+        # credentials, so the Lambda itself must be allowed to put the object.
+        # Write-only, and only under pictures/: it never reads a picture back,
+        # and it never touches jobs/.
+        self.api_function.add_to_role_policy(
+            iam.PolicyStatement(
+                actions=["s3:PutObject"],
+                resources=[audio_bucket.arn_for_objects(f"{PICTURE_PREFIX}/*")],
+            )
+        )
+
         # The authorizer validates signature, issuer, audience and expiry before
         # the Lambda is invoked, so the app only reads claims.
         #
@@ -166,6 +180,11 @@ class ApiStack(Stack):
         )
         self.http_api.add_routes(
             path="/generate",
+            methods=[apigwv2.HttpMethod.POST],
+            integration=integration,
+        )
+        self.http_api.add_routes(
+            path="/pictures/upload",
             methods=[apigwv2.HttpMethod.POST],
             integration=integration,
         )

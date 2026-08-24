@@ -2,7 +2,7 @@
 
 ## Project overview
 
-AI Meditation App — a production web/PWA product for Australian users. Users describe how they feel; the system generates a personalised meditation script (LLM), synthesises it to speech (TTS), mixes background music, and delivers a streamable audio file. Freemium model: 1 free generation on signup, then paid credits/subscription via Stripe.
+AI Meditation App — a production web/PWA product for Australian users. Users describe how they feel — optionally alongside a picture, which a vision step turns into mood keywords — and the system generates a personalised meditation script (LLM), synthesises it to speech (TTS), mixes background music, and delivers a streamable audio file. Freemium model: 1 free generation on signup, then paid credits/subscription via Stripe.
 
 This is a real product AND a portfolio project demonstrating AWS + GenAI engineering. Code quality, IaC hygiene, and security practices matter as much as features.
 
@@ -11,13 +11,13 @@ This is a real product AND a portfolio project demonstrating AWS + GenAI enginee
 - **IaC**: AWS CDK v2, Python. Region `ap-southeast-2` (Sydney). CloudFront ACM certs in `us-east-1`.
 - **Backend API**: FastAPI + Mangum on Lambda (container image, built with Docker).
 - **Pipeline**: AWS Step Functions (Standard) orchestrating small single-purpose zip Lambdas.
-- **LLM**: Amazon Bedrock, Amazon Nova Lite by default, invoked on demand in ap-southeast-2 (bare model id, no cross-region profile, so user text stays in Sydney). Claude Haiku remains a supported override via `-c bedrock_model_id=`; use a cross-region inference profile only if a chosen model is unavailable in ap-southeast-2.
+- **LLM / vision**: Amazon Bedrock, Amazon Nova Lite by default for both the script and the picture description, invoked on demand in ap-southeast-2 (bare model id, no cross-region profile, so user text and pictures stay in Sydney). Claude Haiku remains a supported override via `-c bedrock_model_id=`; use a cross-region inference profile only if a chosen model is unavailable in ap-southeast-2.
 - **TTS**: Volcano Engine TTS (primary) and Amazon Polly (fallback), behind a `TTSProvider` abstraction. Never call a TTS vendor SDK/API directly from business logic.
 - **Data**: DynamoDB, single-table design, on-demand billing.
 - **Auth**: Cognito User Pool, JWT authorizer on API Gateway HTTP API.
 - **Payments**: Stripe Checkout + webhooks. Never build custom payment UI.
 - **Frontend**: React + Vite, PWA (manifest + service worker), hosted on S3 + CloudFront.
-- **Audio mixing**: in the browser, via the Web Audio API. The pipeline delivers narration only; the PWA mixes a user-selectable BGM track under it at playback time, so the listener can switch tracks or change the music volume mid-session. Pre-bundled royalty-free BGM ships to `assets/` on the audio bucket. `backend/functions/mix_audio/` still holds a server-side ffmpeg mixer for a future download/share feature — it is kept green by its unit tests but is **not deployed**; see README.
+- **Audio mixing**: in the browser, via the Web Audio API. The pipeline delivers narration only; the PWA mixes a user-selectable BGM track under it at playback time, so the listener can switch tracks or change the music volume mid-session. BGM is licensed from Pixabay and lives under `assets/` on the audio bucket, uploaded by hand via `make upload-bgm` (the licence forbids redistributing the files, so they are not in git and not in the CDK asset; only the CI probe `silence.mp3` ships with a deploy). `backend/functions/mix_audio/` still holds a server-side ffmpeg mixer for a future download/share feature — it is kept green by its unit tests but is **not deployed**; see README.
 - **Python**: 3.12, type hints everywhere, Pydantic v2 models, `ruff` for lint/format, `pytest` for tests.
 
 ## Repository layout
@@ -34,8 +34,8 @@ infra/            CDK app. One stack per concern:
 backend/
   api/              FastAPI app (Mangum handler), routers/, deps.py, Dockerfile
   functions/        One folder per Step Functions task Lambda (zip):
-                    freeze_credit, generate_script, synthesize,
-                    commit_credit, rollback_credit
+                    freeze_credit, describe_picture, generate_script,
+                    synthesize, commit_credit, rollback_credit
                     mix_audio/ is retained but NOT deployed (browser mixes
                     instead); init_user/ is a Cognito trigger, not a task
   shared/           Shared package (Lambda layer): models.py, db.py, tts/
@@ -52,8 +52,9 @@ frontend/           React + Vite PWA
 4. **Secrets** (Volcano TTS key, Stripe secret + webhook signing secret): Secrets Manager or SSM SecureString only. Never in code, `.env` committed files, plaintext Lambda env vars, or CDK context.
 5. **Stripe webhooks must verify the signature** before any state change. Entitlement updates from webhooks must be idempotent (key on Stripe event id).
 6. **Audio delivery**: CloudFront signed URLs to S3 objects. Never stream audio bytes through Lambda. Applies to per-job narration under `jobs/`; the shared BGM under `assets/` carries no user content and is served as ordinary cached CloudFront objects so the browser can switch tracks without a round trip for a new signature.
-7. **No PII in prompts or logs.** The LLM prompt must instruct the model not to repeat user personal details verbatim in the script. Log `job_id`s and status, never user input text or generated scripts at INFO level.
+7. **No PII in prompts or logs.** The LLM prompt must instruct the model not to repeat user personal details verbatim in the script; the vision prompt must not describe people or transcribe text in the picture. Keywords and summaries derived from a user's picture are user content: they live on the JOB item like `mood_text`, never in the state machine payload, and never in INFO logs. Log `job_id`s, status and counts only.
 8. **`cdk deploy` and any command that spends money or touches live AWS resources is human-only.** Claude may run `cdk synth`, `cdk diff`, `ruff`, `pytest`, and local builds.
+9. **Uploaded pictures are written only under `pictures/<cognito_sub>/` via a presigned S3 POST that fixes key, content type and size.** They are kept for the planned replay feature and expire by the bucket's lifecycle rule alone — no business code deletes a user's object, and no pipeline or API Lambda holds `s3:DeleteObject` on them. (Deployment custodians are the exception: dev's `auto_delete_objects` on stack destroy, and the BucketDeployment handler's default grant.)
 
 ## DynamoDB single-table conventions
 
@@ -62,7 +63,7 @@ frontend/           React + Vite PWA
   - `SK = PROFILE`
   - `SK = ENTITLEMENT` — fields: `available` (int), `frozen` (int), `plan`, `period_end`
   - `SK = SUB#<stripe_subscription_id>`
-  - `SK = JOB#<job_id>` — fields: `status` (PENDING | FROZEN | GENERATING | DONE | FAILED | ROLLED_BACK), `audio_key`, timestamps
+  - `SK = JOB#<job_id>` — fields: `status` (PENDING | FROZEN | GENERATING | DONE | FAILED | ROLLED_BACK), `audio_key`, `picture_key` / `picture_keywords` / `picture_summary` (picture jobs only), timestamps
 - Freeze: `available >= 1` condition → `available -= 1, frozen += 1`.
 - Commit: `frozen >= 1` condition → `frozen -= 1`.
 - Rollback: condition on job status not already committed → `frozen -= 1, available += 1`.

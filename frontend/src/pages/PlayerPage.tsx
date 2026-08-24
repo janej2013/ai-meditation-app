@@ -9,7 +9,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { useLocation, useNavigate, useParams } from 'react-router-dom'
 import { NotSignedInError, getJob } from '../api/client'
-import { BGM_TRACKS, DEFAULT_BGM_VOLUME, DualTrackMixer, bgmUrl } from '../audio/mixer'
+import { BGM_TRACKS, DEFAULT_BGM_VOLUME, bgmUrl, mixer } from '../audio/mixer'
 import { useScene } from '../scene/SceneContext'
 
 function fmt(s: number): string {
@@ -47,10 +47,10 @@ export default function PlayerPage() {
       ]
     : ['Your session']
 
-  // The mixer lives in a ref and is only ever touched from effects and event
-  // handlers -- never during render, which the react-hooks rules (correctly)
-  // forbid for mutable objects.
-  const mixerRef = useRef<DualTrackMixer | null>(null)
+  // The shared mixer is only ever touched from effects and event handlers --
+  // never during render, which the react-hooks rules (correctly) forbid for
+  // mutable objects. It may already be playing the ambient track that started
+  // on the home screen; loading the narration leaves that running.
   const [ready, setReady] = useState(false)
   const [failed, setFailed] = useState(false)
   const [playing, setPlaying] = useState(false)
@@ -79,8 +79,6 @@ export default function PlayerPage() {
       navigate('/', { replace: true })
       return
     }
-    const mixer = new DualTrackMixer()
-    mixerRef.current = mixer
     let cancelled = false
 
     /** A signature minted just now, for a job that is already DONE. */
@@ -103,12 +101,23 @@ export default function PlayerPage() {
       await mixer.loadNarration(await freshNarrationUrl())
     }
 
+    /** Best-effort: a missing or unfetchable BGM object must never take the
+     * paid narration down with it -- the session just plays voice-only. */
+    const loadBgmQuietly = async (): Promise<void> => {
+      const initial = BGM_TRACKS.find((t) => t.id === trackId) ?? BGM_TRACKS[0]
+      const url = bgmUrl(initial)
+      if (!url) return
+      try {
+        await mixer.loadBgm(url)
+      } catch {
+        // e.g. `make upload-bgm` was never run against this environment.
+      }
+    }
+
     void (async () => {
       try {
-        await loadNarration()
-        const initial = BGM_TRACKS.find((t) => t.id === trackId) ?? BGM_TRACKS[0]
-        const url = bgmUrl(initial)
-        if (url) await mixer.loadBgm(url)
+        // Independent downloads; decoding them in parallel halves time-to-ready.
+        await Promise.all([loadNarration(), loadBgmQuietly()])
         if (!cancelled) {
           setDuration(mixer.duration())
           setReady(true)
@@ -124,20 +133,20 @@ export default function PlayerPage() {
     mixer.onEnded = () => setPlaying(false)
     return () => {
       cancelled = true
-      mixer.dispose()
-      mixerRef.current = null
+      mixer.onEnded = null
+      // Leaving the player ends the session: narration and music both stop.
+      mixer.endSession()
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps -- mount-only load
   }, [jobId])
 
   useEffect(() => {
-    const t = setInterval(() => setElapsed(mixerRef.current?.elapsed() ?? 0), 500)
+    const t = setInterval(() => setElapsed(mixer.elapsed()), 500)
     return () => clearInterval(t)
   }, [])
 
   const togglePlay = async () => {
-    const mixer = mixerRef.current
-    if (!ready || !mixer) return
+    if (!ready) return
     if (mixer.isPlaying()) {
       mixer.pause()
       setPlaying(false)
@@ -149,8 +158,7 @@ export default function PlayerPage() {
 
   const seek = async (e: React.MouseEvent) => {
     const el = trackRef.current
-    const mixer = mixerRef.current
-    if (!el || !ready || !mixer) return
+    if (!el || !ready) return
     const r = el.getBoundingClientRect()
     const p = Math.max(0, Math.min(1, (e.clientX - r.left) / r.width))
     await mixer.seek(p * duration)
@@ -161,7 +169,7 @@ export default function PlayerPage() {
     setTrackId(id)
     const track = BGM_TRACKS.find((t) => t.id === id)
     // Mid-session switch: only the BGM source is replaced; narration runs on.
-    await mixerRef.current?.loadBgm(track ? bgmUrl(track) : null)
+    await mixer.loadBgm(track ? bgmUrl(track) : null)
   }
 
   const playPct = duration ? (elapsed / duration) * 100 : 0
@@ -314,7 +322,7 @@ export default function PlayerPage() {
           onChange={(e) => {
             const v = Number(e.target.value) / 100
             setBgmVolume(v)
-            mixerRef.current?.setBgmVolume(v)
+            mixer.setBgmVolume(v)
           }}
           aria-label="Background volume"
           style={{ marginTop: 14, width: '100%', accentColor: 'var(--accent)' as string }}

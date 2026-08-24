@@ -23,20 +23,9 @@ import pytest
 if shutil.which("node") is None:  # pragma: no cover - environment guard
     pytest.skip("aws-cdk-lib needs node on PATH", allow_module_level=True)
 
-from conftest import state_machine_definition
 
 ROLLBACK = "RollbackCreditTask"
 INSUFFICIENT_CREDITS = "InsufficientCreditsError"
-
-
-@pytest.fixture(scope="module")
-def definition(pipeline_stack) -> dict:
-    return state_machine_definition(pipeline_stack)
-
-
-@pytest.fixture(scope="module")
-def states(definition) -> dict:
-    return definition["States"]
 
 
 def task_states(states: dict) -> dict:

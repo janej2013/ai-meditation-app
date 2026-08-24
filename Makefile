@@ -48,7 +48,7 @@ CONTEXT = $(if $(wildcard $(AUDIO_PUB_KEY)),-c audio_public_key_file="$(abspath 
           $(if $(BEDROCK_MODEL),-c bedrock_model_id="$(BEDROCK_MODEL)")
 
 .DEFAULT_GOAL := help
-.PHONY: help check lint test synth layers diff deploy fe-check fe-lint fe-test fe-build \
+.PHONY: help check lint test synth layers diff deploy upload-bgm fe-check fe-lint fe-test fe-build \
         e2e e2e-ui e2e-install e2e-auth smoke dev
 
 help: ## List the targets
@@ -106,6 +106,23 @@ endif
 		--require-approval $(APPROVAL) \
 		--outputs-file ../cdk-outputs.json \
 		$(if $(STACKS),$(STACKS),--all)
+
+# Licensed BGM tracks are gitignored (assets/bgm/README.md) so they never
+# ride along in the public repository; BucketDeployment excludes them for the
+# same reason. This is how they reach the bucket. Idempotent: the bucket
+# already holding an identical object costs one PUT and nothing else.
+BGM_TRACKS ?= assets/bgm/default_bgm.mp3
+
+upload-bgm: ## Copy licensed BGM tracks to the $(ENV) audio bucket -- HUMAN-ONLY (CLAUDE.md 8)
+	@bucket=$$(aws cloudformation describe-stacks --stack-name Meditation-$(ENV)-Data \
+		--query "Stacks[0].Outputs[?OutputKey=='AudioBucketName'].OutputValue" --output text) && \
+	test -n "$$bucket" || { echo "no AudioBucketName output on Meditation-$(ENV)-Data"; exit 1; }; \
+	for f in $(BGM_TRACKS); do \
+		test -f "$$f" || { echo "missing $$f"; exit 1; }; \
+		aws s3 cp "$$f" "s3://$$bucket/assets/bgm/$$(basename $$f)" \
+			--content-type audio/mpeg \
+			--cache-control "public, max-age=31536000, immutable"; \
+	done
 
 # ----------------------------------------------------------------------
 # Frontend

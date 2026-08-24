@@ -4,21 +4,29 @@
  * how are you feeling (chips or own words), where to drift to, duration,
  * Begin drifting — or the picture chooser.
  *
- * The picture path is available to everyone and stays entirely client-side:
- * the chosen file becomes an object URL the particle cloud samples into the
- * dreamscape (ParticleCloud's src prop), dissolving into stardust on arrival.
- * It is never uploaded — the pipeline has no vision step, so the meditation
- * script itself is still driven by the mood panel, and the prototype's
- * keyword screen ("In your picture, we found…") waits for that backend
- * capability; see README Known gaps.
+ * The picture path is available to everyone. The chosen file is normalised to
+ * a small JPEG in the browser (picture/prepare.ts); that blob becomes the
+ * object URL the particle cloud samples into the dreamscape (ParticleCloud's
+ * src prop), and is uploaded to S3 in the background while the user fills in
+ * the panel. Begin waits for the upload and hands its id to POST /generate,
+ * where the pipeline's describe_picture step turns it into the keywords the
+ * waiting screen shows ("In your picture, we found…").
  *
  * The API takes one mood string; the destination is folded into it, so the
  * backend contract is unchanged.
  */
 import { useEffect, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { ApiError, NotSignedInError, getAccount, startGeneration } from '../api/client'
+import {
+  ApiError,
+  NotSignedInError,
+  getAccount,
+  startGeneration,
+  uploadPicture,
+} from '../api/client'
+import { DEFAULT_BGM_TRACK, bgmUrl, mixer } from '../audio/mixer'
 import { isSignedIn } from '../auth/cognito'
+import { prepareJpeg } from '../picture/prepare'
 import { useScene } from '../scene/SceneContext'
 
 const MOODS = ['Stressed', "Can't sleep", 'Anxious', 'Restless', 'Low', 'Just tired']
@@ -60,6 +68,10 @@ export default function HomePage() {
 
   const fileRef = useRef<HTMLInputElement>(null)
   const dissolveTimer = useRef<ReturnType<typeof setInterval> | null>(null)
+  // The in-flight upload of the current picture, started the moment it is
+  // chosen so it is usually done by the time Begin is pressed. Null when the
+  // session is words-only.
+  const upload = useRef<Promise<string> | null>(null)
 
   useEffect(() => {
     void (async () => {
@@ -99,11 +111,29 @@ export default function HomePage() {
       return (prev.length >= 2 ? prev.slice(1) : prev).concat(m)
     })
 
-  const onFile = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const onFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const f = e.target.files && e.target.files[0]
+    // Clear the input now: browsers fire no change event when the same file
+    // is re-picked, which would dead-end the "please choose it again" path.
+    e.target.value = ''
     if (!f) return
+    let picture: Blob
+    try {
+      picture = await prepareJpeg(f)
+    } catch {
+      // The browser could not decode it (an HEIC on a browser without HEIC
+      // support, say). Stay on the chooser and say so.
+      setError('That picture could not be read. Please choose a JPEG or PNG.')
+      return
+    }
+    setError(null)
     if (cloudSrc) URL.revokeObjectURL(cloudSrc)
-    setCloudSrc(URL.createObjectURL(f))
+    setCloudSrc(URL.createObjectURL(picture))
+    // Not awaited: the user fills in the panel meanwhile. A rejection is
+    // caught at Begin, where there is something useful to say about it.
+    const pending = uploadPicture(picture)
+    pending.catch(() => undefined)
+    upload.current = pending
     // Crisp picture first, then scattering into the dreamy cloud.
     setDissolve(0)
     if (dissolveTimer.current) clearInterval(dissolveTimer.current)
@@ -135,12 +165,27 @@ export default function HomePage() {
     setError(null)
     if (dissolveTimer.current) clearInterval(dissolveTimer.current)
     setDissolve(1)
+    // Still inside the click: the only place a mobile browser lets audio
+    // start. The music then runs through the waiting screen into the player.
+    void mixer.startAmbient(bgmUrl(DEFAULT_BGM_TRACK))
     try {
-      const { job_id } = await startGeneration(mood, duration)
+      let pictureId: string | undefined
+      if (upload.current) {
+        try {
+          pictureId = await upload.current
+        } catch (e) {
+          if (e instanceof NotSignedInError) throw e
+          mixer.stopAmbient()
+          setError("Your picture didn't finish uploading. Please choose it again.")
+          return
+        }
+      }
+      const { job_id } = await startGeneration(mood, duration, pictureId)
       navigate(`/generating/${job_id}`, {
         state: { duration, feeling, destination, pic: cloudSrc !== '' },
       })
     } catch (e) {
+      mixer.stopAmbient()
       if (e instanceof NotSignedInError) {
         navigate('/signup', { state: { resume: true } })
       } else if (e instanceof ApiError && e.status === 402) {
@@ -201,6 +246,12 @@ export default function HomePage() {
           <button
             onClick={() => {
               setFocus('idle')
+              // Taking the words path drops any picture chosen earlier: the
+              // upload id must not ride along into a words-only session.
+              if (cloudSrc) URL.revokeObjectURL(cloudSrc)
+              setCloudSrc('')
+              upload.current = null
+              setDissolve(1)
               setView('panel')
             }}
             onPointerDown={() => setFocus('lines')}
@@ -228,7 +279,7 @@ export default function HomePage() {
         </div>
       </div>
 
-      {/* Picture chooser — the file never leaves the browser. */}
+      {/* Picture chooser. */}
       <div
         style={{
           position: 'absolute',
@@ -314,7 +365,7 @@ export default function HomePage() {
               color: 'var(--text-soft)',
             }}
           >
-            Your picture is only used to shape this meditation and never leaves your device
+            We'll read the mood of your picture and weave it into this meditation
           </div>
         </div>
       </div>

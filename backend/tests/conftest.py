@@ -114,3 +114,29 @@ def set_available(client: DynamoDBClient, available: int, user_id: str = USER_ID
         UpdateExpression="SET available = :a",
         ExpressionAttributeValues={":a": {"N": str(available)}},
     )
+
+
+BUCKET = "meditation-test-audio"
+
+
+@pytest.fixture
+def s3_bucket(dynamodb_client):
+    """An S3 bucket inside the same moto session the DynamoDB fixture opened."""
+    client = boto3.client("s3", region_name="ap-southeast-2")
+    client.create_bucket(
+        Bucket=BUCKET,
+        CreateBucketConfiguration={"LocationConstraint": "ap-southeast-2"},
+    )
+    return client
+
+
+def bedrock_response(text: str, stop_reason: str = "end_turn") -> dict:
+    """A minimal Converse response, as both Bedrock steps consume it."""
+    return {
+        "output": {"message": {"content": [{"text": text}]}},
+        "stopReason": stop_reason,
+    }
+
+
+def patch_store(monkeypatch, module, store):
+    monkeypatch.setattr(module, "_get_store", lambda: store)
