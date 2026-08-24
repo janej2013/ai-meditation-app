@@ -593,6 +593,16 @@ synthesises — `jobs/*` simply has no key group until the key is wired.
 file is missing**, because a deploy without it silently strips the key group —
 `ALLOW_UNSIGNED=1` overrides when that is genuinely intended.
 
+**CORS on the audio distribution** is a custom response headers policy
+(`AudioCorsHeaders`) with `allow_headers=["*"]` -- deliberately not the managed
+SimpleCORS policy. SimpleCORS only acts on requests CloudFront classifies as
+*simple* CORS, and modern Chromium sends a non-safelisted `Priority` header on
+every fetch, so under SimpleCORS the Web Audio mix worked from curl and failed
+in every real browser. Two rules follow: never reinstate a managed CORS policy
+here, and know that the CloudFront API rejects `Access-Control-Allow-Origin`
+as a *custom* header, so the policy CORS section is the only route. CI smokes
+the deployed edge with a browser-shaped (Priority-carrying) request.
+
 **One CDK trap, documented in `data_stack.py`:** the OAC bucket policy must
 live in the *data* stack and name `distribution/*` rather than the specific
 distribution ARN — pinning it would make Data and Frontend reference each
