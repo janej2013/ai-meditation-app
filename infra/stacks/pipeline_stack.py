@@ -38,6 +38,8 @@ from constructs import Construct
 
 from stacks.paths import ASSETS_DIR, BACKEND_DIR, SHARED_LAYER_DIR
 
+from .data_stack import PICTURE_PREFIX
+
 # Transport-level Lambda failures. Always worth retrying, never a code bug.
 LAMBDA_SERVICE_ERRORS = [
     "Lambda.ServiceException",
@@ -325,7 +327,7 @@ class PipelineStack(Stack):
         describe.add_to_role_policy(
             iam.PolicyStatement(
                 actions=["s3:GetObject"],
-                resources=[audio_bucket.arn_for_objects("pictures/*")],
+                resources=[audio_bucket.arn_for_objects(f"{PICTURE_PREFIX}/*")],
             )
         )
 

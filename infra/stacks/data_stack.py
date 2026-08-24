@@ -21,6 +21,11 @@ from constructs import Construct
 
 AUDIO_RETENTION_DAYS = 90
 
+# The backend twin of this constant is shared/models.PICTURE_PREFIX; infra
+# cannot import the Lambda package, so a rename must be mirrored by hand --
+# the api and pipeline stacks import this one, keeping infra to one copy.
+PICTURE_PREFIX = "pictures"
+
 # Uploaded pictures back the planned replay feature (re-listen without spending
 # a credit), so they outlive the job that used them. Nothing in the pipeline
 # deletes them; this rule is the only reaper. When replay lands, the audio
@@ -97,7 +102,7 @@ class DataStack(Stack):
                 s3.LifecycleRule(
                     id="ExpireUploadedPictures",
                     enabled=True,
-                    prefix="pictures/",
+                    prefix=f"{PICTURE_PREFIX}/",
                     expiration=Duration.days(PICTURE_RETENTION_DAYS),
                     abort_incomplete_multipart_upload_after=Duration.days(1),
                 ),

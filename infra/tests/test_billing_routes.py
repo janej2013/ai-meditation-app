@@ -125,6 +125,21 @@ def test_both_billing_routes_exist(api_template):
     assert "POST /billing/webhook" in keys
 
 
+def test_every_fastapi_route_is_registered_on_the_gateway(api_template):
+    """The FastAPI app only serves what API Gateway routes to it; a router
+    mounted in main.py without an add_routes() here is a deployed 404 that no
+    backend test can see (they drive the app directly). Pin the full surface."""
+    assert set(routes(api_template)) == {
+        "GET /health",
+        "GET /account",
+        "POST /generate",
+        "POST /pictures/upload",
+        "GET /jobs/{job_id}",
+        "POST /billing/checkout",
+        "POST /billing/webhook",
+    }
+
+
 def test_the_webhook_route_is_anonymous(api_template):
     """Stripe cannot present a Cognito token; the signature is the auth.
 

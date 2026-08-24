@@ -16,6 +16,8 @@ from constructs import Construct
 
 from stacks.paths import BACKEND_DIR
 
+from .data_stack import PICTURE_PREFIX
+
 # Created by hand: the CloudFront URL-signing private key, whose public half
 # is registered on the audio distribution. Either a bare PEM or
 # {"private_key": "-----BEGIN..."} -- the signer accepts both.
@@ -117,7 +119,7 @@ class ApiStack(Stack):
         self.api_function.add_to_role_policy(
             iam.PolicyStatement(
                 actions=["s3:PutObject"],
-                resources=[audio_bucket.arn_for_objects("pictures/*")],
+                resources=[audio_bucket.arn_for_objects(f"{PICTURE_PREFIX}/*")],
             )
         )
 
@@ -178,6 +180,11 @@ class ApiStack(Stack):
         )
         self.http_api.add_routes(
             path="/generate",
+            methods=[apigwv2.HttpMethod.POST],
+            integration=integration,
+        )
+        self.http_api.add_routes(
+            path="/pictures/upload",
             methods=[apigwv2.HttpMethod.POST],
             integration=integration,
         )
