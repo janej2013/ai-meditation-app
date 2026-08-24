@@ -176,29 +176,29 @@ class FrontendStack(Stack):
             "adding it here would create a cross-stack cycle.",
         )
 
-        # A static ``Access-Control-Allow-Origin: *`` on every audio response,
-        # instead of the managed SimpleCORS policy. SimpleCORS only acts on
-        # requests CloudFront classifies as *simple* CORS -- and modern
-        # Chromium sends ``Priority: u=1, i`` on every fetch, which is not a
-        # CORS-safelisted header, so CloudFront declines to add the header and
-        # Web Audio's cross-origin decode fails in exactly the browsers users
-        # actually run (curl, which sends no Priority header, still saw the
-        # header -- which is what made this fun to find). A static header
-        # sidesteps the classification entirely. ``*`` is right for both
-        # behaviours: access control on jobs/* is the signed URL, not CORS,
-        # and assets/* is deliberately public.
+        # Replaces the managed SimpleCORS policy, which was the playback bug:
+        # SimpleCORS only acts on requests CloudFront classifies as *simple*
+        # CORS, and modern Chromium sends ``Priority: u=1, i`` on every fetch.
+        # That header is not CORS-safelisted, so CloudFront withheld
+        # Access-Control-Allow-Origin from exactly the browsers users run,
+        # while curl -- which sends no Priority header -- kept seeing it.
+        # ``allow_headers=["*"]`` is the load-bearing difference: no request
+        # header can disqualify a request from getting the CORS response
+        # headers. (A static custom header would sidestep classification
+        # entirely, but the CloudFront API rejects ACAO as a custom header,
+        # so the CORS section is the only route.) ``*`` origins is right for
+        # both behaviours: access control on jobs/* is the signed URL, not
+        # CORS, and assets/* is deliberately public.
         cors_headers = cloudfront.ResponseHeadersPolicy(
             self,
             "AudioCorsHeaders",
-            comment=f"meditation-{env_name} audio: static CORS allow-all",
-            custom_headers_behavior=cloudfront.ResponseCustomHeadersBehavior(
-                custom_headers=[
-                    cloudfront.ResponseCustomHeader(
-                        header="Access-Control-Allow-Origin",
-                        value="*",
-                        override=True,
-                    )
-                ]
+            comment=f"meditation-{env_name} audio CORS allow-all",
+            cors_behavior=cloudfront.ResponseHeadersCorsBehavior(
+                access_control_allow_credentials=False,
+                access_control_allow_headers=["*"],
+                access_control_allow_methods=["GET", "HEAD", "OPTIONS"],
+                access_control_allow_origins=["*"],
+                origin_override=True,
             ),
         )
 
