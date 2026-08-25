@@ -55,6 +55,11 @@ def build() -> tuple[ApiStack, BillingStack]:
         "Machine",
         definition_body=sfn.DefinitionBody.from_chainable(sfn.Pass(upstream, "P")),
     )
+    picture_machine = sfn.StateMachine(
+        upstream,
+        "PictureMachine",
+        definition_body=sfn.DefinitionBody.from_chainable(sfn.Pass(upstream, "PP")),
+    )
     auth = AuthStack(app, "Auth", env_name="dev", table=table, env=env)
 
     api = ApiStack(
@@ -67,6 +72,7 @@ def build() -> tuple[ApiStack, BillingStack]:
         allowed_origins=["http://localhost:5173"],
         audio_bucket=bucket,
         state_machine=machine,
+        picture_state_machine=picture_machine,
         # Milestone 6 wiring; fixed values keep this test independent of a
         # FrontendStack instance.
         audio_domain_name="d111111abcdef8.cloudfront.net",
@@ -174,6 +180,8 @@ def test_every_fastapi_route_is_registered_on_the_gateway(api_template):
         "GET /account",
         "POST /generate",
         "POST /pictures/upload",
+        "POST /pictures/{picture_id}/describe",
+        "GET /pictures/{picture_id}",
         "GET /jobs/{job_id}",
         "GET /dreamscapes",
         "DELETE /dreamscapes/{job_id}",

@@ -2,11 +2,13 @@
 
 Chain:
 
-    FreezeCredit -> [DescribePicture] -> GenerateScript -> Synthesize -> CommitCredit
+    FreezeCredit -> GenerateScript -> Synthesize -> CommitCredit
 
-DescribePicture runs only when the execution input says ``has_picture``: a
-Choice state routes around it otherwise. The picture's key and the description
-never enter the state -- both live on the JOB item (constraint 7).
+A second, one-task machine (DescribePicture) runs *before* a job exists, so
+the keywords screen can show what the picture holds before the user commits a
+credit. Its reading lives on the PICTURE item and is copied onto the JOB by
+POST /generate; neither the key nor the description ever enters an execution
+payload (constraint 7).
 
 Every state after the freeze succeeds catches to RollbackCredit, which refunds
 the credit and then fails the execution. FreezeCredit is the exception: an
@@ -65,8 +67,9 @@ INSUFFICIENT_CREDITS = "InsufficientCreditsError"
 # frozen forever. `frozen >= 1` is also what POST /generate rejects new jobs on,
 # so a single stranded job locks the user out permanently with no way back.
 # A normal run finishes in about a minute, so the headroom costs nothing.
-# test_state_machine sums the real worst case from the synthesized ASL; adding
-# DescribePicture (4 x 60s + backoff) is what pushed this past 30 minutes.
+# test_state_machine sums the real worst case from the synthesized ASL. The
+# picture step moved to its own machine; the 35-minute figure it once forced
+# stays, because the PWA's VITE_JOB_TIMEOUT_MS fallback is pinned to it.
 EXECUTION_TIMEOUT = Duration.minutes(35)
 DEFAULT_TASK_TIMEOUT = Duration.seconds(30)
 
@@ -208,11 +211,20 @@ class PipelineStack(Stack):
         self.state_machine = self._build_state_machine(
             env_name=env_name,
             freeze=freeze,
-            describe=describe,
             generate=generate,
             synthesize=synthesize,
             commit=commit,
             rollback=rollback,
+        )
+        self.picture_state_machine = self._build_picture_state_machine(
+            env_name=env_name, describe=describe
+        )
+
+        CfnOutput(
+            self,
+            "PictureStateMachineArn",
+            value=self.picture_state_machine.state_machine_arn,
+            description="Describes an uploaded picture before any job exists.",
         )
 
         CfnOutput(
@@ -302,8 +314,8 @@ class PipelineStack(Stack):
         for fn in (freeze, commit, rollback):
             table.grant(fn, *ledger_actions)
         table.grant(generate, "dynamodb:GetItem", "dynamodb:UpdateItem")
-        # describe_picture reads the picture key off the JOB item and writes
-        # the description back to it.
+        # describe_picture checks the PICTURE item exists (the upload was
+        # authorised) and writes the description to it.
         table.grant(describe, "dynamodb:GetItem", "dynamodb:UpdateItem")
         # synthesize records audio_key on the JOB item now that it produces the
         # deliverable; the browser mixes the BGM, so no later step touches it.
@@ -399,7 +411,6 @@ class PipelineStack(Stack):
         *,
         env_name: str,
         freeze: lambda_.Function,
-        describe: lambda_.Function,
         generate: lambda_.Function,
         synthesize: lambda_.Function,
         commit: lambda_.Function,
@@ -444,17 +455,6 @@ class PipelineStack(Stack):
         freeze_task.add_catch(insufficient, errors=[INSUFFICIENT_CREDITS])
         freeze_task.add_catch(rollback_task, errors=["States.ALL"], result_path="$.error")
 
-        describe_task = self._task(
-            "DescribePictureTask", describe, "Describe the picture", Duration.seconds(60)
-        )
-        describe_task.add_retry(
-            errors=[BEDROCK_TRANSIENT, *LAMBDA_SERVICE_ERRORS],
-            interval=Duration.seconds(2),
-            max_attempts=3,
-            backoff_rate=2.0,
-        )
-        describe_task.add_catch(rollback_task, errors=["States.ALL"], result_path="$.error")
-
         generate_task = self._task(
             "GenerateScriptTask", generate, "Generate the script", Duration.seconds(120)
         )
@@ -491,24 +491,12 @@ class PipelineStack(Stack):
         # mark done.
         commit_task.add_catch(rollback_task, errors=["States.ALL"], result_path="$.error")
 
-        # A Choice cannot Catch, and a comparison against a path that does not
-        # exist is a States.Runtime error that terminates the execution with
-        # the credit still frozen -- so the presence check comes first. A
-        # missing or false flag takes the default branch straight to the
-        # script, which is every execution started before this step existed.
-        has_picture = (
-            sfn.Choice(self, "HasPicture")
-            .when(
-                sfn.Condition.and_(
-                    sfn.Condition.is_present("$.has_picture"),
-                    sfn.Condition.boolean_equals("$.has_picture", True),
-                ),
-                describe_task.next(generate_task),
-            )
-            .otherwise(generate_task)
+        # The picture, when there is one, was described before this execution
+        # started (the picture state machine); generate_script reads the
+        # result off the JOB item like it reads the mood.
+        definition = freeze_task.next(
+            generate_task.next(synthesize_task.next(commit_task.next(succeeded)))
         )
-        generate_task.next(synthesize_task.next(commit_task.next(succeeded)))
-        definition = freeze_task.next(has_picture)
 
         return sfn.StateMachine(
             self,
@@ -519,6 +507,46 @@ class PipelineStack(Stack):
             timeout=EXECUTION_TIMEOUT,
             tracing_enabled=True,
             removal_policy=RemovalPolicy.RETAIN if env_name == "prod" else RemovalPolicy.DESTROY,
+        )
+
+    def _build_picture_state_machine(
+        self, *, env_name: str, describe: lambda_.Function
+    ) -> sfn.StateMachine:
+        """One task: describe an upload so the keywords screen can show it.
+
+        Runs before any job or credit exists (the API starts it from
+        POST /pictures/{id}/describe), so there is nothing to refund on
+        failure -- the Lambda marks the PICTURE item FAILED itself and the
+        execution ends in a Fail state for visibility. Bedrock throttling gets
+        the same Retry as the script step; the item stays PENDING meanwhile.
+        """
+        describe_task = self._task(
+            "DescribePictureTask", describe, "Describe the picture", Duration.seconds(60)
+        )
+        describe_task.add_retry(
+            errors=[BEDROCK_TRANSIENT, *LAMBDA_SERVICE_ERRORS],
+            interval=Duration.seconds(2),
+            max_attempts=3,
+            backoff_rate=2.0,
+        )
+        failed = sfn.Fail(
+            self,
+            "PictureDescriptionFailed",
+            error="PictureDescriptionFailed",
+            cause="The picture could not be described; nothing was charged.",
+        )
+        describe_task.add_catch(failed, errors=["States.ALL"], result_path="$.error")
+        definition = describe_task.next(sfn.Succeed(self, "PictureDescribed"))
+
+        return sfn.StateMachine(
+            self,
+            "PictureStateMachine",
+            state_machine_name=f"meditation-{env_name}-picture",
+            state_machine_type=sfn.StateMachineType.STANDARD,
+            definition_body=sfn.DefinitionBody.from_chainable(definition),
+            # 4 x 60 s plus backoff is the worst case; generous headroom.
+            timeout=Duration.minutes(10),
+            tracing_enabled=True,
         )
 
     def _task(
