@@ -545,6 +545,8 @@ class PipelineStack(Stack):
             state_machine_type=sfn.StateMachineType.STANDARD,
             definition_body=sfn.DefinitionBody.from_chainable(definition),
             # 4 x 60 s plus backoff is the worst case; generous headroom.
+            # Twin of shared/models.PICTURE_DESCRIBE_TIMEOUT_SECONDS: an
+            # attempt older than this is dead, and the API may start another.
             timeout=Duration.minutes(10),
             tracing_enabled=True,
         )

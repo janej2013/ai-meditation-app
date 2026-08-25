@@ -19,7 +19,7 @@ from fastapi import APIRouter, HTTPException, status
 from pydantic import BaseModel, Field, model_validator
 
 from api import cloudfront_signer
-from api.deps import CurrentUserDep, StoreDep
+from api.deps import CurrentUserDep, StoreDep, require_credit
 from shared.models import JobStatus, PictureDescription, PictureStatus, picture_key
 from shared.pipeline import MAX_DURATION_MINUTES, MIN_DURATION_MINUTES
 
@@ -77,13 +77,7 @@ class JobResponse(BaseModel):
     status_code=status.HTTP_202_ACCEPTED,
 )
 def generate(payload: GenerateRequest, user: CurrentUserDep, store: StoreDep) -> GenerateResponse:
-    entitlement = store.get_entitlement(user.sub)
-    if entitlement is None or entitlement.available < 1:
-        raise HTTPException(
-            status_code=status.HTTP_402_PAYMENT_REQUIRED,
-            detail="No generations remaining. Add credits to continue.",
-        )
-
+    entitlement = require_credit(store, user.sub)
     _reject_if_job_in_flight(entitlement.frozen)
 
     key: str | None = None
@@ -92,15 +86,20 @@ def generate(payload: GenerateRequest, user: CurrentUserDep, store: StoreDep) ->
         picture = store.get_picture(user.sub, str(payload.picture_id))
         if picture is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Picture not found.")
-        if picture.status is not PictureStatus.DESCRIBED or not picture.keywords:
+        if (
+            picture.status is not PictureStatus.DESCRIBED
+            or not picture.keywords
+            or not picture.summary
+        ):
             # The keywords screen waits for DESCRIBED before offering Begin;
-            # reaching here otherwise is a client racing itself.
+            # reaching here otherwise is a client racing itself. A reading is
+            # keywords *and* summary -- never half of one.
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
                 detail="The picture has not been read yet.",
             )
         key = picture_key(user.sub, str(payload.picture_id))
-        description = PictureDescription(keywords=picture.keywords, summary=picture.summary or "")
+        description = PictureDescription(keywords=picture.keywords, summary=picture.summary)
 
     job_id = str(uuid.uuid4())
     if not store.create_job(

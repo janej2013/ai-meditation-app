@@ -51,19 +51,25 @@ def build_pipeline_stack(model_id: str = AU_PROFILE) -> Any:
     )
 
 
-def state_machine_definition(stack: Any) -> dict[str, Any]:
-    """The synthesized Amazon States Language document.
+def state_machine_definition(stack: Any, name_contains: str = "generation") -> dict[str, Any]:
+    """The synthesized Amazon States Language document of one state machine.
 
-    DefinitionString is an Fn::Join over literal chunks and CloudFormation
-    tokens (Lambda ARNs). The tokens sit inside JSON string values, so
-    substituting a placeholder leaves a parseable document -- which is what
-    lets these tests assert on the real ASL rather than on CDK's object model.
+    The pipeline stack holds two (generation, picture), so the machine is
+    chosen by its name rather than by resource order. DefinitionString is an
+    Fn::Join over literal chunks and CloudFormation tokens (Lambda ARNs). The
+    tokens sit inside JSON string values, so substituting a placeholder
+    leaves a parseable document -- which is what lets these tests assert on
+    the real ASL rather than on CDK's object model.
     """
     from aws_cdk import assertions
 
     template = assertions.Template.from_stack(stack)
     resources = template.find_resources("AWS::StepFunctions::StateMachine")
-    properties = next(iter(resources.values()))["Properties"]
+    [properties] = [
+        r["Properties"]
+        for r in resources.values()
+        if name_contains in str(r["Properties"].get("StateMachineName", ""))
+    ]
 
     raw = properties["DefinitionString"]
     parts = raw["Fn::Join"][1] if isinstance(raw, dict) else [raw]
@@ -103,3 +109,9 @@ def definition(pipeline_stack) -> Any:
 @pytest.fixture(scope="module")
 def states(definition) -> Any:
     return definition["States"]
+
+
+@pytest.fixture(scope="module")
+def picture_states(pipeline_stack) -> Any:
+    """The picture machine's states; synthesized once per module."""
+    return state_machine_definition(pipeline_stack, name_contains="picture")["States"]

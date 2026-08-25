@@ -49,6 +49,11 @@ def picture_sk(picture_id: str) -> str:
 # PICTURE items outlive nothing useful past the object itself.
 PICTURE_ITEM_TTL_DAYS = 365
 
+# How long a description attempt may be considered in flight. Mirrors the
+# picture state machine's execution timeout (infra/stacks/pipeline_stack.py):
+# an attempt older than this can only be dead, so a new one may start.
+PICTURE_DESCRIBE_TIMEOUT_SECONDS = 600
+
 
 # The upload contract, shared by its two enforcement points: the presigned
 # POST policy (api/routers/pictures) and the vision step's re-check
@@ -101,9 +106,10 @@ class JobStatus(StrEnum):
 class PictureStatus(StrEnum):
     """The vision step's progress on an upload: the keywords screen polls it."""
 
-    PENDING = "PENDING"
+    PENDING = "PENDING"  # authorised, not yet read
+    DESCRIBING = "DESCRIBING"  # an execution owns it (see describe_started_at)
     DESCRIBED = "DESCRIBED"
-    FAILED = "FAILED"
+    FAILED = "FAILED"  # a permanent failure; a new attempt may be started
 
 
 class Picture(BaseModel):
@@ -121,6 +127,7 @@ class Picture(BaseModel):
     keywords: list[str] | None = None
     summary: str | None = None
     created_at: datetime | None = None
+    describe_started_at: datetime | None = None
 
 
 class Entitlement(BaseModel):

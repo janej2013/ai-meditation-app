@@ -58,26 +58,10 @@ def test_the_generation_chain_no_longer_branches_on_a_picture(states) -> None:
     assert "DescribePictureTask" not in states
 
 
-def picture_machine_states(pipeline_stack) -> dict:
-    template = assertions.Template.from_stack(pipeline_stack)
-    machines = template.find_resources("AWS::StepFunctions::StateMachine")
-    [picture] = [
-        m for m in machines.values() if "picture" in str(m["Properties"].get("StateMachineName"))
-    ]
-    # The definition is an Fn::Join over literal chunks and Lambda ARN tokens.
-    chunks = picture["Properties"]["DefinitionString"]["Fn::Join"][1]
-    # Tokens sit inside JSON string values, so a bare placeholder keeps the
-    # document parseable (same trick as conftest.state_machine_definition).
-    text = "".join(c if isinstance(c, str) else "arn" for c in chunks)
-    import json
-
-    return json.loads(text)["States"]
-
-
 def test_the_picture_machine_describes_then_succeeds_or_fails_without_a_refund(
-    pipeline_stack,
+    picture_states,
 ) -> None:
-    states = picture_machine_states(pipeline_stack)
+    states = picture_states
     task = states["DescribePictureTask"]
     assert task["Next"] == "PictureDescribed"
     assert states["PictureDescribed"]["Type"] == "Succeed"
@@ -87,8 +71,8 @@ def test_the_picture_machine_describes_then_succeeds_or_fails_without_a_refund(
     assert "RollbackCreditTask" not in states  # nothing was frozen
 
 
-def test_describe_picture_retries_transient_bedrock_errors(pipeline_stack) -> None:
-    [retry] = picture_machine_states(pipeline_stack)["DescribePictureTask"]["Retry"]
+def test_describe_picture_retries_transient_bedrock_errors(picture_states) -> None:
+    [retry] = picture_states["DescribePictureTask"]["Retry"]
     assert "BedrockTransientError" in retry["ErrorEquals"]
     assert retry["MaxAttempts"] == 3
 

@@ -20,6 +20,7 @@ import json
 import logging
 import os
 import uuid
+from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
 
@@ -29,7 +30,7 @@ from botocore.exceptions import ClientError
 from fastapi import APIRouter, HTTPException, status
 from pydantic import BaseModel
 
-from api.deps import CurrentUserDep, StoreDep
+from api.deps import CurrentUserDep, StoreDep, require_credit
 from shared.models import MAX_PICTURE_BYTES, PICTURE_CONTENT_TYPE, PictureStatus, picture_key
 
 logger = logging.getLogger(__name__)
@@ -75,18 +76,9 @@ class PictureResponse(BaseModel):
     keywords: list[str] | None = None
 
 
-def _require_credit(store: StoreDep, user_id: str) -> None:
-    entitlement = store.get_entitlement(user_id)
-    if entitlement is None or entitlement.available < 1:
-        raise HTTPException(
-            status_code=status.HTTP_402_PAYMENT_REQUIRED,
-            detail="No generations remaining. Add credits to continue.",
-        )
-
-
 @router.post("/pictures/upload", response_model=UploadPictureResponse)
 def create_upload(user: CurrentUserDep, store: StoreDep) -> UploadPictureResponse:
-    _require_credit(store, user.sub)
+    require_credit(store, user.sub)
     picture_id = str(uuid.uuid4())
     key = picture_key(user.sub, picture_id)
 
@@ -122,32 +114,43 @@ def create_upload(user: CurrentUserDep, store: StoreDep) -> UploadPictureRespons
     status_code=status.HTTP_202_ACCEPTED,
 )
 def describe(picture_id: UUID, user: CurrentUserDep, store: StoreDep) -> PictureResponse:
-    """Start the vision step for an upload that has landed. Idempotent: a
-    picture already described (or still being described) is returned as is,
-    and the execution is named after the picture so a double call cannot
-    start a second one."""
-    _require_credit(store, user.sub)
+    """Start (or restart) the vision step for an upload that has landed.
+
+    The PICTURE item owns idempotency, not the execution name: a conditional
+    PENDING/FAILED -> DESCRIBING claim (or a DESCRIBING whose attempt is
+    older than the machine's timeout, i.e. dead) decides whether this call
+    starts an execution. A double tap loses the claim and just reads back
+    the status; a picture described already is returned as is; an attempt
+    that died without marking the item is retried rather than stranded.
+    """
+    require_credit(store, user.sub)
     picture = store.get_picture(user.sub, str(picture_id))
     if picture is None:
         # Another user's, or never authorised: absent either way.
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found.")
 
-    if picture.status is PictureStatus.PENDING:
-        try:
-            _get_sfn().start_execution(
-                stateMachineArn=os.environ["PICTURE_STATE_MACHINE_ARN"],
-                name=str(picture_id),
-                input=json.dumps({"user_id": user.sub, "picture_id": str(picture_id)}),
-            )
-        except ClientError as exc:
-            # Same name already running: the earlier call won; nothing to do.
-            if exc.response.get("Error", {}).get("Code") != "ExecutionAlreadyExists":
+    if picture.status is not PictureStatus.DESCRIBED:
+        now = datetime.now(UTC)
+        if store.mark_picture_describing(user.sub, str(picture_id), now=now):
+            try:
+                _get_sfn().start_execution(
+                    stateMachineArn=os.environ["PICTURE_STATE_MACHINE_ARN"],
+                    # Unique per attempt; the item, not the name, dedupes.
+                    name=f"{picture_id}-{int(now.timestamp())}",
+                    input=json.dumps({"user_id": user.sub, "picture_id": str(picture_id)}),
+                )
+            except ClientError:
+                # Nothing is running for the claim we just took: release it
+                # so the next call can try again instead of waiting out the
+                # stale window.
+                store.mark_picture_failed(user.sub, str(picture_id))
                 logger.exception("failed to start picture description picture_id=%s", picture_id)
                 raise HTTPException(
                     status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                     detail="Could not read the picture. Please retry.",
                 ) from None
-        logger.info("picture description started picture_id=%s", picture_id)
+            logger.info("picture description started picture_id=%s", picture_id)
+        picture = store.get_picture(user.sub, str(picture_id)) or picture
 
     return PictureResponse(
         picture_id=picture.picture_id, status=picture.status, keywords=picture.keywords

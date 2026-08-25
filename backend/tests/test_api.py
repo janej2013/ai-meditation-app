@@ -285,6 +285,32 @@ def test_generate_refuses_a_picture_that_is_not_described_yet(
     sfn_client.start_execution.assert_not_called()
 
 
+def test_generate_refuses_a_reading_without_a_summary(client, dynamodb_client, store, sfn_client):
+    """A reading is keywords and summary; half of one is not DESCRIBED, and
+    must be a 409 rather than a validation crash."""
+    from shared.models import picture_sk, user_pk
+
+    from .conftest import TABLE_NAME
+
+    seed_entitlement(dynamodb_client, available=1)
+    assert store.create_picture(USER_ID, PICTURE_ID)
+    dynamodb_client.update_item(
+        TableName=TABLE_NAME,
+        Key={"PK": {"S": user_pk(USER_ID)}, "SK": {"S": picture_sk(PICTURE_ID)}},
+        UpdateExpression="SET #s = :d, keywords = :k",
+        ExpressionAttributeNames={"#s": "status"},
+        ExpressionAttributeValues={
+            ":d": {"S": "DESCRIBED"},
+            ":k": {"L": [{"S": "a"}, {"S": "b"}, {"S": "c"}]},
+        },
+    )
+
+    response = client.post("/generate", json={"picture_id": PICTURE_ID, "duration_minutes": 10})
+
+    assert response.status_code == 409
+    sfn_client.start_execution.assert_not_called()
+
+
 def test_generate_404s_a_picture_it_never_authorised(client, dynamodb_client, sfn_client):
     seed_entitlement(dynamodb_client, available=1)
     response = client.post("/generate", json={"picture_id": PICTURE_ID, "duration_minutes": 10})
@@ -382,7 +408,7 @@ def picture_sfn(monkeypatch):
     return fake
 
 
-def test_describe_starts_the_picture_machine_with_ids_only(
+def test_describe_claims_the_attempt_and_starts_the_machine_with_ids_only(
     client, dynamodb_client, store, picture_sfn
 ):
     seed_entitlement(dynamodb_client, available=1)
@@ -391,10 +417,63 @@ def test_describe_starts_the_picture_machine_with_ids_only(
     response = client.post(f"/pictures/{PICTURE_ID}/describe")
 
     assert response.status_code == 202
-    assert response.json() == {"picture_id": PICTURE_ID, "status": "PENDING", "keywords": None}
+    assert response.json() == {"picture_id": PICTURE_ID, "status": "DESCRIBING", "keywords": None}
     call = picture_sfn.start_execution.call_args.kwargs
-    assert call["name"] == PICTURE_ID  # one execution per picture, ever
+    assert call["name"].startswith(f"{PICTURE_ID}-")  # unique per attempt
     assert json.loads(call["input"]) == {"user_id": USER_ID, "picture_id": PICTURE_ID}
+
+
+def test_a_second_tap_while_describing_starts_nothing(client, dynamodb_client, store, picture_sfn):
+    """The item owns idempotency: a fresh DESCRIBING attempt is not restarted."""
+    seed_entitlement(dynamodb_client, available=1)
+    assert store.create_picture(USER_ID, PICTURE_ID)
+    client.post(f"/pictures/{PICTURE_ID}/describe")
+
+    response = client.post(f"/pictures/{PICTURE_ID}/describe")
+
+    assert response.status_code == 202
+    assert response.json()["status"] == "DESCRIBING"
+    assert picture_sfn.start_execution.call_count == 1
+
+
+def test_a_dead_attempt_is_retried_once_stale(client, dynamodb_client, store, picture_sfn):
+    """An attempt that died without marking the item (task timeout, a crash
+    the handler never saw) must not strand the picture forever."""
+    from datetime import UTC, datetime, timedelta
+
+    seed_entitlement(dynamodb_client, available=1)
+    assert store.create_picture(USER_ID, PICTURE_ID)
+    long_ago = datetime.now(UTC) - timedelta(seconds=601)
+    assert store.mark_picture_describing(USER_ID, PICTURE_ID, now=long_ago)
+
+    response = client.post(f"/pictures/{PICTURE_ID}/describe")
+
+    assert response.json()["status"] == "DESCRIBING"
+    assert picture_sfn.start_execution.call_count == 1
+
+
+def test_a_failed_picture_may_be_described_again(client, dynamodb_client, store, picture_sfn):
+    """A premature describe (upload not landed) or an off-contract answer is
+    a failed attempt, not a dead picture."""
+    seed_entitlement(dynamodb_client, available=1)
+    assert store.create_picture(USER_ID, PICTURE_ID)
+    store.mark_picture_failed(USER_ID, PICTURE_ID)
+
+    response = client.post(f"/pictures/{PICTURE_ID}/describe")
+
+    assert response.json()["status"] == "DESCRIBING"
+    picture_sfn.start_execution.assert_called_once()
+
+
+def test_a_start_failure_releases_the_claim(client, dynamodb_client, store, picture_sfn):
+    seed_entitlement(dynamodb_client, available=1)
+    assert store.create_picture(USER_ID, PICTURE_ID)
+    picture_sfn.start_execution.side_effect = ClientError(
+        {"Error": {"Code": "StateMachineDoesNotExist"}}, "StartExecution"
+    )
+
+    assert client.post(f"/pictures/{PICTURE_ID}/describe").status_code == 503
+    assert store.get_picture(USER_ID, PICTURE_ID).status.value == "FAILED"  # claim released
 
 
 def test_describe_is_idempotent_once_described(client, dynamodb_client, store, picture_sfn):
@@ -407,16 +486,6 @@ def test_describe_is_idempotent_once_described(client, dynamodb_client, store, p
     assert response.json()["status"] == "DESCRIBED"
     assert response.json()["keywords"] == DESCRIPTION["keywords"]
     picture_sfn.start_execution.assert_not_called()
-
-
-def test_describe_tolerates_a_race_on_the_same_picture(client, dynamodb_client, store, picture_sfn):
-    seed_entitlement(dynamodb_client, available=1)
-    assert store.create_picture(USER_ID, PICTURE_ID)
-    picture_sfn.start_execution.side_effect = ClientError(
-        {"Error": {"Code": "ExecutionAlreadyExists"}}, "StartExecution"
-    )
-
-    assert client.post(f"/pictures/{PICTURE_ID}/describe").status_code == 202
 
 
 def test_describe_404s_and_402s_like_the_rest(client, dynamodb_client, store, picture_sfn):

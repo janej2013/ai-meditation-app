@@ -75,8 +75,12 @@ def lambda_handler(event: dict[str, Any], context: object) -> dict[str, Any]:  #
         image = _fetch(picture_key(state.user_id, state.picture_id))
         description = _describe(image)
     except BedrockTransientError:
-        raise  # the state machine retries; the item stays PENDING meanwhile
-    except PictureDescriptionError:
+        raise  # the state machine retries; the item stays DESCRIBING meanwhile
+    except Exception:
+        # Anything else is permanent for this attempt -- a contract miss, a
+        # missing object, and also transport errors and surprises that the
+        # machine's Retry will not cover. Mark the item so the keywords screen
+        # stops waiting and a new attempt may be claimed, then fail visibly.
         store.mark_picture_failed(state.user_id, state.picture_id)
         raise
     store.set_picture_description(state.user_id, state.picture_id, description)

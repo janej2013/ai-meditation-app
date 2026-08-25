@@ -176,6 +176,22 @@ def test_an_off_contract_answer_is_permanent_not_downgraded(
     assert picture.status.value == "FAILED"
 
 
+def test_a_transport_error_also_marks_the_attempt_failed(
+    store, dynamodb_client, s3_bucket, env, monkeypatch, state
+):
+    """Not a ClientError, so nothing in the taxonomy names it -- but the
+    attempt is over, and an item left DESCRIBING would strand the picture
+    until the stale window passes."""
+    from botocore.exceptions import EndpointConnectionError
+
+    bedrock = prepare(store, dynamodb_client, s3_bucket, monkeypatch)
+    bedrock.converse.side_effect = EndpointConnectionError(endpoint_url="https://bedrock")
+
+    with pytest.raises(EndpointConnectionError):
+        handler.lambda_handler(state, None)
+    assert store.get_picture(USER_ID, PICTURE_ID).status.value == "FAILED"
+
+
 def test_an_unauthorised_picture_id_is_refused(
     store, dynamodb_client, s3_bucket, env, monkeypatch, state
 ):

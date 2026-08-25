@@ -27,6 +27,7 @@ from shared.models import (
     DEFAULT_PLAN,
     ENTITLEMENT_SK,
     FREE_SIGNUP_CREDITS,
+    PICTURE_DESCRIBE_TIMEOUT_SECONDS,
     PICTURE_ITEM_TTL_DAYS,
     PROFILE_SK,
     BillingOperationResult,
@@ -276,65 +277,69 @@ class EntitlementStore:
             return None
         return Picture.model_validate({**_unmarshal(item), "user_id": user_id})
 
+    def mark_picture_describing(self, user_id: str, picture_id: str, *, now: datetime) -> bool:
+        """Claim the next description attempt. True if this caller owns it.
+
+        The item, not the execution name, is the idempotency anchor: PENDING
+        and FAILED may always be (re)claimed, and DESCRIBING may be reclaimed
+        only once its attempt is older than the machine's timeout -- so an
+        attempt that died without marking the item (a task timeout, a
+        transport error the handler never saw) does not strand the picture,
+        while two quick taps cannot start two executions.
+        """
+        stale = now - timedelta(seconds=PICTURE_DESCRIBE_TIMEOUT_SECONDS)
+        return self._conditional_update(
+            user_id,
+            picture_sk(picture_id),
+            update="SET #status = :describing, describe_started_at = :now",
+            condition=(
+                "attribute_exists(PK) AND ("
+                "#status IN (:pending, :failed) OR "
+                "(#status = :describing AND describe_started_at < :stale))"
+            ),
+            names=dict(_STATUS_NAMES),
+            values={
+                ":describing": PictureStatus.DESCRIBING.value,
+                ":pending": PictureStatus.PENDING.value,
+                ":failed": PictureStatus.FAILED.value,
+                ":now": now.isoformat(),
+                ":stale": stale.isoformat(),
+            },
+        )
+
     def set_picture_description(
         self, user_id: str, picture_id: str, description: PictureDescription
     ) -> None:
         """Record what the vision model saw. Idempotent: a retry rewrites the
         same reading; a picture that has moved on is left alone."""
-        self._update_picture(
+        self._conditional_update(
             user_id,
-            picture_id,
+            picture_sk(picture_id),
             update="SET #status = :described, keywords = :kw, summary = :summary",
-            condition="attribute_exists(PK) AND #status IN (:pending, :described)",
+            condition="attribute_exists(PK) AND #status IN (:pending, :describing, :described)",
+            names=dict(_STATUS_NAMES),
             values={
                 ":described": PictureStatus.DESCRIBED.value,
                 ":pending": PictureStatus.PENDING.value,
+                ":describing": PictureStatus.DESCRIBING.value,
                 ":kw": description.keywords,
                 ":summary": description.summary,
             },
         )
 
     def mark_picture_failed(self, user_id: str, picture_id: str) -> None:
-        """The vision step gave up: the keywords screen stops waiting."""
-        self._update_picture(
+        """The attempt gave up: the keywords screen stops waiting, and a new
+        attempt may be claimed."""
+        self._conditional_update(
             user_id,
-            picture_id,
+            picture_sk(picture_id),
             update="SET #status = :failed",
-            condition="attribute_exists(PK) AND #status = :pending",
+            condition="attribute_exists(PK) AND #status IN (:pending, :describing)",
+            names=dict(_STATUS_NAMES),
             values={
                 ":failed": PictureStatus.FAILED.value,
                 ":pending": PictureStatus.PENDING.value,
-            },
-        )
-
-    def _update_picture(
-        self, user_id: str, picture_id: str, *, update: str, condition: str, values: dict[str, Any]
-    ) -> None:
-        try:
-            self.client.update_item(
-                TableName=self.table_name,
-                Key=_marshal({"PK": user_pk(user_id), "SK": picture_sk(picture_id)}),
-                UpdateExpression=update,
-                ConditionExpression=condition,
-                ExpressionAttributeNames=dict(_STATUS_NAMES),
-                ExpressionAttributeValues=_marshal(values),
-            )
-        except self.client.exceptions.ConditionalCheckFailedException:
-            logger.info("picture update skipped (replay or missing) picture_id=%s", picture_id)
-
-    def set_job_picture_description(
-        self, user_id: str, job_id: str, description: PictureDescription
-    ) -> None:
-        """Record what the vision model saw, for generate_script to read."""
-        self._update_job(
-            user_id,
-            job_id,
-            update="SET picture_keywords = :kw, picture_summary = :summary, updated_at = :now",
-            condition="attribute_exists(PK)",
-            values={
-                ":kw": description.keywords,
-                ":summary": description.summary,
-                ":now": _now_iso(),
+                ":describing": PictureStatus.DESCRIBING.value,
             },
         )
 
@@ -449,7 +454,22 @@ class EntitlementStore:
         values: dict[str, Any],
         names: dict[str, str] | None = None,
     ) -> bool:
-        """Conditional update on a JOB item; a failed condition is a no-op.
+        return self._conditional_update(
+            user_id, job_sk(job_id), update=update, condition=condition, values=values, names=names
+        )
+
+    def _conditional_update(
+        self,
+        user_id: str,
+        sk: str,
+        *,
+        update: str,
+        condition: str,
+        values: dict[str, Any],
+        names: dict[str, str] | None = None,
+    ) -> bool:
+        """Conditional update on one item in the user's partition; a failed
+        condition is a no-op. Serves JOB and PICTURE items alike.
 
         Returns True when the update was applied, False when the condition
         rejected it -- callers that need to know (the delete route's 404)
@@ -472,7 +492,7 @@ class EntitlementStore:
         """
         kwargs: dict[str, Any] = {
             "TableName": self.table_name,
-            "Key": _marshal({"PK": user_pk(user_id), "SK": job_sk(job_id)}),
+            "Key": _marshal({"PK": user_pk(user_id), "SK": sk}),
             "UpdateExpression": update,
             "ConditionExpression": condition,
             "ExpressionAttributeValues": _marshal(values),
@@ -483,14 +503,20 @@ class EntitlementStore:
         try:
             self.client.update_item(**kwargs)
         except self.client.exceptions.ConditionalCheckFailedException as exc:
+            # "job" or "picture": the sort key's prefix names the item kind and
+            # its id -- never user content (constraint 7).
+            kind, _, item_id = sk.partition("#")
+            kind = kind.lower()
             item = (getattr(exc, "response", None) or {}).get("Item")
             if not item:
-                logger.warning("job update skipped: no job item job_id=%s", job_id)
+                logger.warning("%s update skipped: no %s item %s_id=%s", kind, kind, kind, item_id)
                 return False
             # Read the one attribute directly rather than unmarshalling the
-            # whole item, which holds mood_text (constraint 7).
+            # whole item, which may hold mood_text.
             status = item.get("status", {}).get("S", "UNKNOWN")
-            logger.info("job update skipped (replay) job_id=%s status=%s", job_id, status)
+            logger.info(
+                "%s update skipped (replay) %s_id=%s status=%s", kind, kind, item_id, status
+            )
             return False
         return True
 
