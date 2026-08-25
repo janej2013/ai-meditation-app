@@ -7,6 +7,7 @@ are exercised here through the HTTP surface, against real moto items.
 
 from __future__ import annotations
 
+import base64
 from unittest.mock import MagicMock
 
 import pytest
@@ -80,6 +81,7 @@ def test_list_is_newest_first_and_paginates_with_a_cursor(client, dynamodb_clien
     page = first.json()
     assert [item["job_id"] for item in page["items"]] == [f"job-{i:02d}" for i in range(24, 4, -1)]
     assert page["next_cursor"]
+    assert page["total"] == 25  # the whole collection, not the page
 
     second = client.get("/dreamscapes", params={"cursor": page["next_cursor"]})
     rest = second.json()
@@ -127,8 +129,18 @@ def test_items_carry_keywords_or_a_mood_excerpt_and_no_audio_url(client, dynamod
     assert "audio_url" not in pic and "audio_url" not in txt
 
 
-def test_a_garbage_cursor_is_a_400(client, dynamodb_client):
-    assert client.get("/dreamscapes", params={"cursor": "%%%not-base64%%%"}).status_code == 400
+@pytest.mark.parametrize(
+    "cursor",
+    [
+        "%%%not-base64%%%",
+        base64.urlsafe_b64encode(b"2026-01-01T00:00:00|job-x").decode(),  # naive stamp
+        base64.urlsafe_b64encode(b"not-a-date|job-x").decode(),
+    ],
+    ids=["garbage", "naive-timestamp", "bad-date"],
+)
+def test_a_bad_cursor_is_a_400_not_a_500(client, dynamodb_client, cursor):
+    seed_dream(dynamodb_client, "job-a", at(0))  # something to compare against
+    assert client.get("/dreamscapes", params={"cursor": cursor}).status_code == 400
 
 
 # ----------------------------------------------------------------------
@@ -180,6 +192,20 @@ def test_delete_404s_for_missing_foreign_and_in_flight_jobs(client, dynamodb_cli
     assert client.delete("/dreamscapes/job-none").status_code == 404
     assert client.delete("/dreamscapes/job-theirs").status_code == 404
     assert client.delete("/dreamscapes/job-running").status_code == 404
+
+
+def test_a_partial_sweep_is_a_500_not_a_silent_orphan(client, dynamodb_client, monkeypatch):
+    """delete_objects reports per-key failures in Errors without raising;
+    treating that as success would leave an unreaped narration forever."""
+    seed_dream(dynamodb_client, "job-a", at(0))
+    s3 = MagicMock()
+    s3.list_objects_v2.return_value = {"Contents": [{"Key": "jobs/job-a/narration.mp3"}]}
+    s3.delete_objects.return_value = {
+        "Errors": [{"Key": "jobs/job-a/narration.mp3", "Code": "InternalError"}]
+    }
+    monkeypatch.setattr(dreamscapes_router, "_get_s3", lambda: s3)
+
+    assert client.delete("/dreamscapes/job-a").status_code == 500
 
 
 def test_a_failed_sweep_is_a_500_and_the_job_stays_deleted(

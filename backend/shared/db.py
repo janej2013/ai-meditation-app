@@ -312,7 +312,7 @@ class EntitlementStore:
             "TableName": self.table_name,
             "KeyConditionExpression": "PK = :pk AND begins_with(SK, :job)",
             "FilterExpression": "#status = :done",
-            "ExpressionAttributeNames": {"#status": "status"},
+            "ExpressionAttributeNames": dict(_STATUS_NAMES),
             "ExpressionAttributeValues": _marshal(
                 {":pk": user_pk(user_id), ":job": "JOB#", ":done": JobStatus.DONE.value}
             ),
@@ -341,24 +341,18 @@ class EntitlementStore:
         means the item is missing or in flight, which the route treats as 404.
         This is a status update, not a credit mutation (constraint 1 untouched).
         """
-        try:
-            self.client.update_item(
-                TableName=self.table_name,
-                Key=_marshal({"PK": user_pk(user_id), "SK": job_sk(job_id)}),
-                UpdateExpression="SET #status = :deleted, updated_at = :now",
-                ConditionExpression="attribute_exists(PK) AND #status IN (:done, :deleted)",
-                ExpressionAttributeNames={"#status": "status"},
-                ExpressionAttributeValues=_marshal(
-                    {
-                        ":deleted": JobStatus.DELETED.value,
-                        ":done": JobStatus.DONE.value,
-                        ":now": _now_iso(),
-                    }
-                ),
-            )
-        except self.client.exceptions.ConditionalCheckFailedException:
-            return False
-        return True
+        return self._update_job(
+            user_id,
+            job_id,
+            update="SET #status = :deleted, updated_at = :now",
+            condition="attribute_exists(PK) AND #status IN (:done, :deleted)",
+            names=dict(_STATUS_NAMES),
+            values={
+                ":deleted": JobStatus.DELETED.value,
+                ":done": JobStatus.DONE.value,
+                ":now": _now_iso(),
+            },
+        )
 
     def _update_job(
         self,
@@ -369,8 +363,12 @@ class EntitlementStore:
         condition: str,
         values: dict[str, Any],
         names: dict[str, str] | None = None,
-    ) -> None:
+    ) -> bool:
         """Conditional update on a JOB item; a failed condition is a no-op.
+
+        Returns True when the update was applied, False when the condition
+        rejected it -- callers that need to know (the delete route's 404)
+        read that; the pipeline's status writers ignore it.
 
         Every condition here is ``attribute_exists(PK)`` plus, sometimes, a
         status allow-list, and those two halves fail for very different reasons.
@@ -403,11 +401,13 @@ class EntitlementStore:
             item = (getattr(exc, "response", None) or {}).get("Item")
             if not item:
                 logger.warning("job update skipped: no job item job_id=%s", job_id)
-                return
+                return False
             # Read the one attribute directly rather than unmarshalling the
             # whole item, which holds mood_text (constraint 7).
             status = item.get("status", {}).get("S", "UNKNOWN")
             logger.info("job update skipped (replay) job_id=%s status=%s", job_id, status)
+            return False
+        return True
 
     # ------------------------------------------------------------------
     # Credit operations
@@ -517,7 +517,9 @@ class EntitlementStore:
             operation="commit",
             entitlement_update=entitlement_update,
             job_update=job_update,
-            replay_statuses={JobStatus.DONE},
+            # DELETED: the user let the finished dreamscape go before a retried
+            # commit landed -- still a replay, not a state error.
+            replay_statuses={JobStatus.DONE, JobStatus.DELETED},
             on_entitlement_failure=CreditLedgerError(
                 f"no frozen credit to commit for job {job_id}"
             ),
@@ -572,7 +574,12 @@ class EntitlementStore:
             job_update=job_update,
             # A job that never froze is nothing to refund, so treat PENDING and
             # a missing job item as a replay rather than an error.
-            replay_statuses={JobStatus.PENDING, JobStatus.DONE, JobStatus.ROLLED_BACK},
+            replay_statuses={
+                JobStatus.PENDING,
+                JobStatus.DONE,
+                JobStatus.ROLLED_BACK,
+                JobStatus.DELETED,
+            },
             replay_when_job_missing=True,
             on_entitlement_failure=CreditLedgerError(
                 f"no frozen credit to roll back for job {job_id}"

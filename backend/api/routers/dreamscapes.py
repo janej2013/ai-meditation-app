@@ -24,7 +24,8 @@ from fastapi import APIRouter, HTTPException, Response, status
 from pydantic import BaseModel
 
 from api.deps import CurrentUserDep, StoreDep
-from shared.models import Job, JobStatus
+from shared.audio import SweepError, sweep_job_objects
+from shared.models import Job
 
 logger = logging.getLogger(__name__)
 
@@ -64,25 +65,25 @@ class DreamscapeItem(BaseModel):
 class DreamscapeList(BaseModel):
     items: list[DreamscapeItem]
     next_cursor: str | None = None
+    # The whole collection's size -- free, since the partition is already in
+    # hand -- so the home screen's count is never capped at a page.
+    total: int
 
 
 @router.get("/dreamscapes", response_model=DreamscapeList)
 def list_dreamscapes(
     user: CurrentUserDep, store: StoreDep, cursor: str | None = None
 ) -> DreamscapeList:
-    jobs = sorted(
-        store.list_done_jobs(user.sub),
-        key=lambda j: (j.created_at or _EPOCH, j.job_id),
-        reverse=True,
-    )
+    jobs = sorted(store.list_done_jobs(user.sub), key=_sort_key, reverse=True)
+    total = len(jobs)
     if cursor is not None:
         jobs = _after_cursor(jobs, cursor)
 
     page = jobs[:PAGE_SIZE]
     next_cursor = _cursor_for(page[-1]) if len(jobs) > PAGE_SIZE else None
 
-    logger.info("dreamscapes listed count=%d more=%s", len(page), next_cursor is not None)
-    return DreamscapeList(items=[_item(job) for job in page], next_cursor=next_cursor)
+    logger.info("dreamscapes listed count=%d total=%d", len(page), total)
+    return DreamscapeList(items=[_item(job) for job in page], next_cursor=next_cursor, total=total)
 
 
 @router.delete("/dreamscapes/{job_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -96,20 +97,16 @@ def delete_dreamscape(job_id: str, user: CurrentUserDep, store: StoreDep) -> Res
     audio 404s. ``pictures/`` is never touched (constraint 9); IAM enforces
     that independently of this code.
     """
-    job = store.get_job(user.sub, job_id)
-    # Absent, another user's (absent from this partition), or still in flight:
-    # all the same 404, matching GET /jobs -- no existence oracle, and an
+    # The conditional update is the whole check: absent, another user's
+    # (absent from this partition), or still in flight all fail its condition
+    # and get the same 404 as GET /jobs -- no existence oracle, and an
     # in-flight job is not a dreamscape yet.
-    if job is None or job.status not in (JobStatus.DONE, JobStatus.DELETED):
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found.")
-
     if not store.mark_job_deleted(user.sub, job_id):
-        # The status moved between our read and the update; treat like the read.
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found.")
 
     try:
-        _delete_job_objects(job_id)
-    except ClientError as exc:
+        sweep_job_objects(_get_s3(), os.environ["AUDIO_BUCKET"], job_id)
+    except (ClientError, SweepError) as exc:
         # The item is already DELETED, so a retry heals this (see docstring).
         logger.error("dreamscape cleanup failed job_id=%s", job_id)
         raise HTTPException(
@@ -119,22 +116,6 @@ def delete_dreamscape(job_id: str, user: CurrentUserDep, store: StoreDep) -> Res
 
     logger.info("dreamscape deleted job_id=%s", job_id)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
-
-
-def _delete_job_objects(job_id: str) -> None:
-    """Remove everything under jobs/{job_id}/. Deleting nothing is success."""
-    s3 = _get_s3()
-    bucket = os.environ["AUDIO_BUCKET"]
-    prefix = f"jobs/{job_id}/"
-    kwargs: dict[str, Any] = {"Bucket": bucket, "Prefix": prefix}
-    while True:
-        page = s3.list_objects_v2(**kwargs)
-        keys = [{"Key": obj["Key"]} for obj in page.get("Contents", [])]
-        if keys:
-            s3.delete_objects(Bucket=bucket, Delete={"Objects": keys, "Quiet": True})
-        if not page.get("IsTruncated"):
-            return
-        kwargs["ContinuationToken"] = page["NextContinuationToken"]
 
 
 def _item(job: Job) -> DreamscapeItem:
@@ -152,9 +133,16 @@ def _item(job: Job) -> DreamscapeItem:
     )
 
 
+def _sort_key(job: Job) -> tuple[datetime, str]:
+    """The one ordering: newest first (callers reverse), job_id as the
+    tie-breaker for a total order. The cursor encodes and compares exactly
+    this key, so pagination cannot drift from the sort."""
+    return (job.created_at or _EPOCH, job.job_id)
+
+
 def _cursor_for(job: Job) -> str:
-    created = job.created_at.isoformat() if job.created_at else ""
-    return base64.urlsafe_b64encode(f"{created}|{job.job_id}".encode()).decode()
+    created, job_id = _sort_key(job)
+    return base64.urlsafe_b64encode(f"{created.isoformat()}|{job_id}".encode()).decode()
 
 
 def _after_cursor(jobs: list[Job], cursor: str) -> list[Job]:
@@ -166,8 +154,12 @@ def _after_cursor(jobs: list[Job], cursor: str) -> list[Job]:
     """
     try:
         created_raw, _, job_id = base64.urlsafe_b64decode(cursor.encode()).decode().partition("|")
-        created = datetime.fromisoformat(created_raw) if created_raw else _EPOCH
+        created = datetime.fromisoformat(created_raw)
+        if created.tzinfo is None:
+            # Not a stamp we minted, and comparing it with the tz-aware sort
+            # keys would be a TypeError -- a 500 for what is a client typo.
+            raise ValueError("naive cursor timestamp")
     except (binascii.Error, UnicodeDecodeError, ValueError):
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Bad cursor.") from None
     boundary = (created, job_id)
-    return [j for j in jobs if ((j.created_at or _EPOCH), j.job_id) < boundary]
+    return [j for j in jobs if _sort_key(j) < boundary]

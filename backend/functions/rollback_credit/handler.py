@@ -20,6 +20,10 @@ import logging
 import os
 from typing import Any
 
+import boto3
+from botocore.exceptions import ClientError
+
+from shared.audio import SweepError, sweep_job_objects
 from shared.db import EntitlementStore
 from shared.pipeline import PipelineState
 
@@ -27,6 +31,7 @@ logger = logging.getLogger()
 logger.setLevel(os.environ.get("LOG_LEVEL", "INFO"))
 
 _store: EntitlementStore | None = None
+_s3: Any = None
 
 
 def _get_store() -> EntitlementStore:
@@ -34,6 +39,13 @@ def _get_store() -> EntitlementStore:
     if _store is None:
         _store = EntitlementStore()
     return _store
+
+
+def _get_s3() -> Any:
+    global _s3
+    if _s3 is None:
+        _s3 = boto3.client("s3")
+    return _s3
 
 
 def lambda_handler(event: dict[str, Any], context: object) -> dict[str, Any]:  # noqa: ARG001
@@ -52,5 +64,16 @@ def lambda_handler(event: dict[str, Any], context: object) -> dict[str, Any]:  #
         result.applied,
         result.job_status.value,
     )
+
+    # A job that synthesized and then failed (commit lost) has a narration in
+    # the bucket: untagged, so no lifecycle rule reaps it, and never DONE, so
+    # the user cannot delete it either. Sweep it here, after the refund and
+    # never at its expense -- a failed sweep is logged, not raised, because
+    # this handler is the last stop before the execution fails.
+    try:
+        removed = sweep_job_objects(_get_s3(), os.environ["AUDIO_BUCKET"], state.job_id)
+        logger.info("rollback swept job_id=%s objects=%d", state.job_id, removed)
+    except (ClientError, SweepError, KeyError):
+        logger.warning("rollback sweep failed job_id=%s", state.job_id)
 
     return state.model_dump()
