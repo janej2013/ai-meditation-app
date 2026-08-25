@@ -134,7 +134,7 @@ class FrontendStack(Stack):
             self,
             "AudioDomainName",
             value=self.audio_distribution.distribution_domain_name,
-            description="CloudFront domain serving jobs/* (signed) and assets/* (public).",
+            description="CloudFront domain: jobs/* and pictures/* signed, assets/* public.",
         )
 
     # ------------------------------------------------------------------

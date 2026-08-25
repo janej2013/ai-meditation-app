@@ -512,13 +512,17 @@ class PipelineStack(Stack):
     def _build_picture_state_machine(
         self, *, env_name: str, describe: lambda_.Function
     ) -> sfn.StateMachine:
-        """One task: describe an upload so the keywords screen can show it.
+        """Describe an upload so the keywords screen can show it; on any
+        failure, record that on the PICTURE item before failing.
 
         Runs before any job or credit exists (the API starts it from
-        POST /pictures/{id}/describe), so there is nothing to refund on
-        failure -- the Lambda marks the PICTURE item FAILED itself and the
-        execution ends in a Fail state for visibility. Bedrock throttling gets
-        the same Retry as the script step; the item stays PENDING meanwhile.
+        POST /pictures/{id}/describe), so there is nothing to refund. The
+        Catch is what makes the item honest: an attempt that ends in Step
+        Functions -- Bedrock retries exhausted, the task timing out -- never
+        returns to the handler, so the Catch invokes the same Lambda in its
+        ``mark_failed`` mode, conditioned on the attempt token, and only then
+        ends in a Fail state for visibility. Bedrock throttling gets the same
+        Retry as the script step; the item stays DESCRIBING meanwhile.
         """
         describe_task = self._task(
             "DescribePictureTask", describe, "Describe the picture", Duration.seconds(60)
@@ -529,13 +533,39 @@ class PipelineStack(Stack):
             max_attempts=3,
             backoff_rate=2.0,
         )
+        mark_failed = tasks.LambdaInvoke(
+            self,
+            "MarkPictureFailed",
+            lambda_function=describe,
+            comment="Record the failed attempt on the PICTURE item",
+            payload=sfn.TaskInput.from_object(
+                {
+                    "user_id": sfn.JsonPath.string_at("$.user_id"),
+                    "picture_id": sfn.JsonPath.string_at("$.picture_id"),
+                    "attempt": sfn.JsonPath.string_at("$.attempt"),
+                    "mode": "mark_failed",
+                }
+            ),
+            payload_response_only=True,
+            task_timeout=sfn.Timeout.duration(Duration.seconds(30)),
+        )
+        mark_failed.add_retry(
+            errors=LAMBDA_SERVICE_ERRORS,
+            interval=Duration.seconds(2),
+            max_attempts=3,
+            backoff_rate=2.0,
+        )
         failed = sfn.Fail(
             self,
             "PictureDescriptionFailed",
             error="PictureDescriptionFailed",
             cause="The picture could not be described; nothing was charged.",
         )
-        describe_task.add_catch(failed, errors=["States.ALL"], result_path="$.error")
+        # If even the mark cannot be written, the stale window is the backstop.
+        mark_failed.add_catch(failed, errors=["States.ALL"], result_path="$.mark_error")
+        describe_task.add_catch(
+            mark_failed.next(failed), errors=["States.ALL"], result_path="$.error"
+        )
         definition = describe_task.next(sfn.Succeed(self, "PictureDescribed"))
 
         return sfn.StateMachine(
