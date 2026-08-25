@@ -4,14 +4,21 @@
  * a module-level count the home screen reads without loading the page.
  */
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { type DreamscapeItem, deleteDreamscape, listDreamscapes } from '../api/client'
+import {
+  type DreamscapeItem,
+  NotSignedInError,
+  deleteDreamscape,
+  listDreamscapes,
+} from '../api/client'
 
-// Derived from the first page and kept across navigations, so the home
-// screen's entry line can render without a spinner: null = not known yet,
-// and the line simply does not render until it is.
+// The API's `total` from the last page fetched, kept across navigations so
+// the home screen's entry line renders without a spinner: null = not known,
+// and the line simply does not render until it is. Invalidated when the
+// collection can have changed behind our back -- a session completing, a
+// sign-out -- so the next visit refetches.
 let cachedCount: number | null = null
 
-export function resetDreamCountCache(): void {
+export function invalidateDreamCount(): void {
   cachedCount = null
 }
 
@@ -22,7 +29,7 @@ export function useDreamCount(): number | null {
     let cancelled = false
     listDreamscapes()
       .then((page) => {
-        cachedCount = page.items.length
+        cachedCount = page.total
         if (!cancelled) setCount(cachedCount)
       })
       .catch(() => {
@@ -39,16 +46,27 @@ export interface Dreamscapes {
   /** null until the first page arrives — render nothing meanwhile. */
   items: DreamscapeItem[] | null
   hasMore: boolean
-  loadMore: () => void
+  /** The collection needs a signed-in user; the page redirects on this. */
+  signedOut: boolean
+  loadMore: () => Promise<void>
   /** Optimistic; resolves false (and restores the card) if the API refused. */
   remove: (jobId: string) => Promise<boolean>
 }
 
 export function useDreamscapes(): Dreamscapes {
   const [items, setItems] = useState<DreamscapeItem[] | null>(null)
+  const [hasMore, setHasMore] = useState(false)
+  const [signedOut, setSignedOut] = useState(false)
+  // Mirrors `items` for code that needs the current list outside a render
+  // (the rollback snapshot) without side effects inside a state updater.
+  const itemsRef = useRef<DreamscapeItem[] | null>(null)
   const cursor = useRef<string | null>(null)
   const loading = useRef(false)
-  const [hasMore, setHasMore] = useState(false)
+
+  const setList = useCallback((next: DreamscapeItem[] | null) => {
+    itemsRef.current = next
+    setItems(next)
+  }, [])
 
   const fetchPage = useCallback(async () => {
     if (loading.current) return
@@ -56,45 +74,41 @@ export function useDreamscapes(): Dreamscapes {
     try {
       const page = await listDreamscapes(cursor.current ?? undefined)
       cursor.current = page.next_cursor
+      cachedCount = page.total
       setHasMore(page.next_cursor !== null)
-      setItems((prev) => [...(prev ?? []), ...page.items])
-      if (cachedCount === null) cachedCount = page.items.length
-    } catch {
-      // Leave items as they are; the page shows its quiet empty/loading state.
+      setList([...(itemsRef.current ?? []), ...page.items])
+    } catch (e) {
+      if (e instanceof NotSignedInError) setSignedOut(true)
+      // Otherwise leave the list as it is; the page shows its quiet state.
     } finally {
       loading.current = false
     }
-  }, [])
+  }, [setList])
 
   useEffect(() => {
     void fetchPage()
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- mount-only load
-  }, [])
+  }, [fetchPage])
 
-  const remove = useCallback(async (jobId: string): Promise<boolean> => {
-    let removed: DreamscapeItem | undefined
-    let at = 0
-    setItems((prev) => {
-      if (!prev) return prev
-      at = prev.findIndex((d) => d.job_id === jobId)
-      removed = prev[at]
-      return prev.filter((d) => d.job_id !== jobId)
-    })
-    if (cachedCount !== null) cachedCount = Math.max(0, cachedCount - 1)
-    try {
-      await deleteDreamscape(jobId)
-      return true
-    } catch {
-      setItems((prev) => {
-        if (!prev || !removed) return prev
-        const back = [...prev]
-        back.splice(Math.min(at, back.length), 0, removed)
-        return back
-      })
-      if (cachedCount !== null) cachedCount += 1
-      return false
-    }
-  }, [])
+  const remove = useCallback(
+    async (jobId: string): Promise<boolean> => {
+      const before = itemsRef.current ?? []
+      const at = before.findIndex((d) => d.job_id === jobId)
+      if (at === -1) return true
+      setList(before.filter((d) => d.job_id !== jobId))
+      if (cachedCount !== null) cachedCount = Math.max(0, cachedCount - 1)
+      try {
+        await deleteDreamscape(jobId)
+        return true
+      } catch {
+        const back = [...(itemsRef.current ?? [])]
+        back.splice(Math.min(at, back.length), 0, before[at])
+        setList(back)
+        if (cachedCount !== null) cachedCount += 1
+        return false
+      }
+    },
+    [setList],
+  )
 
-  return { items, hasMore, loadMore: () => void fetchPage(), remove }
+  return { items, hasMore, signedOut, loadMore: fetchPage, remove }
 }

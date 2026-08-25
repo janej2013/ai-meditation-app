@@ -3,6 +3,7 @@ import { useEffect, useState } from 'react'
 import { useNavigate, useSearchParams } from 'react-router-dom'
 import { NotSignedInError, getAccount, type Account } from '../api/client'
 import { currentEmail, signOut } from '../auth/cognito'
+import { invalidateDreamCount } from '../dreamscapes/useDreamscapes'
 
 export default function AccountPage() {
   const navigate = useNavigate()
@@ -143,6 +144,7 @@ export default function AccountPage() {
           className="btn-ghost"
           onClick={() => {
             signOut()
+            invalidateDreamCount()
             navigate('/')
           }}
         >

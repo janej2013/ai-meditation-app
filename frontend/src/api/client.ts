@@ -51,6 +51,8 @@ export interface DreamscapeItem {
 export interface DreamscapeList {
   items: DreamscapeItem[]
   next_cursor: string | null
+  /** The whole collection's size, not this page's. */
+  total: number
 }
 
 export interface CheckoutResponse {

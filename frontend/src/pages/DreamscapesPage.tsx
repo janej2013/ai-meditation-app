@@ -8,32 +8,129 @@
  * Deletion is optimistic: the card drifts out immediately; if the API
  * refuses, the card returns and a quiet line says so.
  */
-import { useEffect, useRef, useState } from 'react'
+import { memo, useEffect, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { type DreamscapeItem } from '../api/client'
 import { dreamThumb } from '../dreamscapes/thumb'
+import { dreamTitle } from '../dreamscapes/title'
 import { useDreamscapes } from '../dreamscapes/useDreamscapes'
 import { wovenAgo } from '../dreamscapes/wovenAgo'
+import { useFadeIn } from '../hooks/useFadeIn'
 
 const SWIPE_PX = 36 // the prototype's open/close threshold
 
-function title(d: DreamscapeItem): string {
-  return d.keywords?.length ? d.keywords.join(' · ') : (d.mood_excerpt ?? 'A quiet session')
+interface CardProps {
+  dream: DreamscapeItem
+  swiped: boolean
+  onSwipe: (jobId: string | null) => void
+  onOpen: (dream: DreamscapeItem) => void
+  onDelete: (dream: DreamscapeItem) => void
 }
+
+/**
+ * One card. Memoised so a swipe on one card does not rebuild every other
+ * card's thumbnail (34 gradients each) and date on the way through.
+ */
+const DreamCard = memo(function DreamCard({
+  dream,
+  swiped,
+  onSwipe,
+  onOpen,
+  onDelete,
+}: CardProps) {
+  const downX = useRef<number | null>(null)
+  const thumb = dreamThumb(dream.job_id)
+  const when = dream.created_at ? wovenAgo(new Date(dream.created_at)) : 'woven once'
+
+  const onUp = (e: React.PointerEvent) => {
+    const dx = e.clientX - (downX.current ?? e.clientX)
+    if (dx < -SWIPE_PX) onSwipe(dream.job_id)
+    else if (dx > SWIPE_PX) onSwipe(null)
+    else if (swiped) onSwipe(null)
+    else onOpen(dream)
+  }
+
+  return (
+    <div style={{ position: 'relative', borderRadius: 20, overflow: 'hidden', flex: 'none' }}>
+      <div
+        style={{ position: 'absolute', inset: 0, display: 'flex', justifyContent: 'flex-end' }}
+      >
+        <button
+          onClick={() => onDelete(dream)}
+          style={{
+            width: 88,
+            border: 'none',
+            background: 'oklch(0.36 0.055 20 / 0.85)',
+            font: '400 12.5px var(--font-sans)',
+            color: 'oklch(0.94 0.020 20)',
+            cursor: 'pointer',
+          }}
+        >
+          Delete
+        </button>
+      </div>
+      <div
+        onPointerDown={(e) => {
+          downX.current = e.clientX
+        }}
+        onPointerUp={onUp}
+        style={{
+          position: 'relative',
+          display: 'flex',
+          alignItems: 'center',
+          gap: 15,
+          padding: '15px 17px',
+          borderRadius: 20,
+          // 0.82 alpha over the dim cloud reads the same as the prototype's
+          // blurred glass, without N live backdrop blurs per frame while
+          // the cloud animates underneath a scrolling list.
+          background: 'oklch(0.265 0.032 265 / 0.82)',
+          cursor: 'pointer',
+          transition: 'transform .26s ease, background .2s',
+          transform: swiped ? 'translateX(-88px)' : 'translateX(0)',
+          touchAction: 'pan-y',
+        }}
+      >
+        <div
+          style={{
+            width: 56,
+            height: 56,
+            flex: 'none',
+            borderRadius: 15,
+            backgroundColor: 'oklch(0.215 0.030 265)',
+            backgroundImage: thumb,
+          }}
+        />
+        <div style={{ minWidth: 0, display: 'flex', flexDirection: 'column', gap: 6 }}>
+          <div
+            style={{
+              font: '400 15.5px/1.35 var(--font-sans)',
+              color: 'var(--text-primary)',
+              textWrap: 'pretty',
+            }}
+          >
+            {dreamTitle(dream.keywords, dream.mood_excerpt)}
+          </div>
+          <div style={{ font: '400 11.5px var(--font-mono)', color: 'oklch(0.720 0.018 275)' }}>
+            {dream.duration_minutes ?? '–'} min · {when}
+          </div>
+        </div>
+      </div>
+    </div>
+  )
+})
 
 export default function DreamscapesPage() {
   const navigate = useNavigate()
-  const { items, hasMore, loadMore, remove } = useDreamscapes()
+  const { items, hasMore, signedOut, loadMore, remove } = useDreamscapes()
   const [swipeId, setSwipeId] = useState<string | null>(null)
   const [confirming, setConfirming] = useState<DreamscapeItem | null>(null)
   const [failedDelete, setFailedDelete] = useState(false)
-  const [fade, setFade] = useState(0)
-  const downX = useRef<number | null>(null)
+  const fadeIn = useFadeIn()
 
   useEffect(() => {
-    const t = setTimeout(() => setFade(1), 40)
-    return () => clearTimeout(t)
-  }, [])
+    if (signedOut) navigate('/signup', { replace: true })
+  }, [signedOut, navigate])
 
   const open = (d: DreamscapeItem) => {
     navigate(`/player/${d.job_id}`, {
@@ -47,14 +144,6 @@ export default function DreamscapesPage() {
     })
   }
 
-  const onUp = (d: DreamscapeItem, e: React.PointerEvent) => {
-    const dx = e.clientX - (downX.current ?? e.clientX)
-    if (dx < -SWIPE_PX) setSwipeId(d.job_id)
-    else if (dx > SWIPE_PX) setSwipeId(null)
-    else if (swipeId === d.job_id) setSwipeId(null)
-    else open(d)
-  }
-
   const confirmDelete = async () => {
     if (!confirming) return
     const target = confirming
@@ -64,16 +153,12 @@ export default function DreamscapesPage() {
     if (!(await remove(target.job_id))) setFailedDelete(true)
   }
 
+  // Empty only when there is truly nothing left -- deleting every loaded
+  // card while more pages exist is not "no dreamscapes yet".
+  const empty = items !== null && items.length === 0 && !hasMore
+
   return (
-    <div
-      className="screen"
-      style={{
-        padding: 0,
-        transition: 'opacity 1s ease',
-        opacity: fade,
-        position: 'relative',
-      }}
-    >
+    <div className="screen" style={{ padding: 0, ...fadeIn }}>
       <div
         style={{
           flex: 'none',
@@ -83,18 +168,7 @@ export default function DreamscapesPage() {
           gap: 14,
         }}
       >
-        <button
-          onClick={() => navigate('/')}
-          style={{
-            background: 'none',
-            border: 'none',
-            padding: '6px 8px',
-            margin: '-6px -8px',
-            fontSize: 15,
-            color: 'var(--text-secondary)',
-            cursor: 'pointer',
-          }}
-        >
+        <button className="btn-back" style={{ fontSize: 15 }} onClick={() => navigate('/')}>
           ←
         </button>
         <div style={{ font: '300 24px var(--font-sans)', color: 'var(--text-primary)' }}>
@@ -102,7 +176,7 @@ export default function DreamscapesPage() {
         </div>
       </div>
 
-      {items !== null && items.length > 0 && (
+      {items !== null && !empty && (
         <>
           <div
             style={{
@@ -116,94 +190,21 @@ export default function DreamscapesPage() {
             }}
           >
             {items.map((d) => (
-              <div
+              <DreamCard
                 key={d.job_id}
-                style={{
-                  position: 'relative',
-                  borderRadius: 20,
-                  overflow: 'hidden',
-                  flex: 'none',
-                }}
-              >
-                <div
-                  style={{
-                    position: 'absolute',
-                    inset: 0,
-                    display: 'flex',
-                    justifyContent: 'flex-end',
-                  }}
-                >
-                  <button
-                    onClick={() => setConfirming(d)}
-                    style={{
-                      width: 88,
-                      border: 'none',
-                      background: 'oklch(0.36 0.055 20 / 0.85)',
-                      font: '400 12.5px var(--font-sans)',
-                      color: 'oklch(0.94 0.020 20)',
-                      cursor: 'pointer',
-                    }}
-                  >
-                    Delete
-                  </button>
-                </div>
-                <div
-                  onPointerDown={(e) => {
-                    downX.current = e.clientX
-                  }}
-                  onPointerUp={(e) => onUp(d, e)}
-                  style={{
-                    position: 'relative',
-                    display: 'flex',
-                    alignItems: 'center',
-                    gap: 15,
-                    padding: '15px 17px',
-                    borderRadius: 20,
-                    background: 'oklch(0.265 0.032 265 / 0.82)',
-                    backdropFilter: 'blur(16px)',
-                    cursor: 'pointer',
-                    transition: 'transform .26s ease, background .2s',
-                    transform: swipeId === d.job_id ? 'translateX(-88px)' : 'translateX(0)',
-                    touchAction: 'pan-y',
-                  }}
-                >
-                  <div
-                    style={{
-                      width: 56,
-                      height: 56,
-                      flex: 'none',
-                      borderRadius: 15,
-                      backgroundColor: 'oklch(0.215 0.030 265)',
-                      backgroundImage: dreamThumb(d.job_id),
-                    }}
-                  />
-                  <div
-                    style={{ minWidth: 0, display: 'flex', flexDirection: 'column', gap: 6 }}
-                  >
-                    <div
-                      style={{
-                        font: '400 15.5px/1.35 var(--font-sans)',
-                        color: 'var(--text-primary)',
-                        textWrap: 'pretty',
-                      }}
-                    >
-                      {title(d)}
-                    </div>
-                    <div
-                      style={{
-                        font: '400 11.5px var(--font-mono)',
-                        color: 'oklch(0.720 0.018 275)',
-                      }}
-                    >
-                      {d.duration_minutes ?? '–'} min ·{' '}
-                      {d.created_at ? wovenAgo(new Date(d.created_at)) : 'woven once'}
-                    </div>
-                  </div>
-                </div>
-              </div>
+                dream={d}
+                swiped={swipeId === d.job_id}
+                onSwipe={setSwipeId}
+                onOpen={open}
+                onDelete={setConfirming}
+              />
             ))}
             {hasMore && (
-              <button className="btn-ghost" style={{ padding: '12px 0' }} onClick={loadMore}>
+              <button
+                className="btn-ghost"
+                style={{ padding: '12px 0' }}
+                onClick={() => void loadMore()}
+              >
                 More dreamscapes
               </button>
             )}
@@ -222,7 +223,7 @@ export default function DreamscapesPage() {
         </>
       )}
 
-      {items !== null && items.length === 0 && (
+      {empty && (
         <div
           style={{
             flex: 1,
@@ -245,19 +246,7 @@ export default function DreamscapesPage() {
           >
             No dreamscapes yet. Your first dream awaits.
           </div>
-          <button
-            onClick={() => navigate('/')}
-            style={{
-              background: 'none',
-              border: 'none',
-              padding: '8px 3px',
-              margin: '-8px -3px',
-              font: '400 13px var(--font-sans)',
-              color: 'oklch(0.775 0.018 275)',
-              borderBottom: '1px solid oklch(0.72 0.02 275 / 0.24)',
-              cursor: 'pointer',
-            }}
-          >
+          <button className="dream-entry" onClick={() => navigate('/')}>
             Begin one
           </button>
         </div>
@@ -308,7 +297,8 @@ export default function DreamscapesPage() {
             <div
               style={{ font: '400 13px/1.6 var(--font-sans)', color: 'oklch(0.760 0.018 275)' }}
             >
-              {title(confirming)} will drift out of your collection.
+              {dreamTitle(confirming.keywords, confirming.mood_excerpt)} will drift out of your
+              collection.
             </div>
             <div style={{ marginTop: 18, display: 'flex', flexDirection: 'column', gap: 6 }}>
               <button
@@ -327,15 +317,9 @@ export default function DreamscapesPage() {
                 Let go
               </button>
               <button
+                className="btn-ghost"
+                style={{ padding: '14px 0' }}
                 onClick={() => setConfirming(null)}
-                style={{
-                  background: 'none',
-                  border: 'none',
-                  padding: '14px 0',
-                  fontSize: 13,
-                  color: 'oklch(0.760 0.018 275)',
-                  cursor: 'pointer',
-                }}
               >
                 Cancel
               </button>

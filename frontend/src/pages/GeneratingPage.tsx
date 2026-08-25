@@ -17,6 +17,7 @@ import { useEffect, useRef, useState } from 'react'
 import { useLocation, useNavigate, useParams } from 'react-router-dom'
 import { pollJob } from '../api/client'
 import { mixer } from '../audio/mixer'
+import { invalidateDreamCount } from '../dreamscapes/useDreamscapes'
 
 const CAPTIONS = ['Creating your meditation…', 'Breathe in…', 'And release…']
 
@@ -68,6 +69,7 @@ export default function GeneratingPage() {
       .then((job) => {
         if (job.status === 'DONE' && job.audio_url) {
           handedOff.current = true
+          invalidateDreamCount() // one more dreamscape than home last counted
           // The prototype's arrival beat: caption swap, screen fade, player.
           setReady(true)
           setCapOpacity(1)

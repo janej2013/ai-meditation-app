@@ -10,7 +10,9 @@ import { useEffect, useRef, useState } from 'react'
 import { useLocation, useNavigate, useParams } from 'react-router-dom'
 import { NotSignedInError, getJob } from '../api/client'
 import { BGM_TRACKS, DEFAULT_BGM_VOLUME, bgmUrl, mixer } from '../audio/mixer'
+import { dreamTitleLines } from '../dreamscapes/title'
 import { wovenAgo } from '../dreamscapes/wovenAgo'
+import { useFadeIn } from '../hooks/useFadeIn'
 import { useScene } from '../scene/SceneContext'
 
 function fmt(s: number): string {
@@ -48,23 +50,14 @@ export default function PlayerPage() {
   // Revisiting from the collection: the prototype's header variant — kicker
   // REVISITING, a woven-ago line, and the keywords as the title.
   const revisiting = state?.from === 'dreamscapes'
-  const revisitTitle: string[] | null = revisiting
-    ? state?.keywords?.length
-      ? state.keywords.length >= 3
-        ? [`${state.keywords[0]} · ${state.keywords[1]} ·`, state.keywords.slice(2).join(' · ')]
-        : [state.keywords.join(' · ')]
-      : state?.moodExcerpt
-        ? [state.moodExcerpt]
-        : null
-    : null
-  const titleLines =
-    revisitTitle ??
-    (feeling
+  const titleLines = revisiting
+    ? dreamTitleLines(state?.keywords, state?.moodExcerpt)
+    : feeling
       ? [
           `${feeling.charAt(0).toUpperCase()}${feeling.slice(1)},`,
           destination && destination !== 'Anywhere' ? destination.toLowerCase() : 'quiet mind',
         ]
-      : ['Your session'])
+      : ['Your session']
 
   // The shared mixer is only ever touched from effects and event handlers --
   // never during render, which the react-hooks rules (correctly) forbid for
@@ -77,14 +70,8 @@ export default function PlayerPage() {
   const [duration, setDuration] = useState(0)
   const [trackId, setTrackId] = useState(BGM_TRACKS[0].id)
   const [bgmVolume, setBgmVolume] = useState(DEFAULT_BGM_VOLUME)
-  const [fade, setFade] = useState(0)
+  const fadeIn = useFadeIn() // the prototype's playFade: breathe in on arrival
   const trackRef = useRef<HTMLDivElement>(null)
-
-  // The prototype's playFade: the screen breathes in on arrival.
-  useEffect(() => {
-    const t = setTimeout(() => setFade(1), 40)
-    return () => clearTimeout(t)
-  }, [])
 
   // The cloud pulses with playback; leaving the player releases it.
   useEffect(() => {
@@ -217,10 +204,7 @@ export default function PlayerPage() {
   }
 
   return (
-    <div
-      className="screen"
-      style={{ background: 'var(--wash-player)', transition: 'opacity 1s ease', opacity: fade }}
-    >
+    <div className="screen" style={{ background: 'var(--wash-player)', ...fadeIn }}>
       <div
         style={{
           marginTop: 16,

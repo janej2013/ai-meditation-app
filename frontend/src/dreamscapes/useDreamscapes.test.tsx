@@ -1,6 +1,7 @@
 /**
  * The collection hook: accumulating pagination, optimistic delete with
- * rollback, and the module-level count cache the home screen reads.
+ * rollback, the signed-out signal, and the module-level count the home
+ * screen reads.
  */
 import { act, renderHook, waitFor } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
@@ -10,8 +11,14 @@ vi.mock('../api/client', async (importOriginal) => {
   return { ...actual, listDreamscapes: vi.fn(), deleteDreamscape: vi.fn() }
 })
 
-import { type DreamscapeItem, deleteDreamscape, listDreamscapes } from '../api/client'
-import { resetDreamCountCache, useDreamCount, useDreamscapes } from './useDreamscapes'
+import {
+  type DreamscapeItem,
+  type DreamscapeList,
+  NotSignedInError,
+  deleteDreamscape,
+  listDreamscapes,
+} from '../api/client'
+import { invalidateDreamCount, useDreamCount, useDreamscapes } from './useDreamscapes'
 
 function item(id: string): DreamscapeItem {
   return {
@@ -24,33 +31,34 @@ function item(id: string): DreamscapeItem {
   }
 }
 
+function page(ids: string[], next: string | null = null, total = ids.length): DreamscapeList {
+  return { items: ids.map(item), next_cursor: next, total }
+}
+
 beforeEach(() => {
   vi.mocked(listDreamscapes).mockReset()
   vi.mocked(deleteDreamscape).mockReset()
-  resetDreamCountCache()
+  invalidateDreamCount()
 })
 
 describe('useDreamscapes', () => {
   it('loads the first page and accumulates the next', async () => {
     vi.mocked(listDreamscapes)
-      .mockResolvedValueOnce({ items: [item('a'), item('b')], next_cursor: 'c1' })
-      .mockResolvedValueOnce({ items: [item('c')], next_cursor: null })
+      .mockResolvedValueOnce(page(['a', 'b'], 'c1', 3))
+      .mockResolvedValueOnce(page(['c'], null, 3))
 
     const { result } = renderHook(() => useDreamscapes())
     await waitFor(() => expect(result.current.items).toHaveLength(2))
     expect(result.current.hasMore).toBe(true)
 
-    act(() => result.current.loadMore())
+    await act(() => result.current.loadMore())
     await waitFor(() => expect(result.current.items).toHaveLength(3))
     expect(vi.mocked(listDreamscapes)).toHaveBeenLastCalledWith('c1')
     expect(result.current.hasMore).toBe(false)
   })
 
   it('removes optimistically and keeps the removal when the API agrees', async () => {
-    vi.mocked(listDreamscapes).mockResolvedValue({
-      items: [item('a'), item('b')],
-      next_cursor: null,
-    })
+    vi.mocked(listDreamscapes).mockResolvedValue(page(['a', 'b']))
     vi.mocked(deleteDreamscape).mockResolvedValue(undefined)
 
     const { result } = renderHook(() => useDreamscapes())
@@ -65,10 +73,7 @@ describe('useDreamscapes', () => {
   })
 
   it('puts the card back where it was when the DELETE fails', async () => {
-    vi.mocked(listDreamscapes).mockResolvedValue({
-      items: [item('a'), item('b'), item('c')],
-      next_cursor: null,
-    })
+    vi.mocked(listDreamscapes).mockResolvedValue(page(['a', 'b', 'c']))
     vi.mocked(deleteDreamscape).mockRejectedValue(new Error('500'))
 
     const { result } = renderHook(() => useDreamscapes())
@@ -81,11 +86,20 @@ describe('useDreamscapes', () => {
     expect(ok).toBe(false)
     expect(result.current.items?.map((d) => d.job_id)).toEqual(['a', 'b', 'c'])
   })
+
+  it('flags signedOut so the page can redirect', async () => {
+    vi.mocked(listDreamscapes).mockRejectedValue(new NotSignedInError())
+
+    const { result } = renderHook(() => useDreamscapes())
+
+    await waitFor(() => expect(result.current.signedOut).toBe(true))
+    expect(result.current.items).toBeNull()
+  })
 })
 
 describe('useDreamCount', () => {
-  it('derives the count from the first page and renders nothing while unknown', async () => {
-    let resolve!: (v: { items: DreamscapeItem[]; next_cursor: string | null }) => void
+  it('reports the API total and renders nothing while unknown', async () => {
+    let resolve!: (v: DreamscapeList) => void
     vi.mocked(listDreamscapes).mockReturnValue(
       new Promise((r) => {
         resolve = r
@@ -95,8 +109,9 @@ describe('useDreamCount', () => {
     const { result } = renderHook(() => useDreamCount())
     expect(result.current).toBeNull()
 
-    resolve({ items: [item('a'), item('b')], next_cursor: null })
-    await waitFor(() => expect(result.current).toBe(2))
+    // The API's total, not the page length: 25 dreams read as 25, not 20.
+    resolve(page(['a', 'b'], 'more', 25))
+    await waitFor(() => expect(result.current).toBe(25))
   })
 
   it('stays null (no crash, no retry storm) when the request fails', async () => {
@@ -104,5 +119,16 @@ describe('useDreamCount', () => {
     const { result } = renderHook(() => useDreamCount())
     await waitFor(() => expect(vi.mocked(listDreamscapes)).toHaveBeenCalled())
     expect(result.current).toBeNull()
+  })
+
+  it('refetches after invalidation, so a finished session or a sign-out shows through', async () => {
+    vi.mocked(listDreamscapes).mockResolvedValueOnce(page(['a'], null, 1))
+    const first = renderHook(() => useDreamCount())
+    await waitFor(() => expect(first.result.current).toBe(1))
+
+    invalidateDreamCount()
+    vi.mocked(listDreamscapes).mockResolvedValueOnce(page(['a', 'b'], null, 2))
+    const second = renderHook(() => useDreamCount())
+    await waitFor(() => expect(second.result.current).toBe(2))
   })
 })
