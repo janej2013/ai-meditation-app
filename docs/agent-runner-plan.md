@@ -184,10 +184,12 @@ backend/agent/
   不是第二套架构 —— 这正是 provider 抽象存在的理由，也是「multi-provider LLM layer」叙事的闭环。
 - C 不用，任何阶段都不用：第 3 层是自建目标的一部分（§0.5）。面试里被问到「为什么不用 AgentCore」，
   答案就是本文 §5 的那张路由表加 §2 的 fencing token —— 那是我们自己写的 harness 在做同样的事。
-- 模型默认 **Claude Sonnet 4.6 的 `au.` profile**（env `AGENT_MODEL_ID`；精确 id 以
-  `aws bedrock list-inference-profiles --region ap-southeast-2` 为准）；Haiku 4.5 是省钱档，
-  Nova Lite 是「几乎免费」的实验档。理由：陪伴对话要稳定遵守工具规则与危机策略，
-  这比管线里「生成一段格式化散文」对模型的要求高。
+- 模型默认 **Nova Lite**（`amazon.nova-lite-v1:0`，悉尼按需；env `AGENT_MODEL_ID` 可换成
+  `au.` 前缀的 Claude profile，精确 id 以 `aws bedrock list-inference-profiles --region ap-southeast-2` 为准）。
+  **2026-08-25 拍板**，依据是 A3 的 evals：Nova Lite 在 20 条用例上 19/20——10 条危机/边界全过
+  （固定文案、零工具调用、危机后可回到冥想）、brief 不泄露个人细节、偏好会被记住；唯一未过的
+  `no-history-when-memory-exists`（有笔记时仍多查一次历史）是效率偏好而非正确性问题，接受为已知边界。
+  每轮 ≈ 1 s、缓存命中 80–97%、全量 evals ≈ US$0.01。Claude 作为升级选项保留，切换只是一个 env。
 
 `BedrockConverseProvider` 的调用形状（boto3，`asyncio.to_thread` 包一层；事件流同步迭代）：
 
@@ -423,7 +425,7 @@ Function URL 且带 OAC；两个函数只有 `AGENT_ENGINE` 一处不同（其�
 
 | 项 | 第一版决定 |
 |---|---|
-| 模型 | Claude Sonnet 4.6 `au.` profile（env `AGENT_MODEL_ID`；可换 Haiku 4.5 `au.` 或 `amazon.nova-lite-v1:0`） |
+| 模型 | **Nova Lite**（`amazon.nova-lite-v1:0`，拍板见 §3.1）；env `AGENT_MODEL_ID` 可换 `au.` Claude profile |
 | 每会话上限 | 12 轮、每轮 ≤ 4 次工具往返、`maxTokens=4096` |
 | 每月上限 | 30 会话 / Pro 用户 |
 | 缓存 | system 打 `cachePoint`；期望 `cacheReadInputTokens` 占输入 70% 以上 |
@@ -434,7 +436,7 @@ Function URL 且带 OAC；两个函数只有 `AGENT_ENGINE` 一处不同（其�
 |---|---|---|
 | Claude Sonnet 4.6（$3 / $15） | ≈ $0.10–0.12 | ≈ $3–4 |
 | Claude Haiku 4.5（$1 / $5） | ≈ $0.035 | ≈ $1 |
-| Nova Lite（$0.06 / $0.24） | ≈ $0.004 | ≈ $0.1 |
+| **Nova Lite（$0.06 / $0.24，默认）** | ≈ $0.004 | ≈ $0.1 |
 
 Pro 定价必须覆盖这一块加 20 次生成的 TTS/LLM 成本 —— 这是定价输入，不是工程决定；
 `usage` 落在 T-item 上，上线后用真实数据校准。
