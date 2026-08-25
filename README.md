@@ -142,6 +142,17 @@ Two details are load-bearing:
   refunded, and a job that never froze anything can't drive `frozen` negative — which matters
   because every task including `freeze_credit` itself catches to `rollback_credit`.
 
+`rollback_credit` has one job beyond the ledger: after the refund it sweeps `jobs/{id}/*`. A job
+that synthesized and then failed leaves a narration that is untagged (so never expires) and never
+`DONE` (so the user cannot delete it). The sweep is gated on the ledger's verdict — only when the
+job is `ROLLED_BACK`, never on the `DONE` replay that a commit-then-crash produces, which would
+delete a paid dreamscape's audio — and a failed sweep is logged, never raised, so it can never
+cost the refund. For this the rollback Lambda holds `s3:DeleteObject` on `jobs/*` and a
+`jobs/`-fenced `s3:ListBucket`; `generate_script` holds `s3:PutObjectTagging` alongside
+`s3:PutObject` because its tagged upload needs both. Both grants are pinned by
+`infra/tests/test_dreamscapes_grants.py`, together with the assertion that no task Lambda may
+delete under `pictures/`.
+
 ## Architecture — auth and API
 
 `infra/stacks/auth_stack.py` — Cognito user pool: email sign-in alias, self-signup, email
