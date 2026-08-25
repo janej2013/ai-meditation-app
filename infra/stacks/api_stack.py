@@ -16,7 +16,7 @@ from constructs import Construct
 
 from stacks.paths import BACKEND_DIR
 
-from .data_stack import PICTURE_PREFIX
+from .data_stack import PICTURE_PREFIX, grant_job_sweep
 
 # Created by hand: the CloudFront URL-signing private key, whose public half
 # is registered on the audio distribution. Either a bare PEM or
@@ -95,11 +95,14 @@ class ApiStack(Stack):
         # rollback stay in the step Lambdas (constraint 2). Billing is the one
         # entitlement change that legitimately starts at the API, because only
         # Stripe can say a payment happened.
+        # Query: GET /dreamscapes reads the caller's JOB items by key prefix
+        # (list_done_jobs). Still scoped to one partition by the key condition.
         table.grant(
             self.api_function,
             "dynamodb:GetItem",
             "dynamodb:PutItem",
             "dynamodb:UpdateItem",
+            "dynamodb:Query",
         )
 
         # Starting the pipeline is the API's only write to Step Functions
@@ -114,14 +117,17 @@ class ApiStack(Stack):
 
         # POST /pictures/upload signs an S3 POST policy with the Lambda's own
         # credentials, so the Lambda itself must be allowed to put the object.
-        # Write-only, and only under pictures/: it never reads a picture back,
-        # and it never touches jobs/.
+        # Write-only, and only under pictures/: it never reads a picture back.
+        # (Its only other S3 access is the dreamscapes sweep on jobs/*, below.)
         self.api_function.add_to_role_policy(
             iam.PolicyStatement(
                 actions=["s3:PutObject"],
                 resources=[audio_bucket.arn_for_objects(f"{PICTURE_PREFIX}/*")],
             )
         )
+
+        # DELETE /dreamscapes/{id} sweeps the job's audio objects.
+        grant_job_sweep(self.api_function, audio_bucket)
 
         # The authorizer validates signature, issuer, audience and expiry before
         # the Lambda is invoked, so the app only reads claims.
@@ -148,9 +154,13 @@ class ApiStack(Stack):
             cors_preflight=apigwv2.CorsPreflightOptions(
                 allow_origins=allowed_origins,
                 allow_headers=["Authorization", "Content-Type"],
+                # Every method a route uses: the site and the API are different
+                # origins, so the browser preflights anything beyond a simple
+                # GET/POST and refuses a method missing from this list.
                 allow_methods=[
                     apigwv2.CorsHttpMethod.GET,
                     apigwv2.CorsHttpMethod.POST,
+                    apigwv2.CorsHttpMethod.DELETE,
                     apigwv2.CorsHttpMethod.OPTIONS,
                 ],
                 max_age=Duration.hours(1),
@@ -191,6 +201,16 @@ class ApiStack(Stack):
         self.http_api.add_routes(
             path="/jobs/{job_id}",
             methods=[apigwv2.HttpMethod.GET],
+            integration=integration,
+        )
+        self.http_api.add_routes(
+            path="/dreamscapes",
+            methods=[apigwv2.HttpMethod.GET],
+            integration=integration,
+        )
+        self.http_api.add_routes(
+            path="/dreamscapes/{job_id}",
+            methods=[apigwv2.HttpMethod.DELETE],
             integration=integration,
         )
 

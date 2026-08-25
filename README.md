@@ -96,9 +96,13 @@ PK = USER#<cognito_sub>
 ```
 
 **S3 `AudioBucket`** — generated audio and uploaded pictures. All public access blocked, SSE-S3,
-TLS enforced. `jobs/*` (script + narration) expires after 90 days; `pictures/*` after 365 — the
-pictures are kept for the planned replay feature (re-listen without spending a credit), nothing
-in the pipeline deletes them, and when replay lands the audio retention should move to match.
+TLS enforced. Under `jobs/*`, only tag-marked intermediates (`script.txt`,
+tagged `transient=true` on upload) expire, after 90 days; the narration is a
+paid deliverable that dreamscapes replay, so it never expires. `pictures/*`
+expires after 365 — the
+pictures are kept so a future variant of replay could re-weave them; nothing in the pipeline
+deletes them. Replay itself (dreamscapes, below) needs only the narration, which is why the
+narration outlives the picture.
 The bucket stays private and audio bytes never stream through Lambda: delivery is a CloudFront
 signed URL for `jobs/*` and plain cached CloudFront objects for `assets/*` — see *frontend
 delivery* below. Download CORS lives on the distribution's response headers policy; the bucket
@@ -137,6 +141,17 @@ Two details are load-bearing:
 - **Rollback's status allow-list excludes `DONE` and `PENDING`.** A consumed credit is never
   refunded, and a job that never froze anything can't drive `frozen` negative — which matters
   because every task including `freeze_credit` itself catches to `rollback_credit`.
+
+`rollback_credit` has one job beyond the ledger: after the refund it sweeps `jobs/{id}/*`. A job
+that synthesized and then failed leaves a narration that is untagged (so never expires) and never
+`DONE` (so the user cannot delete it). The sweep is gated on the ledger's verdict — only when the
+job is `ROLLED_BACK`, never on the `DONE` replay that a commit-then-crash produces, which would
+delete a paid dreamscape's audio — and a failed sweep is logged, never raised, so it can never
+cost the refund. For this the rollback Lambda holds `s3:DeleteObject` on `jobs/*` and a
+`jobs/`-fenced `s3:ListBucket`; `generate_script` holds `s3:PutObjectTagging` alongside
+`s3:PutObject` because its tagged upload needs both. Both grants are pinned by
+`infra/tests/test_dreamscapes_grants.py`, together with the assertion that no task Lambda may
+delete under `pictures/`.
 
 ## Architecture — auth and API
 
@@ -307,6 +322,25 @@ for the design; the shape:
 5. `generate_script` weaves the summary and keywords into its prompt, and
    `GET /jobs/{id}` exposes `picture_keywords` so the waiting screen can show
    "In your picture, we found…" while the narration is still being made.
+
+### Dreamscapes — revisit and replay
+
+`GET /dreamscapes` pages the caller's DONE jobs, newest first. There is no
+GSI: job ids are uuid4 (SK order is not time order) and the partition is
+hard-bounded — every job costs a paid credit — so the API reads the partition
+with a light projection, sorts in the app, and paginates with a **value**
+cursor (`created_at|job_id` of the last item) that survives deletions where
+an offset would drift. Cards carry keywords (picture jobs) or a 40-character
+mood excerpt; never an audio URL — `GET /jobs/{id}` stays the only place that
+signs one, freshly on every call, so an old dream always plays.
+
+`DELETE /dreamscapes/{id}` soft-deletes (status `DELETED`, excluded from the
+list, 404 from the play route) and then sweeps `jobs/{id}/*`. DynamoDB first,
+S3 second: the worst failure is an invisible orphan object, not a visible
+card whose audio 404s — and since a `DELETED` job passes the update condition
+again, a retry re-runs the sweep and heals it. The API Lambda's delete grant
+covers `jobs/*` only; `pictures/*` expires by lifecycle rule alone
+(constraint 9), enforced in IAM rather than by good intentions.
 
 ### TTS providers — Volcano primary, Polly fallback
 

@@ -120,7 +120,10 @@ def get_job(job_id: str, user: CurrentUserDep, store: StoreDep) -> JobResponse:
     # Scoped to the caller's partition, so another user's job is simply absent
     # rather than forbidden -- no existence oracle.
     job = store.get_job(user.sub, job_id)
-    if job is None:
+    # A soft-deleted dreamscape is gone from the caller's point of view: no
+    # status leak, and above all no fresh signed URL for audio that the DELETE
+    # route has already cleaned up.
+    if job is None or job.status is JobStatus.DELETED:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found.")
 
     audio_url = None

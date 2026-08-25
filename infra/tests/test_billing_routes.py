@@ -125,6 +125,46 @@ def test_both_billing_routes_exist(api_template):
     assert "POST /billing/webhook" in keys
 
 
+def api_statements(template: assertions.Template) -> list[dict]:
+    return [
+        statement
+        for name, policy in template.find_resources("AWS::IAM::Policy").items()
+        if name.startswith("ApiFunction")
+        for statement in policy["Properties"]["PolicyDocument"]["Statement"]
+    ]
+
+
+def actions_of(statement: dict) -> set[str]:
+    action = statement.get("Action", [])
+    return {action} if isinstance(action, str) else set(action)
+
+
+def test_the_api_may_query_its_table_and_sweep_only_jobs(api_template):
+    """GET /dreamscapes is a Query, not a GetItem -- moto grants everything,
+    so a missing dynamodb:Query is only ever an AccessDenied in AWS. The
+    sweep grant is the shared helper's output: delete on jobs/*, listing
+    fenced to jobs/, nothing on pictures/* (constraint 9)."""
+    statements = api_statements(api_template)
+    assert any("dynamodb:Query" in actions_of(s) for s in statements)
+
+    delete = [s for s in statements if "s3:DeleteObject" in actions_of(s)]
+    listing = [s for s in statements if "s3:ListBucket" in actions_of(s)]
+    assert len(delete) == 1 and "jobs/*" in str(delete[0]["Resource"])
+    assert "pictures" not in str(delete[0]["Resource"])
+    assert len(listing) == 1
+    assert listing[0]["Condition"] == {"StringLike": {"s3:prefix": "jobs/*"}}
+
+
+def test_cors_preflight_admits_every_method_a_route_uses(api_template):
+    """The site and the API are different origins, so the browser preflights
+    DELETE; a method missing here is refused before the route is reached."""
+    [api] = api_template.find_resources("AWS::ApiGatewayV2::Api").values()
+    allowed = set(api["Properties"]["CorsConfiguration"]["AllowMethods"])
+    used = {key.split(" ")[0] for key in routes(api_template)}
+
+    assert used <= allowed, f"routes use {used - allowed} but CORS allows {allowed}"
+
+
 def test_every_fastapi_route_is_registered_on_the_gateway(api_template):
     """The FastAPI app only serves what API Gateway routes to it; a router
     mounted in main.py without an add_routes() here is a deployed 404 that no
@@ -135,6 +175,8 @@ def test_every_fastapi_route_is_registered_on_the_gateway(api_template):
         "POST /generate",
         "POST /pictures/upload",
         "GET /jobs/{job_id}",
+        "GET /dreamscapes",
+        "DELETE /dreamscapes/{job_id}",
         "POST /billing/checkout",
         "POST /billing/webhook",
     }
@@ -249,7 +291,15 @@ def test_the_api_lambda_may_update_the_entitlement_item(api_template):
         if str(action).startswith("dynamodb:")
     }
 
-    assert actions == {"dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:UpdateItem"}
+    # Query joined the set with the dreamscapes list (GET /dreamscapes reads
+    # the caller's JOB items by key prefix); the key condition still confines
+    # it to one partition.
+    assert actions == {
+        "dynamodb:GetItem",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+        "dynamodb:Query",
+    }
 
 
 def test_the_api_stack_does_not_import_from_billing(api_template):

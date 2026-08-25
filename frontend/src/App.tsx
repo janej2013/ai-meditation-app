@@ -1,5 +1,6 @@
 import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom'
 import AccountPage from './pages/AccountPage'
+import DreamscapesPage from './pages/DreamscapesPage'
 import FailedPage from './pages/FailedPage'
 import GeneratingPage from './pages/GeneratingPage'
 import HomePage from './pages/HomePage'
@@ -26,6 +27,7 @@ export default function App() {
               <Route path="/signup" element={<SignupPage />} />
               <Route path="/verify" element={<VerifyPage />} />
               <Route path="/account" element={<AccountPage />} />
+              <Route path="/dreamscapes" element={<DreamscapesPage />} />
               {/* Stripe return URLs; success lands on the account with a banner. */}
               <Route
                 path="/billing/success"

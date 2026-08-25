@@ -18,6 +18,7 @@ from typing import Any
 
 import boto3
 
+from shared.audio import narration_key
 from shared.db import EntitlementStore
 from shared.pipeline import PipelineState
 from shared.tts import get_provider
@@ -41,10 +42,6 @@ def _get_store() -> EntitlementStore:
     if _store is None:
         _store = EntitlementStore()
     return _store
-
-
-def narration_key(job_id: str) -> str:
-    return f"jobs/{job_id}/narration.mp3"
 
 
 def lambda_handler(event: dict[str, Any], context: object) -> dict[str, Any]:  # noqa: ARG001

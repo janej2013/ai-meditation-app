@@ -188,7 +188,7 @@ keywords 屏；DONE 时仍然带着，Player 可复用。`summary` 不返回前�
 s3.LifecycleRule(
     id="ExpireUploadedPictures",
     enabled=True,
-    # Pictures back the planned replay feature (re-listen without spending a
+    # Pictures are kept for a possible replay variant that re-weaves them (a
     # credit), so they live as long as the job they belong to. Nothing in the
     # pipeline deletes them; this rule is the only reaper.
     prefix="pictures/",

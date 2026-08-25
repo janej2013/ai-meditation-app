@@ -137,6 +137,26 @@ input::placeholder {
   cursor: pointer;
 }
 
+/* Home's "N dreamscapes collected" line — quiet, underlined, glows on touch. */
+.dream-entry {
+  background: none;
+  border: none;
+  padding: 8px 3px;
+  margin: -8px -3px;
+  font: 400 13px var(--font-sans);
+  color: oklch(0.735 0.018 275);
+  border-bottom: 1px solid oklch(0.72 0.02 275 / 0.22);
+  cursor: pointer;
+}
+.dream-entry:hover {
+  color: oklch(0.905 0.016 275);
+  text-shadow: 0 0 18px oklch(0.8 0.085 285 / 0.5);
+}
+.dream-entry:active {
+  color: oklch(0.955 0.014 275);
+  text-shadow: 0 0 22px oklch(0.8 0.085 285 / 0.75);
+}
+
 .btn-back {
   background: none;
   border: none;

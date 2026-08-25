@@ -136,6 +136,28 @@ def test_generate_writes_script_to_s3_and_returns_the_key(
     assert store.get_job(USER_ID, JOB).status is JobStatus.GENERATING
 
 
+def test_generate_tags_the_script_as_transient(
+    store, dynamodb_client, s3_bucket, audio_env, monkeypatch, state
+):
+    """The bucket's lifecycle rule expires only tag-marked intermediates; an
+    untagged script.txt would be immortal and the rule dead code."""
+    from .conftest import seed_entitlement
+
+    seed_entitlement(dynamodb_client, available=1)
+    store.create_job(USER_ID, JOB, MOOD, 10)
+    store.freeze_credit(USER_ID, JOB)
+    patch_store(monkeypatch, generate_handler, store)
+    bedrock = MagicMock()
+    bedrock.converse.return_value = bedrock_response(plausible_script())
+    monkeypatch.setattr(generate_handler, "_get_bedrock", lambda: bedrock)
+    monkeypatch.setattr(generate_handler, "_get_s3", lambda: s3_bucket)
+
+    key = generate_handler.lambda_handler(state, None)["script_key"]
+
+    tags = s3_bucket.get_object_tagging(Bucket=BUCKET, Key=key)["TagSet"]
+    assert tags == [{"Key": "transient", "Value": "true"}]
+
+
 def test_generate_reads_mood_from_dynamodb_not_the_payload(
     store, dynamodb_client, s3_bucket, audio_env, monkeypatch, state
 ):
@@ -599,7 +621,7 @@ def test_commit_sets_done_and_consumes_the_credit(store, dynamodb_client, monkey
     assert (entitlement.available, entitlement.frozen) == (0, 0)
 
 
-def test_rollback_refunds_and_is_idempotent(store, dynamodb_client, monkeypatch, state):
+def test_rollback_refunds_and_is_idempotent(store, dynamodb_client, audio_env, monkeypatch, state):
     from .conftest import seed_entitlement
 
     seed_entitlement(dynamodb_client, available=1)
@@ -615,7 +637,51 @@ def test_rollback_refunds_and_is_idempotent(store, dynamodb_client, monkeypatch,
     assert store.get_job(USER_ID, JOB).status is JobStatus.ROLLED_BACK
 
 
-def test_rollback_accepts_the_catch_error_envelope(store, dynamodb_client, monkeypatch, state):
+def test_rollback_sweeps_the_failed_jobs_audio(
+    store, dynamodb_client, s3_bucket, audio_env, monkeypatch, state
+):
+    """A job that synthesized and then failed leaves an untagged narration no
+    lifecycle rule reaps and no user can delete; rollback removes it."""
+    from .conftest import seed_entitlement
+
+    seed_entitlement(dynamodb_client, available=1)
+    store.create_job(USER_ID, JOB, MOOD, 10)
+    store.freeze_credit(USER_ID, JOB)
+    patch_store(monkeypatch, rollback_handler, store)
+    monkeypatch.setattr(rollback_handler, "_get_s3", lambda: s3_bucket)
+    for name in ("script.txt", "narration.mp3"):
+        s3_bucket.put_object(Bucket=BUCKET, Key=f"jobs/{JOB}/{name}", Body=b"x")
+    s3_bucket.put_object(Bucket=BUCKET, Key=f"pictures/{USER_ID}/p.jpg", Body=b"x")
+
+    rollback_handler.lambda_handler(state, None)
+
+    assert "Contents" not in s3_bucket.list_objects_v2(Bucket=BUCKET, Prefix=f"jobs/{JOB}/")
+    assert s3_bucket.list_objects_v2(Bucket=BUCKET, Prefix="pictures/")["KeyCount"] == 1
+    assert store.get_entitlement(USER_ID).available == 1
+
+
+def test_rollback_refunds_even_when_the_sweep_fails(
+    store, dynamodb_client, audio_env, monkeypatch, state
+):
+    from .conftest import seed_entitlement
+
+    seed_entitlement(dynamodb_client, available=1)
+    store.create_job(USER_ID, JOB, MOOD, 10)
+    store.freeze_credit(USER_ID, JOB)
+    patch_store(monkeypatch, rollback_handler, store)
+    s3 = MagicMock()
+    s3.list_objects_v2.side_effect = ClientError({"Error": {"Code": "500"}}, "ListObjectsV2")
+    monkeypatch.setattr(rollback_handler, "_get_s3", lambda: s3)
+
+    rollback_handler.lambda_handler(state, None)  # must not raise
+
+    assert store.get_entitlement(USER_ID).available == 1
+    assert store.get_job(USER_ID, JOB).status is JobStatus.ROLLED_BACK
+
+
+def test_rollback_accepts_the_catch_error_envelope(
+    store, dynamodb_client, audio_env, monkeypatch, state
+):
     """result_path="$.error" *merges* the error into the original input rather
     than replacing it, so the payload is a PipelineState with one extra key."""
     from .conftest import seed_entitlement
@@ -631,8 +697,13 @@ def test_rollback_accepts_the_catch_error_envelope(store, dynamodb_client, monke
     assert store.get_entitlement(USER_ID).available == 1
 
 
-def test_rollback_after_commit_does_not_refund(store, dynamodb_client, monkeypatch, state):
-    """A commit failure catches to rollback; a committed job must not refund."""
+def test_rollback_after_commit_neither_refunds_nor_sweeps(
+    store, dynamodb_client, s3_bucket, audio_env, monkeypatch, state
+):
+    """A commit whose transaction landed but whose invocation then failed
+    catches to rollback. The job is DONE and paid for: no refund -- and no
+    sweep, or the user's narration would be deleted out from under a
+    dreamscape that GET /jobs still signs URLs for."""
     from .conftest import seed_entitlement
 
     seed_entitlement(dynamodb_client, available=1)
@@ -640,11 +711,36 @@ def test_rollback_after_commit_does_not_refund(store, dynamodb_client, monkeypat
     store.freeze_credit(USER_ID, JOB)
     store.commit_credit(USER_ID, JOB)
     patch_store(monkeypatch, rollback_handler, store)
+    monkeypatch.setattr(rollback_handler, "_get_s3", lambda: s3_bucket)
+    s3_bucket.put_object(Bucket=BUCKET, Key=f"jobs/{JOB}/narration.mp3", Body=b"paid")
 
     rollback_handler.lambda_handler(state, None)
 
     entitlement = store.get_entitlement(USER_ID)
     assert (entitlement.available, entitlement.frozen) == (0, 0)
+    assert s3_bucket.list_objects_v2(Bucket=BUCKET, Prefix=f"jobs/{JOB}/")["KeyCount"] == 1
+    assert store.get_job(USER_ID, JOB).status is JobStatus.DONE
+
+
+def test_rollback_retry_sweeps_again(
+    store, dynamodb_client, s3_bucket, audio_env, monkeypatch, state
+):
+    """A rollback replay (already ROLLED_BACK) re-runs the sweep: that is
+    what heals a first attempt whose sweep failed."""
+    from .conftest import seed_entitlement
+
+    seed_entitlement(dynamodb_client, available=1)
+    store.create_job(USER_ID, JOB, MOOD, 10)
+    store.freeze_credit(USER_ID, JOB)
+    store.rollback_credit(USER_ID, JOB)
+    patch_store(monkeypatch, rollback_handler, store)
+    monkeypatch.setattr(rollback_handler, "_get_s3", lambda: s3_bucket)
+    s3_bucket.put_object(Bucket=BUCKET, Key=f"jobs/{JOB}/narration.mp3", Body=b"leftover")
+
+    rollback_handler.lambda_handler(state, None)
+
+    assert "Contents" not in s3_bucket.list_objects_v2(Bucket=BUCKET, Prefix=f"jobs/{JOB}/")
+    assert store.get_entitlement(USER_ID).available == 1  # refunded once, not twice
 
 
 def test_pipeline_state_rejects_out_of_range_duration():

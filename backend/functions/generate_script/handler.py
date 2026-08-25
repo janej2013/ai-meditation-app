@@ -15,6 +15,7 @@ from typing import Any
 import boto3
 from botocore.exceptions import ClientError
 
+from shared.audio import TRANSIENT_TAGGING, script_key
 from shared.db import EntitlementStore
 from shared.models import PictureDescription
 from shared.pipeline import PipelineState, ScriptGenerationError, raise_for_bedrock_error
@@ -70,10 +71,6 @@ def _get_s3() -> Any:
     return _s3
 
 
-def script_key(job_id: str) -> str:
-    return f"jobs/{job_id}/script.txt"
-
-
 def lambda_handler(event: dict[str, Any], context: object) -> dict[str, Any]:  # noqa: ARG001
     state = PipelineState.model_validate(event)
     store = _get_store()
@@ -104,6 +101,9 @@ def lambda_handler(event: dict[str, Any], context: object) -> dict[str, Any]:  #
         Key=key,
         Body=script.encode("utf-8"),
         ContentType="text/plain; charset=utf-8",
+        # The bucket's ExpireJobIntermediates lifecycle rule keys on this tag:
+        # script.txt is transient, narration.mp3 (untagged) never expires.
+        Tagging=TRANSIENT_TAGGING,
     )
     store.set_job_script_key(state.user_id, state.job_id, key)
 

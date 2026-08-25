@@ -294,6 +294,66 @@ class EntitlementStore:
             values={":key": audio_key, ":now": _now_iso()},
         )
 
+    def list_done_jobs(self, user_id: str) -> list[Job]:
+        """Every DONE job in the caller's partition, unsorted.
+
+        Reads the whole partition on purpose: job_ids are uuid4, so SK order
+        is not time order, and the partition is hard-bounded (every job costs
+        a paid credit -- hundreds at most, a few hundred bytes each with this
+        projection). A GSI would double the write bill for a query this small;
+        per CLAUDE.md, adding one needs a proposal first, and this method is
+        the argument against. Sorting and pagination happen in the caller.
+
+        The status filter trims transport only -- correctness never depends on
+        a FilterExpression.
+        """
+        jobs: list[Job] = []
+        kwargs: dict[str, Any] = {
+            "TableName": self.table_name,
+            "KeyConditionExpression": "PK = :pk AND begins_with(SK, :job)",
+            "FilterExpression": "#status = :done",
+            "ExpressionAttributeNames": dict(_STATUS_NAMES),
+            "ExpressionAttributeValues": _marshal(
+                {":pk": user_pk(user_id), ":job": "JOB#", ":done": JobStatus.DONE.value}
+            ),
+            "ProjectionExpression": (
+                "job_id, #status, picture_keywords, mood_text, "
+                "duration_minutes, picture_key, created_at"
+            ),
+        }
+        while True:
+            response = self.client.query(**kwargs)
+            jobs.extend(
+                Job.model_validate({**_unmarshal(item), "user_id": user_id})
+                for item in response.get("Items", [])
+            )
+            last = response.get("LastEvaluatedKey")
+            if not last:
+                return jobs
+            kwargs["ExclusiveStartKey"] = last
+
+    def mark_job_deleted(self, user_id: str, job_id: str) -> bool:
+        """DONE -> DELETED, idempotently. True when the job is now DELETED.
+
+        A job already DELETED passes the condition again on purpose: that is
+        the retry anchor -- the caller re-runs the S3 cleanup either way, so a
+        delete whose S3 step failed last time heals on the next attempt. False
+        means the item is missing or in flight, which the route treats as 404.
+        This is a status update, not a credit mutation (constraint 1 untouched).
+        """
+        return self._update_job(
+            user_id,
+            job_id,
+            update="SET #status = :deleted, updated_at = :now",
+            condition="attribute_exists(PK) AND #status IN (:done, :deleted)",
+            names=dict(_STATUS_NAMES),
+            values={
+                ":deleted": JobStatus.DELETED.value,
+                ":done": JobStatus.DONE.value,
+                ":now": _now_iso(),
+            },
+        )
+
     def _update_job(
         self,
         user_id: str,
@@ -303,8 +363,12 @@ class EntitlementStore:
         condition: str,
         values: dict[str, Any],
         names: dict[str, str] | None = None,
-    ) -> None:
+    ) -> bool:
         """Conditional update on a JOB item; a failed condition is a no-op.
+
+        Returns True when the update was applied, False when the condition
+        rejected it -- callers that need to know (the delete route's 404)
+        read that; the pipeline's status writers ignore it.
 
         Every condition here is ``attribute_exists(PK)`` plus, sometimes, a
         status allow-list, and those two halves fail for very different reasons.
@@ -337,11 +401,13 @@ class EntitlementStore:
             item = (getattr(exc, "response", None) or {}).get("Item")
             if not item:
                 logger.warning("job update skipped: no job item job_id=%s", job_id)
-                return
+                return False
             # Read the one attribute directly rather than unmarshalling the
             # whole item, which holds mood_text (constraint 7).
             status = item.get("status", {}).get("S", "UNKNOWN")
             logger.info("job update skipped (replay) job_id=%s status=%s", job_id, status)
+            return False
+        return True
 
     # ------------------------------------------------------------------
     # Credit operations
@@ -402,6 +468,7 @@ class EntitlementStore:
                 JobStatus.DONE,
                 JobStatus.FAILED,
                 JobStatus.ROLLED_BACK,
+                JobStatus.DELETED,
             },
             on_entitlement_failure=InsufficientCreditsError(
                 f"user has no available credit to freeze for job {job_id}"
@@ -451,7 +518,9 @@ class EntitlementStore:
             operation="commit",
             entitlement_update=entitlement_update,
             job_update=job_update,
-            replay_statuses={JobStatus.DONE},
+            # DELETED: the user let the finished dreamscape go before a retried
+            # commit landed -- still a replay, not a state error.
+            replay_statuses={JobStatus.DONE, JobStatus.DELETED},
             on_entitlement_failure=CreditLedgerError(
                 f"no frozen credit to commit for job {job_id}"
             ),
@@ -506,7 +575,12 @@ class EntitlementStore:
             job_update=job_update,
             # A job that never froze is nothing to refund, so treat PENDING and
             # a missing job item as a replay rather than an error.
-            replay_statuses={JobStatus.PENDING, JobStatus.DONE, JobStatus.ROLLED_BACK},
+            replay_statuses={
+                JobStatus.PENDING,
+                JobStatus.DONE,
+                JobStatus.ROLLED_BACK,
+                JobStatus.DELETED,
+            },
             replay_when_job_missing=True,
             on_entitlement_failure=CreditLedgerError(
                 f"no frozen credit to roll back for job {job_id}"
