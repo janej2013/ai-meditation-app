@@ -7,6 +7,10 @@ Key schema (see CLAUDE.md):
     SK = ENTITLEMENT          available, frozen, plan, period_end
     SK = SUB#<stripe_subscription_id>
     SK = JOB#<job_id>         status, audio_key, picture_*, timestamps
+    SK = AGENT#<session_id>   companion session header: status, turn, engine, in_flight
+    SK = AGENT#<sid>#T<nnnn>  one checkpoint per turn (user content)
+    SK = MEMORY               cross-session insights (user content)
+    SK = AGENTQUOTA#<yyyy-mm> monthly session counter
 
 These models are the contract between Step Functions tasks: every task Lambda
 validates its payload on entry.
@@ -16,8 +20,9 @@ from __future__ import annotations
 
 from datetime import datetime
 from enum import StrEnum
+from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 ENTITLEMENT_SK = "ENTITLEMENT"
 PROFILE_SK = "PROFILE"
@@ -231,3 +236,141 @@ class CreditOperationResult(BaseModel):
     applied: bool
     job_status: JobStatus
     entitlement: Entitlement
+
+
+# ----------------------------------------------------------------------
+# Companion agent (docs/agent-runner-plan.md §2)
+# ----------------------------------------------------------------------
+
+# A transcript is the most sensitive thing this table holds; it is kept only
+# as long as a session could plausibly be resumed.
+AGENT_SESSION_TTL_DAYS = 30
+# Two months, so a counter is still readable at the start of the next one.
+AGENT_QUOTA_TTL_DAYS = 62
+# A turn is one Lambda invocation (120 s); a claim older than this belongs
+# to an invocation that can only have died, so a new one may take over.
+AGENT_IN_FLIGHT_TIMEOUT_SECONDS = 180
+AGENT_INSIGHTS_MAX = 20
+AGENT_SESSIONS_PER_MONTH = 30
+
+MEMORY_SK = "MEMORY"
+
+AgentEngineName = Literal["native", "langgraph"]
+
+
+def agent_session_sk(session_id: str) -> str:
+    return f"AGENT#{session_id}"
+
+
+def agent_turns_prefix(session_id: str) -> str:
+    """The key prefix shared by a session's turn items and by nothing else:
+    the header is ``AGENT#<sid>`` with no trailing ``#T``."""
+    return f"AGENT#{session_id}#T"
+
+
+def agent_turn_sk(session_id: str, turn: int) -> str:
+    """Zero-padded so that sort-key order is turn order."""
+    return f"{agent_turns_prefix(session_id)}{turn:04d}"
+
+
+def agent_quota_sk(month: str) -> str:
+    """``month`` is ``YYYY-MM``; one counter per calendar month."""
+    return f"AGENTQUOTA#{month}"
+
+
+class AgentSessionStatus(StrEnum):
+    ACTIVE = "ACTIVE"
+    FINALIZED = "FINALIZED"  # the terminal tool started a generation job
+    ABANDONED = "ABANDONED"  # the user left; nothing was charged
+    FAILED = "FAILED"
+
+
+class AgentUsage(BaseModel):
+    """Token counters, summed over a session on the header item."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cache_read_tokens: int = 0
+    cache_write_tokens: int = 0
+
+
+_USAGE_ATTRIBUTE_PREFIX = "usage_"
+
+
+class AgentSession(BaseModel):
+    """A companion session's header: where it is up to, and who holds it.
+
+    ``turn`` counts committed turns and is the fencing token every write
+    conditions on; ``in_flight`` marks the invocation currently running a
+    turn. Token counters live as flat ``usage_*`` attributes on the item so
+    that ``commit_turn`` can ``ADD`` to them, and are folded into ``usage``
+    on read.
+    """
+
+    model_config = ConfigDict(extra="ignore", protected_namespaces=())
+
+    user_id: str
+    session_id: str
+    status: AgentSessionStatus
+    turn: int = Field(default=0, ge=0)
+    engine: AgentEngineName
+    model_id: str
+    in_flight: datetime | None = None
+    job_id: str | None = None
+    usage: AgentUsage = Field(default_factory=AgentUsage)
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _fold_usage(cls, data: Any) -> Any:
+        if not isinstance(data, dict) or "usage" in data:
+            return data
+        usage = {
+            key.removeprefix(_USAGE_ATTRIBUTE_PREFIX): value
+            for key, value in data.items()
+            if key.startswith(_USAGE_ATTRIBUTE_PREFIX)
+        }
+        return {**data, "usage": usage} if usage else data
+
+
+class AgentTurn(BaseModel):
+    """One turn's checkpoint. Everything but the counters is user content:
+    on this item, never in a log (constraint 7).
+
+    Content blocks are stored in Converse wire form (``agent.contracts``
+    spells the mapping) so that any engine can replay them unchanged.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    session_id: str
+    turn: int = Field(ge=0)
+    user_text: str
+    assistant_content: list[dict[str, Any]]
+    tool_calls: list[dict[str, Any]] = Field(default_factory=list)
+    usage: AgentUsage = Field(default_factory=AgentUsage)
+    stop_reason: str
+    # Set when this turn's tool round closed the session; the rebuilt
+    # history then ends on the tool results rather than an assistant reply.
+    finalized_job_id: str | None = None
+    created_at: datetime | None = None
+
+
+class Insight(BaseModel):
+    """One thing the agent was told to remember. User content."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    text: str
+    created_at: datetime
+    session_id: str
+
+
+class Memory(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    insights: list[Insight] = Field(default_factory=list)
+    updated_at: datetime | None = None

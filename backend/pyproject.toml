@@ -40,6 +40,10 @@ dev = [
 packages = [
     "shared",
     "shared.tts",
+    "agent",
+    "agent.tools",
+    "agent.native",
+    "agent.native.llm",
     "api",
     "api.routers",
     "functions",

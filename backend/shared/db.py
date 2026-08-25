@@ -15,30 +15,47 @@ retry with the same ``job_id`` -- which Step Functions will do.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
 import boto3
 from boto3.dynamodb.types import TypeDeserializer, TypeSerializer
 
 from shared.models import (
+    AGENT_IN_FLIGHT_TIMEOUT_SECONDS,
+    AGENT_INSIGHTS_MAX,
+    AGENT_QUOTA_TTL_DAYS,
+    AGENT_SESSION_TTL_DAYS,
     DEFAULT_PLAN,
     ENTITLEMENT_SK,
     FREE_SIGNUP_CREDITS,
+    MEMORY_SK,
     PICTURE_DESCRIBE_MAX_ATTEMPTS,
     PICTURE_DESCRIBE_TIMEOUT_SECONDS,
     PICTURE_ITEM_TTL_DAYS,
     PROFILE_SK,
+    AgentEngineName,
+    AgentSession,
+    AgentSessionStatus,
+    AgentTurn,
     BillingOperationResult,
     CreditOperationResult,
     Entitlement,
+    Insight,
     Job,
     JobStatus,
+    Memory,
     Picture,
     PictureDescription,
     PictureStatus,
+    agent_quota_sk,
+    agent_session_sk,
+    agent_turn_sk,
+    agent_turns_prefix,
     event_sk,
     job_sk,
     picture_sk,
@@ -90,6 +107,20 @@ class JobStateError(CreditLedgerError):
     """The job is not in a state that allows the requested transition."""
 
 
+class AgentTurnBusyError(Exception):
+    """The session is not ACTIVE, belongs to another engine, or another
+    invocation holds a live claim on it. The harness answers 409."""
+
+
+class MemoryContentionError(Exception):
+    """Three consecutive optimistic-lock failures on the MEMORY item."""
+
+
+# How many times append_insight re-reads after losing the optimistic lock.
+# Contention is one user's own parallel tool calls -- two or three at most.
+_MEMORY_WRITE_ATTEMPTS = 3
+
+
 def _marshal(data: dict[str, Any]) -> dict[str, Any]:
     """Marshal a plain dict (item key or expression values) into AttributeValues."""
     return {key: _serializer.serialize(value) for key, value in data.items()}
@@ -102,6 +133,24 @@ def _unmarshal(item: dict[str, Any]) -> dict[str, Any]:
 
 def _now_iso() -> str:
     return datetime.now(UTC).isoformat()
+
+
+def _dynamo_json(value: Any) -> Any:
+    """JSON-shaped data as DynamoDB accepts it: floats become Decimals,
+    which the serializer wants, and nothing else changes."""
+    return json.loads(json.dumps(value), parse_float=Decimal)
+
+
+def _plain(value: Any) -> Any:
+    """The inverse: Decimals back to int or float, recursively, so a
+    read-back item can be handed to json.dumps and to the model layer."""
+    if isinstance(value, Decimal):
+        return int(value) if value == value.to_integral_value() else float(value)
+    if isinstance(value, dict):
+        return {k: _plain(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_plain(v) for v in value]
+    return value
 
 
 def _ttl_epoch(days: int) -> int:
@@ -1035,6 +1084,366 @@ class EntitlementStore:
         if entitlement is None:
             return Entitlement(user_id=user_id)
         return entitlement
+
+    # ------------------------------------------------------------------
+    # Companion agent: sessions, turns, memory, quota
+    # ------------------------------------------------------------------
+    #
+    # DynamoDB actions, for the harness's IAM grant (A5):
+    #   GetItem     get_agent_session, get_memory, append_insight (its read)
+    #   PutItem     create_agent_session, append_insight
+    #   UpdateItem  reserve_agent_session, claim_turn, mark_agent_session
+    #   Query       list_turns
+    #   DeleteItem  clear_memory
+    #   commit_turn is a TransactWriteItems of one Put and one Update.
+
+    def reserve_agent_session(self, user_id: str, month: str, cap: int) -> bool:
+        """Count a new session against the month; False when the cap is hit.
+
+        A dedicated AGENTQUOTA item rather than a counter on ENTITLEMENT: the
+        credit transactions address their items by position (module
+        docstring) and must not grow a third concern, and a per-month key
+        expires by itself. ``ADD`` creates the counter on first use, so the
+        condition has to admit the absent attribute explicitly.
+        """
+        try:
+            self.client.update_item(
+                TableName=self.table_name,
+                Key=_marshal({"PK": user_pk(user_id), "SK": agent_quota_sk(month)}),
+                UpdateExpression=(
+                    "ADD sessions :one "
+                    "SET expires_at = if_not_exists(expires_at, :ttl), "
+                    "entity_type = if_not_exists(entity_type, :type)"
+                ),
+                ConditionExpression="attribute_not_exists(sessions) OR sessions < :cap",
+                ExpressionAttributeValues=_marshal(
+                    {
+                        ":one": 1,
+                        ":cap": cap,
+                        ":ttl": _ttl_epoch(AGENT_QUOTA_TTL_DAYS),
+                        ":type": "AGENT_QUOTA",
+                    }
+                ),
+            )
+        except self.client.exceptions.ConditionalCheckFailedException:
+            logger.info("agent session quota reached month=%s", month)
+            return False
+        return True
+
+    def create_agent_session(
+        self, user_id: str, session_id: str, *, engine: AgentEngineName, model_id: str
+    ) -> bool:
+        """Open a session at turn 0. False if the id was already used."""
+        now = _now_iso()
+        return self._put_if_absent(
+            {
+                "PK": user_pk(user_id),
+                "SK": agent_session_sk(session_id),
+                "entity_type": "AGENT_SESSION",
+                "session_id": session_id,
+                "status": AgentSessionStatus.ACTIVE.value,
+                "turn": 0,
+                "engine": engine,
+                "model_id": model_id,
+                "usage_input_tokens": 0,
+                "usage_output_tokens": 0,
+                "usage_cache_read_tokens": 0,
+                "usage_cache_write_tokens": 0,
+                "created_at": now,
+                "updated_at": now,
+                "expires_at": _ttl_epoch(AGENT_SESSION_TTL_DAYS),
+            }
+        )
+
+    def get_agent_session(self, user_id: str, session_id: str) -> AgentSession | None:
+        response = self.client.get_item(
+            TableName=self.table_name,
+            Key=_marshal({"PK": user_pk(user_id), "SK": agent_session_sk(session_id)}),
+            ConsistentRead=True,
+        )
+        item = response.get("Item")
+        if not item:
+            return None
+        return AgentSession.model_validate({**_plain(_unmarshal(item)), "user_id": user_id})
+
+    def claim_turn(
+        self, user_id: str, session_id: str, *, engine: AgentEngineName, now: datetime
+    ) -> AgentSession:
+        """Take the session for one turn; the session as it stands if won.
+
+        The claim is the fencing token's first half (``commit_turn`` is the
+        second): a live ``in_flight`` stamp keeps a second invocation --
+        a double-submitted message, a client retry -- from running the same
+        turn concurrently, and a stale one is taken over because the
+        invocation that set it is past its own timeout and can only be dead.
+        The engine must match so one session is never processed by both
+        engines in alternation, which would make their metrics meaningless.
+
+        Stamps are ISO-8601 UTC with microseconds, so string comparison is
+        time comparison. Raises AgentTurnBusyError on any rejected condition;
+        the harness does not need to know which.
+        """
+        if now.tzinfo is None:
+            raise ValueError("now must be timezone-aware: it is compared with stored UTC stamps")
+        now_utc = now.astimezone(UTC)
+        stamp = now_utc.isoformat(timespec="microseconds")
+        stale = (now_utc - timedelta(seconds=AGENT_IN_FLIGHT_TIMEOUT_SECONDS)).isoformat(
+            timespec="microseconds"
+        )
+        try:
+            response = self.client.update_item(
+                TableName=self.table_name,
+                Key=_marshal({"PK": user_pk(user_id), "SK": agent_session_sk(session_id)}),
+                UpdateExpression="SET in_flight = :now, updated_at = :now",
+                ConditionExpression=(
+                    "attribute_exists(PK) AND #status = :active AND engine = :engine "
+                    "AND (attribute_not_exists(in_flight) OR in_flight < :stale)"
+                ),
+                ExpressionAttributeNames=dict(_STATUS_NAMES),
+                ExpressionAttributeValues=_marshal(
+                    {
+                        ":now": stamp,
+                        ":active": AgentSessionStatus.ACTIVE.value,
+                        ":engine": engine,
+                        ":stale": stale,
+                    }
+                ),
+                ReturnValues="ALL_NEW",
+            )
+        except self.client.exceptions.ConditionalCheckFailedException as exc:
+            logger.info("agent turn claim rejected session_id=%s", session_id)
+            raise AgentTurnBusyError(f"session {session_id} is busy or closed") from exc
+        return AgentSession.model_validate(
+            {**_plain(_unmarshal(response["Attributes"])), "user_id": user_id}
+        )
+
+    def commit_turn(
+        self,
+        user_id: str,
+        session_id: str,
+        *,
+        expected_turn: int,
+        checkpoint: AgentTurn,
+        finalized_job_id: str | None = None,
+    ) -> bool:
+        """Persist a turn and advance the session, atomically. False on replay.
+
+        One transaction: the T-item is put only if absent, and the header
+        moves ``turn`` forward only from ``expected_turn`` and only while a
+        claim is held. Either condition failing cancels both writes, so a
+        late commit from an invocation whose claim was taken over changes
+        nothing -- that is the fencing token's second half. Token counters
+        are ``ADD``ed to the flat ``usage_*`` attributes.
+        """
+        if checkpoint.turn != expected_turn:
+            raise ValueError(
+                f"checkpoint is for turn {checkpoint.turn}, commit expected {expected_turn}"
+            )
+        now = _now_iso()
+        turn_item = {
+            key: value
+            for key, value in _dynamo_json(checkpoint.model_dump(mode="json")).items()
+            if value is not None
+        }
+        turn_item.update(
+            {
+                "PK": user_pk(user_id),
+                "SK": agent_turn_sk(session_id, checkpoint.turn),
+                "entity_type": "AGENT_TURN",
+                "expires_at": _ttl_epoch(AGENT_SESSION_TTL_DAYS),
+            }
+        )
+
+        update = "SET #turn = #turn + :one, updated_at = :now"
+        # DynamoDB rejects a declared name that no expression uses, so the
+        # status alias is added only on the finalizing path.
+        names = {"#turn": "turn"}
+        values: dict[str, Any] = {
+            ":one": 1,
+            ":now": now,
+            ":expected": expected_turn,
+            ":in": checkpoint.usage.input_tokens,
+            ":out": checkpoint.usage.output_tokens,
+            ":cr": checkpoint.usage.cache_read_tokens,
+            ":cw": checkpoint.usage.cache_write_tokens,
+        }
+        if finalized_job_id is not None:
+            update += ", #status = :finalized, job_id = :job"
+            names.update(_STATUS_NAMES)
+            values[":finalized"] = AgentSessionStatus.FINALIZED.value
+            values[":job"] = finalized_job_id
+        update += (
+            " ADD usage_input_tokens :in, usage_output_tokens :out, "
+            "usage_cache_read_tokens :cr, usage_cache_write_tokens :cw REMOVE in_flight"
+        )
+
+        items: list[TransactWriteItemTypeDef] = [
+            {
+                "Put": {
+                    "TableName": self.table_name,
+                    "Item": _marshal(turn_item),
+                    "ConditionExpression": "attribute_not_exists(PK)",
+                }
+            },
+            {
+                "Update": {
+                    "TableName": self.table_name,
+                    "Key": _marshal({"PK": user_pk(user_id), "SK": agent_session_sk(session_id)}),
+                    "UpdateExpression": update,
+                    "ConditionExpression": (
+                        "attribute_exists(PK) AND #turn = :expected AND attribute_exists(in_flight)"
+                    ),
+                    "ExpressionAttributeNames": names,
+                    "ExpressionAttributeValues": _marshal(values),
+                }
+            },
+        ]
+        try:
+            self.client.transact_write_items(TransactItems=items)
+        except self.client.exceptions.TransactionCanceledException as exc:
+            reasons = _cancellation_reasons(exc)
+            logger.info(
+                "agent turn commit skipped session_id=%s turn=%d turn_item_failed=%s "
+                "header_failed=%s",
+                session_id,
+                expected_turn,
+                _condition_failed(reasons, 0),
+                _condition_failed(reasons, 1),
+            )
+            return False
+        # Counts only (constraint 7).
+        logger.info(
+            "agent turn committed session_id=%s turn=%d tool_rounds=%d finalized=%s",
+            session_id,
+            expected_turn,
+            len(checkpoint.tool_calls),
+            finalized_job_id is not None,
+        )
+        return True
+
+    def list_turns(self, user_id: str, session_id: str) -> list[AgentTurn]:
+        """Every checkpoint of a session, in turn order.
+
+        Key-prefix query, paginated to completion: a session is at most
+        MAX_TURNS items, but a page limit is a client-side knob and the
+        loop must not depend on the default being large enough.
+        """
+        turns: list[AgentTurn] = []
+        kwargs: dict[str, Any] = {
+            "TableName": self.table_name,
+            "KeyConditionExpression": "PK = :pk AND begins_with(SK, :prefix)",
+            "ExpressionAttributeValues": _marshal(
+                {":pk": user_pk(user_id), ":prefix": agent_turns_prefix(session_id)}
+            ),
+            "ConsistentRead": True,
+        }
+        while True:
+            response = self.client.query(**kwargs)
+            turns.extend(
+                AgentTurn.model_validate(_plain(_unmarshal(item)))
+                for item in response.get("Items", [])
+            )
+            last = response.get("LastEvaluatedKey")
+            if not last:
+                break
+            kwargs["ExclusiveStartKey"] = last
+        turns.sort(key=lambda t: t.turn)
+        return turns
+
+    def mark_agent_session(self, user_id: str, session_id: str, status: AgentSessionStatus) -> bool:
+        """ACTIVE -> ABANDONED | FAILED, idempotently; releases any claim.
+
+        FINALIZED is not reachable here: only ``commit_turn`` writes it, in
+        the same transaction as the turn that earned it.
+        """
+        if status not in (AgentSessionStatus.ABANDONED, AgentSessionStatus.FAILED):
+            raise ValueError(f"mark_agent_session cannot set {status}")
+        return self._conditional_update(
+            user_id,
+            agent_session_sk(session_id),
+            kind="agent_session",
+            update="SET #status = :target, updated_at = :now REMOVE in_flight",
+            condition="attribute_exists(PK) AND #status IN (:active, :target)",
+            names=dict(_STATUS_NAMES),
+            values={
+                ":target": status.value,
+                ":active": AgentSessionStatus.ACTIVE.value,
+                ":now": _now_iso(),
+            },
+        )
+
+    def get_memory(self, user_id: str) -> Memory:
+        response = self.client.get_item(
+            TableName=self.table_name,
+            Key=_marshal({"PK": user_pk(user_id), "SK": MEMORY_SK}),
+            ConsistentRead=True,
+        )
+        item = response.get("Item")
+        if not item:
+            return Memory()
+        return Memory.model_validate(_plain(_unmarshal(item)))
+
+    def append_insight(self, user_id: str, text: str, session_id: str, now: datetime) -> bool:
+        """Remember one thing about the user. False if already remembered.
+
+        Read-modify-write under an optimistic lock on ``updated_at``: two
+        parallel tool calls in one turn may both append, and the loser
+        re-reads rather than overwriting. Duplicates compare case-folded and
+        whitespace-normalised, and the list is capped FIFO so the memory
+        block the prompt carries stays bounded.
+        """
+        if now.tzinfo is None:
+            raise ValueError("now must be timezone-aware")
+        cleaned = " ".join(text.split())
+        if not cleaned:
+            return False
+        key = {"PK": user_pk(user_id), "SK": MEMORY_SK}
+        for _ in range(_MEMORY_WRITE_ATTEMPTS):
+            response = self.client.get_item(
+                TableName=self.table_name, Key=_marshal(key), ConsistentRead=True
+            )
+            item = response.get("Item")
+            insights = Memory.model_validate(_plain(_unmarshal(item))).insights if item else []
+            if any(i.text.casefold() == cleaned.casefold() for i in insights):
+                return False
+            insights.append(Insight(text=cleaned, created_at=now, session_id=session_id))
+            insights = insights[-AGENT_INSIGHTS_MAX:]
+
+            new_item = {
+                **key,
+                "entity_type": "MEMORY",
+                "insights": [i.model_dump(mode="json") for i in insights],
+                "updated_at": now.astimezone(UTC).isoformat(timespec="microseconds"),
+            }
+            if item is None:
+                condition = "attribute_not_exists(PK)"
+                values: dict[str, Any] = {}
+            else:
+                # The stored string itself, not a re-rendered datetime: the
+                # lock is an exact match.
+                condition = "updated_at = :seen"
+                values = {":seen": item["updated_at"]["S"]}
+            try:
+                self.client.put_item(
+                    TableName=self.table_name,
+                    Item=_marshal(new_item),
+                    ConditionExpression=condition,
+                    **({"ExpressionAttributeValues": _marshal(values)} if values else {}),
+                )
+            except self.client.exceptions.ConditionalCheckFailedException:
+                continue
+            logger.info("insight saved session_id=%s count=%d", session_id, len(insights))
+            return True
+        raise MemoryContentionError("memory item kept changing underneath the write")
+
+    def clear_memory(self, user_id: str) -> None:
+        """Forget everything. Deleting an absent item succeeds, so this is
+        idempotent by construction."""
+        self.client.delete_item(
+            TableName=self.table_name,
+            Key=_marshal({"PK": user_pk(user_id), "SK": MEMORY_SK}),
+        )
+        logger.info("memory cleared")
 
 
 def _cancellation_reasons(exc: Exception) -> list[dict[str, Any]]:

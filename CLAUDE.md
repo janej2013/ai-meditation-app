@@ -66,6 +66,10 @@ frontend/           React + Vite PWA
   - `SK = SUB#<stripe_subscription_id>`
   - `SK = PICTURE#<picture_id>` — fields: `status` (PENDING | DESCRIBED | FAILED), `keywords`, `summary`, `expires_at` (TTL); written by `POST /pictures/upload` and the picture state machine, before any job exists
   - `SK = JOB#<job_id>` — fields: `status` (PENDING | FROZEN | GENERATING | DONE | FAILED | ROLLED_BACK | DELETED), `audio_key`, `mood_text` (words jobs) or `picture_key` / `picture_keywords` / `picture_summary` (picture jobs), timestamps
+  - `SK = AGENT#<session_id>` — companion session header: `status` (ACTIVE | FINALIZED | ABANDONED | FAILED), `turn` (committed turns; the fencing token), `engine`, `in_flight`, `usage_*`, `expires_at` (TTL)
+  - `SK = AGENT#<session_id>#T<nnnn>` — one checkpoint per turn: the user text, the assistant content and every tool round in Converse wire form. User content: never logged
+  - `SK = MEMORY` — insights the agent saved across sessions. User content; the user can view and clear it
+  - `SK = AGENTQUOTA#<yyyy-mm>` — monthly companion-session counter, `expires_at` (TTL)
 - Freeze: `available >= 1` condition → `available -= 1, frozen += 1`.
 - Commit: `frozen >= 1` condition → `frozen -= 1`.
 - Rollback: condition on job status not already committed → `frozen -= 1, available += 1`.
