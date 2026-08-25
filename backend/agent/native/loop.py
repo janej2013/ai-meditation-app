@@ -138,12 +138,15 @@ class NativeEngine:
                 return self._refused(rounds, tool_log, usage, inp.turn, iterations)
 
         assert final is not None  # the loop body ran at least once
+        # A turn that ended on its terminal tool is complete, whatever the
+        # model's last stop reason was.
+        stop_reason = "end_turn" if finalized is not None else final.stop_reason
         logger.info(
             "turn done turn=%d iterations=%d tools=%d stop_reason=%s finalized=%s",
             inp.turn,
             iterations,
             len(tool_log),
-            final.stop_reason,
+            stop_reason,
             finalized is not None,
         )
         return TurnResult(
@@ -151,7 +154,7 @@ class NativeEngine:
             rounds=rounds,
             tool_log=tool_log,
             usage=usage,
-            stop_reason="end_turn" if finalized is not None else final.stop_reason,
+            stop_reason=stop_reason,
             finalized=finalized,
         )
 
