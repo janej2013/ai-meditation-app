@@ -32,6 +32,21 @@ from agent.contracts import (
 ONE_CALL = Usage(input_tokens=10, output_tokens=5)
 
 
+@dataclass(frozen=True)
+class Pause:
+    """Not an LLM event: the fake sleeps here, so a test can watch what the
+    harness does while the model is silent (heartbeats)."""
+
+    seconds: float
+
+
+@dataclass(frozen=True)
+class Raise:
+    """Not an LLM event: the fake raises here, as a failing provider would."""
+
+    exc: Exception
+
+
 @dataclass
 class ProviderCall:
     system: list[SystemBlock]
@@ -46,7 +61,7 @@ class ProviderCall:
 
 
 class FakeProvider:
-    def __init__(self, script: list[list[LLMEvent]]) -> None:
+    def __init__(self, script: list[list[Any]]) -> None:
         self._script = [list(events) for events in script]
         self.calls: list[ProviderCall] = []
 
@@ -72,7 +87,17 @@ class FakeProvider:
             )
         )
         for event in self._script.pop(0):
+            if isinstance(event, Pause):
+                await asyncio.sleep(event.seconds)
+                continue
+            if isinstance(event, Raise):
+                raise event.exc
             yield event
+
+    def queue(self, *turns: list) -> None:
+        """Append scripted turns after construction (the runner tests build
+        the provider once per test and script it per request)."""
+        self._script.extend(list(t) for t in turns)
 
 
 def text_reply(*chunks: str, usage: Usage = ONE_CALL) -> list[LLMEvent]:

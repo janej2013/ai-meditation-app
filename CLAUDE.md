@@ -39,6 +39,8 @@ backend/
                     describe_picture (picture machine, pre-job)
                     mix_audio/ is retained but NOT deployed (browser mixes
                     instead); init_user/ is a Cognito trigger, not a task
+  agent/            Companion agent: contract, tools, prompt, native engine (docs/agent-runner-plan.md)
+  agent_runner/     The agent's harness: FastAPI + SSE on Lambda Web Adapter (container)
   shared/           Shared package (Lambda layer): models.py, db.py, tts/
   tests/
 frontend/           React + Vite PWA

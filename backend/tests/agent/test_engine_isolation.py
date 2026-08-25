@@ -62,6 +62,18 @@ def test_agent_never_imports_the_http_layer(path: Path):
     assert not offending, f"{path.name} imports {sorted(offending)}"
 
 
+@pytest.mark.parametrize(
+    "path",
+    [p for p in ALL_AGENT_FILES if p.name not in ("local_harness.py", "smoke.py", "cli.py")],
+    ids=lambda p: str(p.relative_to(AGENT_DIR)),
+)
+def test_agent_never_imports_the_harness(path: Path):
+    """Dependencies point one way: the harness imports the agent. The local
+    drivers are the exception -- they *are* the harness on a laptop."""
+    offending = {name for name in imported_modules(path) if name.startswith("agent_runner")}
+    assert not offending, f"{path.name} imports {sorted(offending)}"
+
+
 @pytest.mark.parametrize("path", ENGINE_FILES, ids=lambda p: str(p.relative_to(AGENT_DIR)))
 def test_engines_do_not_import_the_store(path: Path):
     offending = {name for name in imported_modules(path) if name.startswith("shared.db")}

@@ -49,7 +49,7 @@ CONTEXT = $(if $(wildcard $(AUDIO_PUB_KEY)),-c audio_public_key_file="$(abspath 
 
 .DEFAULT_GOAL := help
 .PHONY: help check lint test synth layers diff deploy upload-bgm fe-check fe-lint fe-test fe-build \
-        e2e e2e-ui e2e-install e2e-auth smoke dev
+        e2e e2e-ui e2e-install e2e-auth smoke dev dev-agent
 
 help: ## List the targets
 	@grep -hE '^[a-z0-9-]+:.*?## ' $(MAKEFILE_LIST) \
@@ -187,3 +187,6 @@ endif
 .PHONY: dev
 dev: ## Vite dev server on the port the API's CORS allow-list names
 	cd frontend && npm run dev -- --port 5173 --strictPort
+
+dev-agent: ## The companion runner on :8080 (needs TABLE_NAME, STATE_MACHINE_ARN, COGNITO_*, AWS_REGION)
+	cd backend && $(VENV)/uvicorn agent_runner.main:app --reload --port 8080

@@ -368,3 +368,40 @@ def test_clear_memory_is_idempotent(store):
 
 def test_session_header_key_helper():
     assert agent_session_sk("abc") == "AGENT#abc"
+
+
+# ----------------------------------------------------------------------
+# Release: the fencing token's third verb
+# ----------------------------------------------------------------------
+
+
+def test_release_drops_the_claim_without_advancing(store):
+    open_session(store)
+    store.claim_turn(USER_ID, SESSION, engine="native", now=NOW)
+
+    assert store.release_turn(USER_ID, SESSION, expected_turn=0)
+
+    session = store.get_agent_session(USER_ID, SESSION)
+    assert session is not None
+    assert session.turn == 0 and session.in_flight is None
+    # Immediately claimable again.
+    store.claim_turn(USER_ID, SESSION, engine="native", now=NOW)
+
+
+def test_release_with_a_stale_expected_turn_changes_nothing(store):
+    open_session(store)
+    store.claim_turn(USER_ID, SESSION, engine="native", now=NOW)
+    assert store.commit_turn(USER_ID, SESSION, expected_turn=0, checkpoint=turn_item(0))
+    store.claim_turn(USER_ID, SESSION, engine="native", now=NOW)
+
+    assert not store.release_turn(USER_ID, SESSION, expected_turn=0)
+
+    session = store.get_agent_session(USER_ID, SESSION)
+    assert session is not None
+    assert session.turn == 1 and session.in_flight == NOW
+
+
+def test_release_without_a_claim_is_false(store):
+    open_session(store)
+
+    assert not store.release_turn(USER_ID, SESSION, expected_turn=0)

@@ -1330,6 +1330,26 @@ class EntitlementStore:
         )
         return True
 
+    def release_turn(self, user_id: str, session_id: str, *, expected_turn: int) -> bool:
+        """Give the claim back without advancing: the fencing token's third
+        verb, for a turn that failed before it could commit.
+
+        Conditioned like ``commit_turn`` -- same ``turn``, a claim present --
+        so a release from an invocation whose claim was already taken over
+        (or whose turn was committed by a retry) changes nothing. Without
+        this, a failed turn would block the session until the claim went
+        stale; with it, the user can resend immediately.
+        """
+        return self._conditional_update(
+            user_id,
+            agent_session_sk(session_id),
+            kind="agent_session",
+            update="REMOVE in_flight SET updated_at = :now",
+            condition="attribute_exists(PK) AND #turn = :expected AND attribute_exists(in_flight)",
+            names={"#turn": "turn"},
+            values={":expected": expected_turn, ":now": _now_iso()},
+        )
+
     def list_turns(self, user_id: str, session_id: str) -> list[AgentTurn]:
         """Every checkpoint of a session, in turn order.
 
