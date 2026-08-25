@@ -251,6 +251,22 @@ def test_commit_retry_after_the_user_deleted_the_dream_is_a_replay(store, dynamo
     assert store.get_job(USER_ID, JOB_ID).status is JobStatus.DELETED
 
 
+def test_freeze_replay_on_a_deleted_dream_is_a_no_op(store, dynamodb_client):
+    """The start_execution name guard keeps a job_id unique for 90 days; past
+    that, or on a hand-replayed execution, a freeze that meets a DELETED job
+    is the same benign replay as meeting a DONE one."""
+    seed_entitlement(dynamodb_client, available=2)
+    store.create_job(USER_ID, JOB_ID, "calm", 10)
+    store.freeze_credit(USER_ID, JOB_ID)
+    store.commit_credit(USER_ID, JOB_ID)
+    assert store.mark_job_deleted(USER_ID, JOB_ID)
+
+    result = store.freeze_credit(USER_ID, JOB_ID)
+
+    assert not result.applied
+    assert store.get_entitlement(USER_ID).available == 1
+
+
 def test_rollback_after_the_user_deleted_the_dream_never_refunds(store, dynamodb_client):
     seed_entitlement(dynamodb_client, available=1)
     store.create_job(USER_ID, JOB_ID, "calm", 10)

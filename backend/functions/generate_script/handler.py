@@ -15,7 +15,7 @@ from typing import Any
 import boto3
 from botocore.exceptions import ClientError
 
-from shared.audio import TRANSIENT_TAGGING
+from shared.audio import TRANSIENT_TAGGING, script_key
 from shared.db import EntitlementStore
 from shared.models import PictureDescription
 from shared.pipeline import PipelineState, ScriptGenerationError, raise_for_bedrock_error
@@ -69,10 +69,6 @@ def _get_s3() -> Any:
     if _s3 is None:
         _s3 = boto3.client("s3")
     return _s3
-
-
-def script_key(job_id: str) -> str:
-    return f"jobs/{job_id}/script.txt"
 
 
 def lambda_handler(event: dict[str, Any], context: object) -> dict[str, Any]:  # noqa: ARG001

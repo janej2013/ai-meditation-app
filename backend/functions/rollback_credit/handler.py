@@ -21,10 +21,11 @@ import os
 from typing import Any
 
 import boto3
-from botocore.exceptions import ClientError
+from botocore.exceptions import BotoCoreError, ClientError
 
 from shared.audio import SweepError, sweep_job_objects
 from shared.db import EntitlementStore
+from shared.models import JobStatus
 from shared.pipeline import PipelineState
 
 logger = logging.getLogger()
@@ -56,6 +57,9 @@ def lambda_handler(event: dict[str, Any], context: object) -> dict[str, Any]:  #
     # {Error, Cause} and this validation would fail -- which is the behaviour to
     # want: a refund must never run against a payload that lost its user_id.
     state = PipelineState.model_validate(event)
+    # Fail loudly on a misconfigured deployment rather than logging "sweep
+    # failed" on every rollback and leaking narrations forever.
+    bucket = os.environ["AUDIO_BUCKET"]
 
     result = _get_store().rollback_credit(state.user_id, state.job_id)
     logger.info(
@@ -65,15 +69,21 @@ def lambda_handler(event: dict[str, Any], context: object) -> dict[str, Any]:  #
         result.job_status.value,
     )
 
-    # A job that synthesized and then failed (commit lost) has a narration in
-    # the bucket: untagged, so no lifecycle rule reaps it, and never DONE, so
-    # the user cannot delete it either. Sweep it here, after the refund and
-    # never at its expense -- a failed sweep is logged, not raised, because
-    # this handler is the last stop before the execution fails.
-    try:
-        removed = sweep_job_objects(_get_s3(), os.environ["AUDIO_BUCKET"], state.job_id)
-        logger.info("rollback swept job_id=%s objects=%d", state.job_id, removed)
-    except (ClientError, SweepError, KeyError):
-        logger.warning("rollback sweep failed job_id=%s", state.job_id)
+    # A job that synthesized and then failed has a narration in the bucket:
+    # untagged, so no lifecycle rule reaps it, and never DONE, so the user
+    # cannot delete it either. Sweep it here -- but only when the ledger says
+    # the job really is rolled back. This handler also runs as the Catch for
+    # a commit whose transaction succeeded and whose invocation then failed;
+    # rollback_credit reports that as a DONE replay, and sweeping there would
+    # delete a paid, DONE dreamscape's narration. ROLLED_BACK covers both the
+    # refund just applied and a retried rollback re-sweeping after a failed
+    # first sweep. Never at the refund's expense: a failed sweep is logged,
+    # not raised, because this is the last stop before the execution fails.
+    if result.job_status is JobStatus.ROLLED_BACK:
+        try:
+            removed = sweep_job_objects(_get_s3(), bucket, state.job_id)
+            logger.info("rollback swept job_id=%s objects=%d", state.job_id, removed)
+        except (ClientError, BotoCoreError, SweepError):
+            logger.warning("rollback sweep failed job_id=%s", state.job_id)
 
     return state.model_dump()

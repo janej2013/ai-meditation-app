@@ -120,8 +120,8 @@ def delete_dreamscape(job_id: str, user: CurrentUserDep, store: StoreDep) -> Res
 
 def _item(job: Job) -> DreamscapeItem:
     excerpt = None
-    if not job.picture_keywords and job.mood_text:
-        text = job.mood_text.strip()
+    text = (job.mood_text or "").strip()
+    if not job.picture_keywords and text:
         excerpt = text[:MOOD_EXCERPT_CHARS] + ("…" if len(text) > MOOD_EXCERPT_CHARS else "")
     return DreamscapeItem(
         job_id=job.job_id,

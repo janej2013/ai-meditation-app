@@ -24,6 +24,16 @@ def job_prefix(job_id: str) -> str:
     return f"jobs/{job_id}/"
 
 
+# The two objects a job writes, composed from the one prefix the sweep and
+# the lifecycle rules key on -- so a writer and the reaper cannot disagree.
+def script_key(job_id: str) -> str:
+    return f"{job_prefix(job_id)}script.txt"
+
+
+def narration_key(job_id: str) -> str:
+    return f"{job_prefix(job_id)}narration.mp3"
+
+
 class SweepError(Exception):
     """delete_objects reported per-key failures; some objects remain."""
 

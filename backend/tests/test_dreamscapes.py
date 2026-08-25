@@ -129,6 +129,14 @@ def test_items_carry_keywords_or_a_mood_excerpt_and_no_audio_url(client, dynamod
     assert "audio_url" not in pic and "audio_url" not in txt
 
 
+def test_a_whitespace_mood_yields_no_excerpt_rather_than_an_empty_title(client, dynamodb_client):
+    seed_dream(dynamodb_client, "job-a", at(0), mood_text="   ")
+
+    [item] = client.get("/dreamscapes").json()["items"]
+
+    assert item["mood_excerpt"] is None
+
+
 @pytest.mark.parametrize(
     "cursor",
     [

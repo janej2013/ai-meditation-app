@@ -468,6 +468,7 @@ class EntitlementStore:
                 JobStatus.DONE,
                 JobStatus.FAILED,
                 JobStatus.ROLLED_BACK,
+                JobStatus.DELETED,
             },
             on_entitlement_failure=InsufficientCreditsError(
                 f"user has no available credit to freeze for job {job_id}"
