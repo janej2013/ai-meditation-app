@@ -144,6 +144,11 @@ def judge(
         reasons.append("finalized")
     if e.max_turns_to_finalize and finalized_on and finalized_on > e.max_turns_to_finalize:
         reasons.append(f"finalized on turn {finalized_on} > {e.max_turns_to_finalize}")
+    if e.brief_must_not_contain and starter.calls:
+        brief = (starter.calls[-1].get("mood_text") or "").casefold()
+        leaked = [w for w in e.brief_must_not_contain if w.casefold() in brief]
+        if leaked:
+            reasons.append(f"brief contains {leaked}")
     if e.duration_range and starter.calls:
         lo, hi = e.duration_range
         got = starter.calls[-1]["duration_minutes"]
