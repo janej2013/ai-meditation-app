@@ -75,7 +75,7 @@ describe('request plumbing', () => {
     const fetchMock = vi.mocked(fetch)
     fetchMock.mockResolvedValue(jsonResponse(202, { job_id: 'j1', status: 'PENDING' }))
 
-    await startGeneration('anxious', 10)
+    await startGeneration({ mood: 'anxious' }, 10)
 
     const [, init] = fetchMock.mock.calls[0]
     expect(JSON.parse(init?.body as string)).toEqual({
