@@ -7,7 +7,7 @@ The private key is a secret (constraint 4), so only ``CLOUDFRONT_KEY_SECRET_ARN`
 is injected and the PEM is read through Secrets Manager once per container.
 The key pair id is not a secret and travels as a plain environment variable.
 
-Only ``jobs/*`` is signed. The shared background music under ``assets/*`` is
+Signed paths are ``jobs/*`` (narration) and ``pictures/*`` (uploads).
 served as ordinary cached objects so the PWA can switch tracks mid-session
 without asking the API for a new signature.
 """

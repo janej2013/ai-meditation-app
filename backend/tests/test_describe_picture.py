@@ -29,9 +29,12 @@ GOOD_ANSWER = {
 }
 
 
+ATTEMPT = "2026-08-25T00:00:00+00:00"
+
+
 @pytest.fixture
 def state() -> dict:
-    return {"user_id": USER_ID, "picture_id": PICTURE_ID}
+    return {"user_id": USER_ID, "picture_id": PICTURE_ID, "attempt": ATTEMPT}
 
 
 @pytest.fixture
@@ -42,8 +45,12 @@ def env(monkeypatch):
 
 
 def prepare(store, dynamodb_client, s3_bucket, monkeypatch, *, upload: bool = True):
+    from datetime import datetime
+
     seed_entitlement(dynamodb_client, available=1)
     assert store.create_picture(USER_ID, PICTURE_ID)
+    # The route's claim: the execution runs under this attempt token.
+    assert store.mark_picture_describing(USER_ID, PICTURE_ID, now=datetime.fromisoformat(ATTEMPT))
     if upload:
         s3_bucket.put_object(
             Bucket=BUCKET, Key=KEY, Body=b"\xff\xd8jpeg-bytes", ContentType="image/jpeg"
@@ -113,7 +120,7 @@ def test_transient_bedrock_errors_are_retryable(
 
     with pytest.raises(BedrockTransientError):
         handler.lambda_handler(state, None)
-    assert store.get_picture(USER_ID, PICTURE_ID).status.value == "PENDING"  # retry pending
+    assert store.get_picture(USER_ID, PICTURE_ID).status.value == "DESCRIBING"  # retry pending
 
 
 def test_a_validation_error_is_permanent(
@@ -176,12 +183,12 @@ def test_an_off_contract_answer_is_permanent_not_downgraded(
     assert picture.status.value == "FAILED"
 
 
-def test_a_transport_error_also_marks_the_attempt_failed(
+def test_a_transport_error_is_left_for_the_machines_catch(
     store, dynamodb_client, s3_bucket, env, monkeypatch, state
 ):
-    """Not a ClientError, so nothing in the taxonomy names it -- but the
-    attempt is over, and an item left DESCRIBING would strand the picture
-    until the stale window passes."""
+    """Not a ClientError, so nothing in the taxonomy names it. The handler
+    lets it out; the machine's Catch runs the mark_failed pass (below), the
+    one place that knows every way an attempt can end."""
     from botocore.exceptions import EndpointConnectionError
 
     bedrock = prepare(store, dynamodb_client, s3_bucket, monkeypatch)
@@ -189,7 +196,39 @@ def test_a_transport_error_also_marks_the_attempt_failed(
 
     with pytest.raises(EndpointConnectionError):
         handler.lambda_handler(state, None)
+    assert store.get_picture(USER_ID, PICTURE_ID).status.value == "DESCRIBING"
+
+
+def test_mark_failed_mode_records_the_attempt_and_touches_nothing_else(
+    store, dynamodb_client, s3_bucket, env, monkeypatch, state
+):
+    bedrock = prepare(store, dynamodb_client, s3_bucket, monkeypatch)
+
+    handler.lambda_handler({**state, "mode": "mark_failed"}, None)
+
     assert store.get_picture(USER_ID, PICTURE_ID).status.value == "FAILED"
+    bedrock.converse.assert_not_called()
+
+
+def test_a_superseded_attempt_cannot_write(
+    store, dynamodb_client, s3_bucket, env, monkeypatch, state
+):
+    """The route judged this attempt dead and claimed a new one; a late
+    reading (or a late failure) from the old attempt must not clobber it."""
+    from datetime import UTC, datetime
+
+    bedrock = prepare(store, dynamodb_client, s3_bucket, monkeypatch)
+    bedrock.converse.return_value = bedrock_response(json.dumps(GOOD_ANSWER))
+    newer = datetime.now(UTC)
+    assert store.mark_picture_describing(USER_ID, PICTURE_ID, now=newer)  # stale reclaim
+
+    with pytest.raises(PictureDescriptionError, match="superseded"):
+        handler.lambda_handler(state, None)  # still carries the OLD token
+    handler.lambda_handler({**state, "mode": "mark_failed"}, None)  # old token: no-op
+
+    picture = store.get_picture(USER_ID, PICTURE_ID)
+    assert picture.status.value == "DESCRIBING"
+    assert picture.keywords is None
 
 
 def test_an_unauthorised_picture_id_is_refused(

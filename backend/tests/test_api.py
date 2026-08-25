@@ -247,10 +247,15 @@ DESCRIPTION = {"keywords": ["dusk", "still water", "pines"], "summary": "Quiet d
 
 
 def seed_described_picture(store, picture_id: str = PICTURE_ID) -> None:
+    from datetime import UTC, datetime
+
     from shared.models import PictureDescription
 
     assert store.create_picture(USER_ID, picture_id)
-    store.set_picture_description(USER_ID, picture_id, PictureDescription(**DESCRIPTION))
+    attempt = store.mark_picture_describing(USER_ID, picture_id, now=datetime.now(UTC))
+    assert store.set_picture_description(
+        USER_ID, picture_id, PictureDescription(**DESCRIPTION), attempt=attempt
+    )
 
 
 def test_generate_from_a_described_picture_copies_the_reading_onto_the_job(
@@ -420,7 +425,15 @@ def test_describe_claims_the_attempt_and_starts_the_machine_with_ids_only(
     assert response.json() == {"picture_id": PICTURE_ID, "status": "DESCRIBING", "keywords": None}
     call = picture_sfn.start_execution.call_args.kwargs
     assert call["name"].startswith(f"{PICTURE_ID}-")  # unique per attempt
-    assert json.loads(call["input"]) == {"user_id": USER_ID, "picture_id": PICTURE_ID}
+    payload = json.loads(call["input"])
+    assert {k: payload[k] for k in ("user_id", "picture_id")} == {
+        "user_id": USER_ID,
+        "picture_id": PICTURE_ID,
+    }
+    # The attempt token: the claim timestamp, never user content.
+    assert (
+        payload["attempt"] == store.get_picture(USER_ID, PICTURE_ID).describe_started_at.isoformat()
+    )
 
 
 def test_a_second_tap_while_describing_starts_nothing(client, dynamodb_client, store, picture_sfn):
@@ -455,9 +468,12 @@ def test_a_dead_attempt_is_retried_once_stale(client, dynamodb_client, store, pi
 def test_a_failed_picture_may_be_described_again(client, dynamodb_client, store, picture_sfn):
     """A premature describe (upload not landed) or an off-contract answer is
     a failed attempt, not a dead picture."""
+    from datetime import UTC, datetime
+
     seed_entitlement(dynamodb_client, available=1)
     assert store.create_picture(USER_ID, PICTURE_ID)
-    store.mark_picture_failed(USER_ID, PICTURE_ID)
+    attempt = store.mark_picture_describing(USER_ID, PICTURE_ID, now=datetime.now(UTC))
+    assert store.mark_picture_failed(USER_ID, PICTURE_ID, attempt=attempt)
 
     response = client.post(f"/pictures/{PICTURE_ID}/describe")
 
@@ -465,15 +481,62 @@ def test_a_failed_picture_may_be_described_again(client, dynamodb_client, store,
     picture_sfn.start_execution.assert_called_once()
 
 
-def test_a_start_failure_releases_the_claim(client, dynamodb_client, store, picture_sfn):
+@pytest.mark.parametrize(
+    "error",
+    [
+        ClientError({"Error": {"Code": "StateMachineDoesNotExist"}}, "StartExecution"),
+        KeyError("PICTURE_STATE_MACHINE_ARN"),
+        RuntimeError("connection reset"),
+    ],
+    ids=["client-error", "misconfigured", "transport"],
+)
+def test_any_start_failure_releases_the_claim(client, dynamodb_client, store, picture_sfn, error):
+    """Whatever failed between the claim and a running execution, the next
+    call must be able to try again instead of waiting out the stale window."""
     seed_entitlement(dynamodb_client, available=1)
     assert store.create_picture(USER_ID, PICTURE_ID)
-    picture_sfn.start_execution.side_effect = ClientError(
-        {"Error": {"Code": "StateMachineDoesNotExist"}}, "StartExecution"
-    )
+    picture_sfn.start_execution.side_effect = error
 
     assert client.post(f"/pictures/{PICTURE_ID}/describe").status_code == 503
     assert store.get_picture(USER_ID, PICTURE_ID).status.value == "FAILED"  # claim released
+
+
+def test_a_picture_is_tried_only_so_many_times(client, dynamodb_client, store, picture_sfn):
+    """Each attempt is Bedrock spend no credit paid for; past the cap the
+    answer is 'choose another', not another execution."""
+    from shared.models import PICTURE_DESCRIBE_MAX_ATTEMPTS
+
+    seed_entitlement(dynamodb_client, available=1)
+    assert store.create_picture(USER_ID, PICTURE_ID)
+    for _ in range(PICTURE_DESCRIBE_MAX_ATTEMPTS):
+        assert client.post(f"/pictures/{PICTURE_ID}/describe").status_code == 202
+        attempt = store.get_picture(USER_ID, PICTURE_ID).describe_started_at.isoformat()
+        store.mark_picture_failed(USER_ID, PICTURE_ID, attempt=attempt)
+
+    response = client.post(f"/pictures/{PICTURE_ID}/describe")
+
+    assert response.status_code == 409
+    assert picture_sfn.start_execution.call_count == PICTURE_DESCRIBE_MAX_ATTEMPTS
+
+
+def test_a_reading_from_an_attempt_the_route_wrote_off_still_lands(
+    client, dynamodb_client, store, picture_sfn
+):
+    """start_execution can fail after the execution was created; the route
+    marks FAILED, but the execution carries the same token, so its reading
+    lifts the FAILED instead of being dropped."""
+    from shared.models import PictureDescription
+
+    seed_entitlement(dynamodb_client, available=1)
+    assert store.create_picture(USER_ID, PICTURE_ID)
+    picture_sfn.start_execution.side_effect = RuntimeError("response lost")
+    assert client.post(f"/pictures/{PICTURE_ID}/describe").status_code == 503
+    attempt = store.get_picture(USER_ID, PICTURE_ID).describe_started_at.isoformat()
+
+    assert store.set_picture_description(
+        USER_ID, PICTURE_ID, PictureDescription(**DESCRIPTION), attempt=attempt
+    )
+    assert store.get_picture(USER_ID, PICTURE_ID).status.value == "DESCRIBED"
 
 
 def test_describe_is_idempotent_once_described(client, dynamodb_client, store, picture_sfn):

@@ -27,6 +27,7 @@ from shared.models import (
     DEFAULT_PLAN,
     ENTITLEMENT_SK,
     FREE_SIGNUP_CREDITS,
+    PICTURE_DESCRIBE_MAX_ATTEMPTS,
     PICTURE_DESCRIBE_TIMEOUT_SECONDS,
     PICTURE_ITEM_TTL_DAYS,
     PROFILE_SK,
@@ -277,23 +278,37 @@ class EntitlementStore:
             return None
         return Picture.model_validate({**_unmarshal(item), "user_id": user_id})
 
-    def mark_picture_describing(self, user_id: str, picture_id: str, *, now: datetime) -> bool:
-        """Claim the next description attempt. True if this caller owns it.
+    def mark_picture_describing(
+        self, user_id: str, picture_id: str, *, now: datetime
+    ) -> str | None:
+        """Claim the next description attempt; the attempt token if won.
 
         The item, not the execution name, is the idempotency anchor: PENDING
-        and FAILED may always be (re)claimed, and DESCRIBING may be reclaimed
-        only once its attempt is older than the machine's timeout -- so an
-        attempt that died without marking the item (a task timeout, a
-        transport error the handler never saw) does not strand the picture,
-        while two quick taps cannot start two executions.
+        and FAILED may be (re)claimed, and DESCRIBING only once its attempt
+        is older than the machine's timeout -- so an attempt that died
+        without marking the item does not strand the picture, while two
+        quick taps cannot start two executions. The claim also counts: past
+        PICTURE_DESCRIBE_MAX_ATTEMPTS the picture is not tried again, since
+        each try is Bedrock spend no credit has paid for.
+
+        The token is the claim timestamp; every write the attempt makes is
+        conditioned on it (see set_picture_description / mark_picture_failed).
         """
-        stale = now - timedelta(seconds=PICTURE_DESCRIBE_TIMEOUT_SECONDS)
-        return self._conditional_update(
+        if now.tzinfo is None:
+            raise ValueError("now must be timezone-aware: it is compared with stored UTC stamps")
+        attempt = now.isoformat()
+        stale = (now - timedelta(seconds=PICTURE_DESCRIBE_TIMEOUT_SECONDS)).isoformat()
+        won = self._conditional_update(
             user_id,
             picture_sk(picture_id),
-            update="SET #status = :describing, describe_started_at = :now",
+            kind="picture",
+            update=(
+                "SET #status = :describing, describe_started_at = :now, "
+                "describe_attempts = if_not_exists(describe_attempts, :zero) + :one"
+            ),
             condition=(
-                "attribute_exists(PK) AND ("
+                "attribute_exists(PK) AND "
+                "(attribute_not_exists(describe_attempts) OR describe_attempts < :max) AND ("
                 "#status IN (:pending, :failed) OR "
                 "(#status = :describing AND describe_started_at < :stale))"
             ),
@@ -302,43 +317,57 @@ class EntitlementStore:
                 ":describing": PictureStatus.DESCRIBING.value,
                 ":pending": PictureStatus.PENDING.value,
                 ":failed": PictureStatus.FAILED.value,
-                ":now": now.isoformat(),
-                ":stale": stale.isoformat(),
+                ":now": attempt,
+                ":stale": stale,
+                ":zero": 0,
+                ":one": 1,
+                ":max": PICTURE_DESCRIBE_MAX_ATTEMPTS,
             },
         )
+        return attempt if won else None
 
     def set_picture_description(
-        self, user_id: str, picture_id: str, description: PictureDescription
-    ) -> None:
-        """Record what the vision model saw. Idempotent: a retry rewrites the
-        same reading; a picture that has moved on is left alone."""
-        self._conditional_update(
+        self, user_id: str, picture_id: str, description: PictureDescription, *, attempt: str
+    ) -> bool:
+        """Record what the vision model saw -- for this attempt only. A retry
+        of the same attempt rewrites the same reading (and may lift a FAILED
+        the route wrote when it wrongly believed nothing had started); a
+        write from a reclaimed, dead attempt is rejected."""
+        return self._conditional_update(
             user_id,
             picture_sk(picture_id),
+            kind="picture",
             update="SET #status = :described, keywords = :kw, summary = :summary",
-            condition="attribute_exists(PK) AND #status IN (:pending, :describing, :described)",
+            condition=(
+                "attribute_exists(PK) AND describe_started_at = :attempt "
+                "AND #status IN (:describing, :failed, :described)"
+            ),
             names=dict(_STATUS_NAMES),
             values={
+                ":attempt": attempt,
                 ":described": PictureStatus.DESCRIBED.value,
-                ":pending": PictureStatus.PENDING.value,
                 ":describing": PictureStatus.DESCRIBING.value,
+                ":failed": PictureStatus.FAILED.value,
                 ":kw": description.keywords,
                 ":summary": description.summary,
             },
         )
 
-    def mark_picture_failed(self, user_id: str, picture_id: str) -> None:
-        """The attempt gave up: the keywords screen stops waiting, and a new
-        attempt may be claimed."""
-        self._conditional_update(
+    def mark_picture_failed(self, user_id: str, picture_id: str, *, attempt: str) -> bool:
+        """This attempt gave up: the keywords screen stops waiting, and a new
+        attempt may be claimed. A stale attempt cannot fail its successor."""
+        return self._conditional_update(
             user_id,
             picture_sk(picture_id),
+            kind="picture",
             update="SET #status = :failed",
-            condition="attribute_exists(PK) AND #status IN (:pending, :describing)",
+            condition=(
+                "attribute_exists(PK) AND describe_started_at = :attempt AND #status = :describing"
+            ),
             names=dict(_STATUS_NAMES),
             values={
+                ":attempt": attempt,
                 ":failed": PictureStatus.FAILED.value,
-                ":pending": PictureStatus.PENDING.value,
                 ":describing": PictureStatus.DESCRIBING.value,
             },
         )
@@ -455,7 +484,13 @@ class EntitlementStore:
         names: dict[str, str] | None = None,
     ) -> bool:
         return self._conditional_update(
-            user_id, job_sk(job_id), update=update, condition=condition, values=values, names=names
+            user_id,
+            job_sk(job_id),
+            kind="job",
+            update=update,
+            condition=condition,
+            values=values,
+            names=names,
         )
 
     def _conditional_update(
@@ -463,6 +498,7 @@ class EntitlementStore:
         user_id: str,
         sk: str,
         *,
+        kind: str,
         update: str,
         condition: str,
         values: dict[str, Any],
@@ -503,10 +539,8 @@ class EntitlementStore:
         try:
             self.client.update_item(**kwargs)
         except self.client.exceptions.ConditionalCheckFailedException as exc:
-            # "job" or "picture": the sort key's prefix names the item kind and
-            # its id -- never user content (constraint 7).
-            kind, _, item_id = sk.partition("#")
-            kind = kind.lower()
+            # The id after the prefix; never user content (constraint 7).
+            item_id = sk.partition("#")[2]
             item = (getattr(exc, "response", None) or {}).get("Item")
             if not item:
                 logger.warning("%s update skipped: no %s item %s_id=%s", kind, kind, kind, item_id)
