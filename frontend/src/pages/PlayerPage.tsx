@@ -25,7 +25,7 @@ export default function PlayerPage() {
   const navigate = useNavigate()
   const location = useLocation()
   const { jobId } = useParams<{ jobId: string }>()
-  const { setPlaying: setScenePlaying } = useScene()
+  const { setPlaying: setScenePlaying, setCloudSrc, setDissolve } = useScene()
   // The handoff from GeneratingPage, when there was one. It does not survive a
   // reload, and its signature expires in 15 minutes -- so it is an
   // optimisation, and the job id in the path is what actually addresses the
@@ -91,6 +91,14 @@ export default function PlayerPage() {
     const freshNarrationUrl = async (): Promise<string> => {
       const job = await getJob(jobId)
       if (!job.audio_url) throw new Error(`job ${jobId} has no audio`)
+      // A revisited picture dreamscape gets its own picture back behind the
+      // player: the signed upload, sampled into the cloud fully dissolved.
+      // The handoff path never comes through here -- its cloud is already
+      // the local blob from the home screen.
+      if (job.picture_url && !cancelled) {
+        setCloudSrc(job.picture_url)
+        setDissolve(1)
+      }
       return job.audio_url
     }
 
@@ -141,6 +149,7 @@ export default function PlayerPage() {
       cancelled = true
       mixer.onEnded = null
       // Leaving the player ends the session: narration and music both stop.
+      // The picture behind it is SceneLayer's to clear, by route.
       mixer.endSession()
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps -- mount-only load

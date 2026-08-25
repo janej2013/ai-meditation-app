@@ -30,6 +30,7 @@ import { isSignedIn } from '../auth/cognito'
 import { useDreamCount } from '../dreamscapes/useDreamscapes'
 import { prepareJpeg } from '../picture/prepare'
 import { useScene } from '../scene/SceneContext'
+import type { GeneratingHandoff } from './GeneratingPage'
 
 const MOODS = ['Stressed', "Can't sleep", 'Anxious', 'Restless', 'Low', 'Just tired']
 const PLACES = ['Anywhere', 'Ocean', 'Rainforest', 'Starry night', 'Fireplace']
@@ -52,7 +53,7 @@ const sentenceButtonStyle: React.CSSProperties = {
 
 export default function HomePage() {
   const navigate = useNavigate()
-  const { setFocus, cloudSrc, setCloudSrc, setDissolve, setHeroDim } = useScene()
+  const { setFocus, setCloudSrc, setDissolve, resetCloud, setHeroDim } = useScene()
 
   const [view, setView] = useState<'sentence' | 'picture' | 'keywords' | 'panel'>('sentence')
   const [moods, setMoods] = useState<string[]>([])
@@ -90,11 +91,13 @@ export default function HomePage() {
   // Landing home starts a fresh session: release the previous picture (it was
   // only ever an object URL in this browser) and settle the cloud.
   useEffect(() => {
-    if (cloudSrc) URL.revokeObjectURL(cloudSrc)
-    setCloudSrc('')
-    setDissolve(1)
+    resetCloud()
     return () => {
       if (dissolveTimer.current) clearInterval(dissolveTimer.current)
+      // Leaving mid-read: stop the poll and the chip reveal, or they keep
+      // hitting the API and setting state on a page that is gone.
+      describeAbort.current?.abort()
+      kwTimers.current.forEach(clearTimeout)
       setHeroDim(null)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps -- mount-only reset
@@ -117,9 +120,7 @@ export default function HomePage() {
     kwTimers.current.forEach(clearTimeout)
     kwTimers.current = []
     if (dissolveTimer.current) clearInterval(dissolveTimer.current)
-    if (cloudSrc) URL.revokeObjectURL(cloudSrc)
-    setCloudSrc('')
-    setDissolve(1)
+    resetCloud()
     setPictureId(null)
     setKeywords(null)
     setKwStage(0)
@@ -203,23 +204,29 @@ export default function HomePage() {
     }
   }
 
-  const beginFromPicture = async () => {
-    if (!pictureId || !keywords || busy) return
+  /**
+   * The one way a session starts, from words or from a picture: the ambient
+   * music begins inside the click (the only place a mobile browser allows),
+   * the job is requested, and every refusal routes the same way.
+   */
+  const startSession = async (
+    source: { mood: string } | { pictureId: string },
+    handoff: Omit<GeneratingHandoff, 'duration'>,
+  ) => {
     setBusy(true)
     setError(null)
     if (dissolveTimer.current) clearInterval(dissolveTimer.current)
     setDissolve(1)
-    // Still inside the click: the only place a mobile browser lets audio
-    // start. The music then runs through the waiting screen into the player.
     void mixer.startAmbient(bgmUrl(DEFAULT_BGM_TRACK))
     try {
-      const { job_id } = await startGeneration({ pictureId }, duration)
-      navigate(`/generating/${job_id}`, { state: { duration, keywords, pic: true } })
+      const { job_id } = await startGeneration(source, duration)
+      navigate(`/generating/${job_id}`, { state: { duration, ...handoff } })
     } catch (e) {
       mixer.stopAmbient()
       if (e instanceof NotSignedInError) {
         navigate('/signup', { state: { resume: true } })
       } else if (e instanceof ApiError && e.status === 402) {
+        // Out of credits: guide to purchase rather than surface an error.
         navigate('/plans')
       } else if (e instanceof ApiError && e.status === 429) {
         setError('A session is already being created. Give it a moment.')
@@ -229,6 +236,11 @@ export default function HomePage() {
     } finally {
       setBusy(false)
     }
+  }
+
+  const beginFromPicture = async () => {
+    if (!pictureId || !keywords || busy) return
+    await startSession({ pictureId }, { keywords, pic: true })
   }
 
   const feeling = moodMode === 'text' ? moodText.trim() : moods.join(', ')
@@ -246,33 +258,7 @@ export default function HomePage() {
         ? `${feeling} — drifting to ${destination.toLowerCase()}`
         : feeling
     ).slice(0, 500)
-    setBusy(true)
-    setError(null)
-    if (dissolveTimer.current) clearInterval(dissolveTimer.current)
-    setDissolve(1)
-    // Still inside the click: the only place a mobile browser lets audio
-    // start. The music then runs through the waiting screen into the player.
-    void mixer.startAmbient(bgmUrl(DEFAULT_BGM_TRACK))
-    try {
-      const { job_id } = await startGeneration({ mood }, duration)
-      navigate(`/generating/${job_id}`, {
-        state: { duration, feeling, destination, pic: false },
-      })
-    } catch (e) {
-      mixer.stopAmbient()
-      if (e instanceof NotSignedInError) {
-        navigate('/signup', { state: { resume: true } })
-      } else if (e instanceof ApiError && e.status === 402) {
-        // Out of credits: guide to purchase rather than surface an error.
-        navigate('/plans')
-      } else if (e instanceof ApiError && e.status === 429) {
-        setError('A session is already being created. Give it a moment.')
-      } else {
-        setError('Could not start. Please try again.')
-      }
-    } finally {
-      setBusy(false)
-    }
+    return startSession({ mood }, { feeling, destination, pic: false })
   }
 
   const onSentence = view === 'sentence'

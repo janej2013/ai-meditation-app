@@ -19,6 +19,7 @@ from typing import Annotated
 from fastapi import Depends, HTTPException, Request, status
 
 from shared.db import EntitlementStore
+from shared.models import Entitlement
 
 # Cognito sets token_use to distinguish its two token types. Access tokens carry
 # neither an `aud` claim nor `email`, so this API requires ID tokens.
@@ -78,4 +79,18 @@ def get_store() -> EntitlementStore:
 
 
 CurrentUserDep = Annotated[CurrentUser, Depends(get_current_user)]
+
+
+def require_credit(store: EntitlementStore, user_id: str) -> Entitlement:
+    """The one 402: a generation, and every picture route (whose vision call
+    is spent before anything is frozen), need a credit in hand."""
+    entitlement = store.get_entitlement(user_id)
+    if entitlement is None or entitlement.available < 1:
+        raise HTTPException(
+            status_code=status.HTTP_402_PAYMENT_REQUIRED,
+            detail="No generations remaining. Add credits to continue.",
+        )
+    return entitlement
+
+
 StoreDep = Annotated[EntitlementStore, Depends(get_store)]

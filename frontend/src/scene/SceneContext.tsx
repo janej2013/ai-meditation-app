@@ -15,7 +15,14 @@
  * The default value is a no-op so pages render in tests (and Storybook-style
  * isolation) without a provider.
  */
-import { createContext, useContext, useMemo, useState, type ReactNode } from 'react'
+import {
+  createContext,
+  type ReactNode,
+  useCallback,
+  useContext,
+  useMemo,
+  useState,
+} from 'react'
 import type { CloudFocus } from './ParticleCloud'
 
 interface SceneControls {
@@ -29,6 +36,8 @@ interface SceneControls {
   setCloudSrc: (src: string) => void
   dissolve: number
   setDissolve: (dissolve: number) => void
+  /** Back to the procedural nebula, fully dissolved; a blob URL is revoked. */
+  resetCloud: () => void
   heroDim: number | null
   setHeroDim: (dim: number | null) => void
 }
@@ -42,6 +51,7 @@ const SceneContext = createContext<SceneControls>({
   setCloudSrc: () => {},
   dissolve: 1,
   setDissolve: () => {},
+  resetCloud: () => {},
   heroDim: null,
   setHeroDim: () => {},
 })
@@ -52,6 +62,13 @@ export function SceneProvider({ children }: { children: ReactNode }) {
   const [cloudSrc, setCloudSrc] = useState('')
   const [dissolve, setDissolve] = useState(1)
   const [heroDim, setHeroDim] = useState<number | null>(null)
+  const resetCloud = useCallback(() => {
+    setCloudSrc((current) => {
+      if (current.startsWith('blob:')) URL.revokeObjectURL(current)
+      return ''
+    })
+    setDissolve(1)
+  }, [])
   const value = useMemo(
     () => ({
       focus,
@@ -62,10 +79,11 @@ export function SceneProvider({ children }: { children: ReactNode }) {
       setCloudSrc,
       dissolve,
       setDissolve,
+      resetCloud,
       heroDim,
       setHeroDim,
     }),
-    [focus, playing, cloudSrc, dissolve, heroDim],
+    [focus, playing, cloudSrc, dissolve, heroDim, resetCloud],
   )
   return <SceneContext.Provider value={value}>{children}</SceneContext.Provider>
 }

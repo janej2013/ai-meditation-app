@@ -7,7 +7,7 @@ The private key is a secret (constraint 4), so only ``CLOUDFRONT_KEY_SECRET_ARN`
 is injected and the PEM is read through Secrets Manager once per container.
 The key pair id is not a secret and travels as a plain environment variable.
 
-Only ``jobs/*`` is signed. The shared background music under ``assets/*`` is
+Signed paths are ``jobs/*`` (narration) and ``pictures/*`` (uploads).
 served as ordinary cached objects so the PWA can switch tracks mid-session
 without asking the API for a new signature.
 """
@@ -97,7 +97,7 @@ def _extract_pem(payload: str) -> str:
 
 
 def signed_url(key: str, expires_in: timedelta = DEFAULT_EXPIRY) -> str:
-    """A signed CloudFront URL for an object key under ``jobs/``."""
+    """A signed CloudFront URL for a user-content key (``jobs/``, ``pictures/``)."""
     domain = os.environ.get(DOMAIN_ENV_VAR)
     key_pair_id = os.environ.get(KEY_PAIR_ID_ENV_VAR)
     if not domain or not key_pair_id:

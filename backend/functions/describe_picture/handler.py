@@ -24,12 +24,7 @@ from pydantic import ValidationError
 
 from shared.db import EntitlementStore
 from shared.models import MAX_PICTURE_BYTES, PictureDescription, picture_key
-from shared.pipeline import (
-    BedrockTransientError,
-    PictureDescriptionError,
-    PictureState,
-    raise_for_bedrock_error,
-)
+from shared.pipeline import PictureDescriptionError, PictureState, raise_for_bedrock_error
 
 from .prompt import SYSTEM_PROMPT, USER_MESSAGE
 
@@ -66,6 +61,16 @@ def lambda_handler(event: dict[str, Any], context: object) -> dict[str, Any]:  #
     state = PictureState.model_validate(event)
     store = _get_store()
 
+    if state.mode == "mark_failed":
+        # The machine's Catch: this attempt ended in Step Functions (retries
+        # exhausted, task timeout, a fault the handler never saw). Record it
+        # so the keywords screen stops waiting and a new attempt may be
+        # claimed. Conditioned on the attempt token: a dead attempt being
+        # written off cannot fail the attempt that replaced it.
+        applied = store.mark_picture_failed(state.user_id, state.picture_id, attempt=state.attempt)
+        logger.info("picture attempt failed picture_id=%s recorded=%s", state.picture_id, applied)
+        return state.model_dump()
+
     if store.get_picture(state.user_id, state.picture_id) is None:
         # Only POST /pictures/upload creates the item, so a missing one means
         # an execution nobody authorised. Nothing to mark; just refuse.
@@ -74,12 +79,21 @@ def lambda_handler(event: dict[str, Any], context: object) -> dict[str, Any]:  #
     try:
         image = _fetch(picture_key(state.user_id, state.picture_id))
         description = _describe(image)
-    except BedrockTransientError:
-        raise  # the state machine retries; the item stays PENDING meanwhile
     except PictureDescriptionError:
-        store.mark_picture_failed(state.user_id, state.picture_id)
+        # A permanent answer this handler can name -- missing object, off-
+        # contract reading -- is recorded at once rather than waiting for the
+        # Catch to run the mark_failed pass. Everything else (transport
+        # errors, timeouts) is the machine's to route there.
+        store.mark_picture_failed(state.user_id, state.picture_id, attempt=state.attempt)
         raise
-    store.set_picture_description(state.user_id, state.picture_id, description)
+    if not store.set_picture_description(
+        state.user_id, state.picture_id, description, attempt=state.attempt
+    ):
+        # The item moved on -- reclaimed by a newer attempt after this one
+        # was judged dead. Its reading stands; ours is discarded, loudly.
+        raise PictureDescriptionError(
+            f"picture {state.picture_id}: attempt superseded, reading discarded"
+        )
 
     # Count only -- the keywords derive from the user's picture (constraint 7).
     logger.info(

@@ -19,7 +19,7 @@ from fastapi import APIRouter, HTTPException, status
 from pydantic import BaseModel, Field, model_validator
 
 from api import cloudfront_signer
-from api.deps import CurrentUserDep, StoreDep
+from api.deps import CurrentUserDep, StoreDep, require_credit
 from shared.models import JobStatus, PictureDescription, PictureStatus, picture_key
 from shared.pipeline import MAX_DURATION_MINUTES, MIN_DURATION_MINUTES
 
@@ -64,8 +64,11 @@ class JobResponse(BaseModel):
     job_id: str
     status: JobStatus
     audio_url: str | None = None
-    # Present once describe_picture has run; the waiting screen shows them.
+    # Picture jobs: the keywords for the waiting screen and, once DONE, a
+    # signed URL to the upload so a revisited dreamscape's cloud is the
+    # user's own picture again. Both are minted per call, like audio_url.
     picture_keywords: list[str] | None = None
+    picture_url: str | None = None
 
 
 @router.post(
@@ -74,13 +77,7 @@ class JobResponse(BaseModel):
     status_code=status.HTTP_202_ACCEPTED,
 )
 def generate(payload: GenerateRequest, user: CurrentUserDep, store: StoreDep) -> GenerateResponse:
-    entitlement = store.get_entitlement(user.sub)
-    if entitlement is None or entitlement.available < 1:
-        raise HTTPException(
-            status_code=status.HTTP_402_PAYMENT_REQUIRED,
-            detail="No generations remaining. Add credits to continue.",
-        )
-
+    entitlement = require_credit(store, user.sub)
     _reject_if_job_in_flight(entitlement.frozen)
 
     key: str | None = None
@@ -89,15 +86,20 @@ def generate(payload: GenerateRequest, user: CurrentUserDep, store: StoreDep) ->
         picture = store.get_picture(user.sub, str(payload.picture_id))
         if picture is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Picture not found.")
-        if picture.status is not PictureStatus.DESCRIBED or not picture.keywords:
+        if (
+            picture.status is not PictureStatus.DESCRIBED
+            or not picture.keywords
+            or not picture.summary
+        ):
             # The keywords screen waits for DESCRIBED before offering Begin;
-            # reaching here otherwise is a client racing itself.
+            # reaching here otherwise is a client racing itself. A reading is
+            # keywords *and* summary -- never half of one.
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
                 detail="The picture has not been read yet.",
             )
         key = picture_key(user.sub, str(payload.picture_id))
-        description = PictureDescription(keywords=picture.keywords, summary=picture.summary or "")
+        description = PictureDescription(keywords=picture.keywords, summary=picture.summary)
 
     job_id = str(uuid.uuid4())
     if not store.create_job(
@@ -149,8 +151,11 @@ def get_job(job_id: str, user: CurrentUserDep, store: StoreDep) -> JobResponse:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found.")
 
     audio_url = None
+    picture_url = None
     if job.status is JobStatus.DONE and job.audio_key:
-        audio_url = _audio_url(job.audio_key)
+        audio_url = _signed_url(job.audio_key)
+        if job.picture_key:
+            picture_url = _signed_url(job.picture_key)
 
     return JobResponse(
         job_id=job.job_id,
@@ -159,6 +164,7 @@ def get_job(job_id: str, user: CurrentUserDep, store: StoreDep) -> JobResponse:
         status=JobStatus.FAILED if job.status is JobStatus.ROLLED_BACK else job.status,
         audio_url=audio_url,
         picture_keywords=job.picture_keywords,
+        picture_url=picture_url,
     )
 
 
@@ -181,12 +187,13 @@ def _reject_if_job_in_flight(frozen: int) -> None:
         )
 
 
-def _audio_url(audio_key: str) -> str:
-    """A short-lived CloudFront signed URL for the narration (constraint 6).
+def _signed_url(key: str) -> str:
+    """A short-lived CloudFront signed URL for user content (constraint 6).
 
     Signing happens at the edge distribution, not on the bucket: the object is
     served from CloudFront and the bucket stays reachable only through OAC.
-    Only ``jobs/*`` is signed -- the shared BGM under ``assets/*`` is public and
-    cached, so the player can switch tracks without a round trip here.
+    ``jobs/*`` (narration) and ``pictures/*`` (the upload) are the signed
+    behaviours; the shared BGM under ``assets/*`` is public and cached, so the
+    player can switch tracks without a round trip here.
     """
-    return cloudfront_signer.signed_url(audio_key)
+    return cloudfront_signer.signed_url(key)

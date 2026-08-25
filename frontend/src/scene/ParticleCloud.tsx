@@ -385,6 +385,11 @@ export default function ParticleCloud(props: ParticleCloudProps) {
     let stale = false
     const img = new Image()
     img.crossOrigin = 'anonymous'
+    // A signed URL to an object the lifecycle rule has reaped, or a blocked
+    // load: the procedural nebula, not whatever picture was sampled last.
+    img.onerror = () => {
+      if (!stale && defaultDataRef.current) apply(defaultDataRef.current)
+    }
     img.onload = () => {
       if (stale) return
       const S = 190

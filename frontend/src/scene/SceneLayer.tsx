@@ -3,7 +3,7 @@
  * route. Opacity, mood, pulse and scrim strength per screen are lifted from
  * the prototype's renderVals mapping (Meditation PWA Prototype.dc.html).
  */
-import { Suspense, lazy } from 'react'
+import { Suspense, lazy, useEffect } from 'react'
 import { useLocation } from 'react-router-dom'
 import type { CloudMood } from './ParticleCloud'
 import { useScene } from './SceneContext'
@@ -36,9 +36,20 @@ function sceneFor(pathname: string, withPicture: boolean): RouteScene {
   return { heroOpacity: 0.56, mood: 'whisper', scrimOpacity: 0.5, paused: false }
 }
 
+/** The routes a chosen picture travels through; anywhere else clears it. */
+const CARRIES_PICTURE = /^\/(|generating\/.*|player\/.*)$/
+
 export default function SceneLayer() {
   const { pathname } = useLocation()
-  const { focus, playing, cloudSrc, dissolve, heroDim } = useScene()
+  const { focus, playing, cloudSrc, dissolve, heroDim, resetCloud } = useScene()
+
+  // One place decides where the user's picture may show: home (where it is
+  // chosen), the waiting screen and the player. Leaving that flow -- to sign
+  // in, the account, the plans, the collection -- drops it, so no other
+  // screen ever sits on someone's photo and no page has to remember to reset.
+  useEffect(() => {
+    if (!CARRIES_PICTURE.test(pathname)) resetCloud()
+  }, [pathname, resetCloud])
   const scene = sceneFor(pathname, cloudSrc !== '')
 
   const onPlayer = pathname.startsWith('/player')

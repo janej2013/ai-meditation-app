@@ -23,7 +23,7 @@ between modules is safe; renaming it is not.
 
 from __future__ import annotations
 
-from typing import NoReturn
+from typing import Literal, NoReturn
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -52,13 +52,20 @@ class PipelineState(BaseModel):
 
 
 class PictureState(BaseModel):
-    """Payload of the picture state machine's one task: ids only. The key is
-    derived from them and the reading lands on the PICTURE item."""
+    """Payload of the picture state machine: ids, the attempt token, and
+    which of the Lambda's two jobs to do. The key is derived from the ids and
+    the reading lands on the PICTURE item; ``attempt`` is the claim timestamp
+    (never user content) that every write is conditioned on."""
 
     model_config = ConfigDict(extra="ignore")
 
     user_id: str
     picture_id: str
+    attempt: str
+    # "describe" is the task; "mark_failed" is what the machine's Catch runs
+    # so an attempt that ended in Step Functions (retries exhausted, task
+    # timeout) still records its failure on the item.
+    mode: Literal["describe", "mark_failed"] = "describe"
 
 
 class PipelineError(Exception):

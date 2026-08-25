@@ -61,10 +61,10 @@ Deliberate deferrals, recorded so they read as decisions rather than oversights.
   know. The `Cannot update bucket policy of an imported bucket` warning on every synth is this.
 
   What it costs: anyone who can create a CloudFront distribution in this account can point one at
-  the audio bucket and read `jobs/*` without a signature. That needs CloudFront-create permission
+  the audio bucket and read `jobs/*` and `pictures/*` without a signature. That needs CloudFront-create permission
   already, so it is not an external exposure — but it does mean the signed-URL requirement rests on
   the distribution's key group alone, with no second line behind it. **It compounds with deploying
-  without `-c audio_public_key_pem`**: no key group means `jobs/*` is already unsigned on the
+  without `-c audio_public_key_pem`**: no key group means `jobs/*` and `pictures/*` are already unsigned on the
   intended distribution, and this policy means a second one would work too.
 
   Closing it properly means co-locating the bucket and its distribution in one stack, which trades
@@ -104,7 +104,7 @@ pictures are kept so a future variant of replay could re-weave them; nothing in 
 deletes them. Replay itself (dreamscapes, below) needs only the narration, which is why the
 narration outlives the picture.
 The bucket stays private and audio bytes never stream through Lambda: delivery is a CloudFront
-signed URL for `jobs/*` and plain cached CloudFront objects for `assets/*` — see *frontend
+signed URL for `jobs/*` and `pictures/*` and plain cached CloudFront objects for `assets/*` — see *frontend
 delivery* below. Download CORS lives on the distribution's response headers policy; the bucket
 itself carries one CORS rule, `POST` only from the site origins, for the browser's direct
 picture upload (see *Drift from a picture* below).
@@ -336,6 +336,11 @@ original design; the shape now:
    caller's own subject, copies key, keywords and summary onto the JOB item,
    and starts the generation chain — which is when a credit is frozen.
    `generate_script` briefs the model with the reading alone.
+6. Revisiting a picture dreamscape from the collection: `GET /jobs/{id}` also
+   signs a URL to the upload (`picture_url`, same key group as the narration,
+   via the distribution's signed `pictures/*` behaviour), and the player
+   samples it back into the cloud — fully dissolved, the way the prototype
+   shows a dream being replayed.
 
 ### Dreamscapes — revisit and replay
 
@@ -672,6 +677,7 @@ behaviours with opposite rules:
 | path | access | why |
 |---|---|---|
 | `jobs/*` | **signed URL** (trusted key group) | one user's narration |
+| `pictures/*` | **signed URL** (same key group) | one user's uploaded picture, re-sampled into the cloud when a dreamscape is revisited |
 | `assets/*` | public, cached | shared BGM — the player switches tracks mid-session without a round trip |
 
 `GET /jobs/{id}` now mints CloudFront signed URLs (`api/cloudfront_signer.py`,

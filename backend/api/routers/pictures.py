@@ -20,17 +20,24 @@ import json
 import logging
 import os
 import uuid
+from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
 
 import boto3
 from botocore.config import Config
-from botocore.exceptions import ClientError
 from fastapi import APIRouter, HTTPException, status
 from pydantic import BaseModel
 
-from api.deps import CurrentUserDep, StoreDep
-from shared.models import MAX_PICTURE_BYTES, PICTURE_CONTENT_TYPE, PictureStatus, picture_key
+from api.deps import CurrentUserDep, StoreDep, require_credit
+from shared.models import (
+    MAX_PICTURE_BYTES,
+    PICTURE_CONTENT_TYPE,
+    PICTURE_DESCRIBE_MAX_ATTEMPTS,
+    Picture,
+    PictureStatus,
+    picture_key,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -75,18 +82,9 @@ class PictureResponse(BaseModel):
     keywords: list[str] | None = None
 
 
-def _require_credit(store: StoreDep, user_id: str) -> None:
-    entitlement = store.get_entitlement(user_id)
-    if entitlement is None or entitlement.available < 1:
-        raise HTTPException(
-            status_code=status.HTTP_402_PAYMENT_REQUIRED,
-            detail="No generations remaining. Add credits to continue.",
-        )
-
-
 @router.post("/pictures/upload", response_model=UploadPictureResponse)
 def create_upload(user: CurrentUserDep, store: StoreDep) -> UploadPictureResponse:
-    _require_credit(store, user.sub)
+    require_credit(store, user.sub)
     picture_id = str(uuid.uuid4())
     key = picture_key(user.sub, picture_id)
 
@@ -116,42 +114,82 @@ def create_upload(user: CurrentUserDep, store: StoreDep) -> UploadPictureRespons
     )
 
 
+def _response(picture: Picture) -> PictureResponse:
+    return PictureResponse(
+        picture_id=picture.picture_id, status=picture.status, keywords=picture.keywords
+    )
+
+
+def _exhausted(picture: Picture) -> bool:
+    return (
+        picture.status is PictureStatus.FAILED
+        and picture.describe_attempts >= PICTURE_DESCRIBE_MAX_ATTEMPTS
+    )
+
+
 @router.post(
     "/pictures/{picture_id}/describe",
     response_model=PictureResponse,
     status_code=status.HTTP_202_ACCEPTED,
 )
 def describe(picture_id: UUID, user: CurrentUserDep, store: StoreDep) -> PictureResponse:
-    """Start the vision step for an upload that has landed. Idempotent: a
-    picture already described (or still being described) is returned as is,
-    and the execution is named after the picture so a double call cannot
-    start a second one."""
-    _require_credit(store, user.sub)
+    """Start (or restart) the vision step for an upload that has landed.
+
+    The PICTURE item owns idempotency, not the execution name: a conditional
+    claim (PENDING/FAILED, or a DESCRIBING attempt older than the machine's
+    timeout, i.e. dead) decides whether this call starts an execution, and
+    the claim's timestamp is the attempt token the execution writes under.
+    A double tap loses the claim and reads back the status; a picture
+    described already is returned as is; a picture tried too many times is
+    refused -- each try is uncompensated Bedrock spend.
+    """
+    require_credit(store, user.sub)
     picture = store.get_picture(user.sub, str(picture_id))
     if picture is None:
         # Another user's, or never authorised: absent either way.
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found.")
+    if picture.status is PictureStatus.DESCRIBED:
+        return _response(picture)
+    if _exhausted(picture):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="This picture could not be read. Try another one.",
+        )
 
-    if picture.status is PictureStatus.PENDING:
-        try:
-            _get_sfn().start_execution(
-                stateMachineArn=os.environ["PICTURE_STATE_MACHINE_ARN"],
-                name=str(picture_id),
-                input=json.dumps({"user_id": user.sub, "picture_id": str(picture_id)}),
+    attempt = store.mark_picture_describing(user.sub, str(picture_id), now=datetime.now(UTC))
+    if attempt is None:
+        # Lost to a live attempt (or to the cap, in a race): report it.
+        current = store.get_picture(user.sub, str(picture_id)) or picture
+        if _exhausted(current):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="This picture could not be read. Try another one.",
             )
-        except ClientError as exc:
-            # Same name already running: the earlier call won; nothing to do.
-            if exc.response.get("Error", {}).get("Code") != "ExecutionAlreadyExists":
-                logger.exception("failed to start picture description picture_id=%s", picture_id)
-                raise HTTPException(
-                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                    detail="Could not read the picture. Please retry.",
-                ) from None
-        logger.info("picture description started picture_id=%s", picture_id)
+        return _response(current)
 
-    return PictureResponse(
-        picture_id=picture.picture_id, status=picture.status, keywords=picture.keywords
-    )
+    try:
+        _get_sfn().start_execution(
+            stateMachineArn=os.environ["PICTURE_STATE_MACHINE_ARN"],
+            # Unique per attempt; the item, not the name, dedupes.
+            name=f"{picture_id}-{uuid.uuid4().hex[:8]}",
+            input=json.dumps(
+                {"user_id": user.sub, "picture_id": str(picture_id), "attempt": attempt}
+            ),
+        )
+    except Exception:
+        # Whatever failed -- a service error, a missing environment variable,
+        # a transport fault -- release the claim so the next call may try
+        # again. If the execution did in fact start, its writes carry this
+        # same attempt token, so its reading can still land over the FAILED.
+        store.mark_picture_failed(user.sub, str(picture_id), attempt=attempt)
+        logger.exception("failed to start picture description picture_id=%s", picture_id)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Could not read the picture. Please retry.",
+        ) from None
+    logger.info("picture description started picture_id=%s", picture_id)
+    # The claim just applied is the whole truth: no re-read needed.
+    return PictureResponse(picture_id=str(picture_id), status=PictureStatus.DESCRIBING)
 
 
 @router.get("/pictures/{picture_id}", response_model=PictureResponse)
@@ -159,6 +197,4 @@ def get_picture(picture_id: UUID, user: CurrentUserDep, store: StoreDep) -> Pict
     picture = store.get_picture(user.sub, str(picture_id))
     if picture is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found.")
-    return PictureResponse(
-        picture_id=picture.picture_id, status=picture.status, keywords=picture.keywords
-    )
+    return _response(picture)
