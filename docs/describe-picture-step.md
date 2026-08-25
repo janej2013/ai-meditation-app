@@ -1,3 +1,11 @@
+> **Implementation note (2026-08-25):** the vision step no longer runs inside the
+> generation chain. It runs in its own one-task state machine *before* any job
+> exists — started by `POST /pictures/{id}/describe`, result on the
+> `PICTURE#<id>` item, polled via `GET /pictures/{id}` — so the keywords screen
+> precedes Begin and a picture session takes no mood text. `POST /generate`
+> copies the reading onto the JOB. The design below is kept as the record of
+> the prompt, the contract and the least-privilege reasoning, which still hold.
+
 # "Drift from a picture" — 服务端图片理解方案（`describe_picture` step）
 
 > 状态：已实现（2026-08-24，分支 `feat/nova-lite-default`），待 dev 真机验证。决策日期 2026-08-24（同日修订：图片长期保留）。

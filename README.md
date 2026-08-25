@@ -211,24 +211,30 @@ Images are built at `cdk deploy`.
 
 ## Architecture — the generation pipeline
 
-`infra/stacks/pipeline_stack.py` builds a Standard state machine over six small
-zip Lambdas:
+`infra/stacks/pipeline_stack.py` builds two Standard state machines. The
+generation chain, over five small zip Lambdas:
 
 ```
-FreezeCredit ──► HasPicture? ──yes──► DescribePicture ──► GenerateScript ──► Synthesize ──► CommitCredit ──► Succeed
-     │                │  no                   │                  │                │              │
-     │                └───────────────────────┼──────────────────┘                │              │
-     │ InsufficientCreditsError               └───────────────────────────────────┴──────────────┤ States.ALL
-     ▼                                                                                           ▼
-InsufficientCredits (Fail)                                                RollbackCredit ──► GenerationFailed (Fail)
+FreezeCredit ──► GenerateScript ──► Synthesize ──► CommitCredit ──► Succeed
+     │                  │                │              │
+     │ InsufficientCreditsError          └──────────────┤ States.ALL
+     ▼                                                  ▼
+InsufficientCredits (Fail)                    RollbackCredit ──► GenerationFailed (Fail)
    no refund — nothing was frozen
 ```
 
+And a one-task picture machine that runs **before** any job exists:
+
+```
+DescribePicture ──► PictureDescribed (Succeed)
+       │ States.ALL
+       ▼
+PictureDescriptionFailed (Fail)   nothing was charged; the PICTURE item is marked FAILED
+```
+
 Execution timeout 35 minutes (`test_state_machine` proves it covers every retry
-policy's worst case); per-state timeouts 30 s / 60 s / 120 s / 180 s / 30 s.
-`HasPicture` is a Choice on the execution input's `has_picture` flag — guarded
-by `IsPresent`, because a Choice cannot Catch and a comparison against a
-missing path would terminate the execution with the credit still frozen.
+policy's worst case); per-state timeouts 30 s / 120 s / 180 s / 30 s. The
+picture machine's single task has 60 s and the same Bedrock retry policy.
 
 There is no mix step — see [Mixing happens in the browser](#mixing-happens-in-the-browser).
 
@@ -287,41 +293,49 @@ class PipelineState(BaseModel):
     audio_key: str | None  # set by synthesize — what the client plays
 ```
 
-`POST /generate` writes `mood_text` (and `picture_key`, when there is one) onto
-the JOB item; `describe_picture` and `generate_script` read them back from
-DynamoDB, and the picture's keywords and summary go onto the same item. The
-generated script goes to S3 for the same reason. Handlers log lengths, counts
-and ids, never content.
+`POST /generate` writes `mood_text` — or, for a picture session, the picture's
+key and the description already produced — onto the JOB item, and
+`generate_script` reads them back from DynamoDB. The generated script goes to
+S3 for the same reason. Handlers log lengths, counts and ids, never content.
 
 ### Drift from a picture
 
-The picture path is open to every user, and the picture is real input to the
-pipeline. See [docs/describe-picture-step.md](docs/describe-picture-step.md)
-for the design; the shape:
+A picture session is its own brief — no mood text — and the picture is read
+**before** the user commits a credit, so the keywords screen can show what was
+found and Begin is an informed choice. See
+[docs/describe-picture-step.md](docs/describe-picture-step.md) for the
+original design; the shape now:
 
-1. The browser normalises the chosen file to one JPEG ≤ 1568 px
+1. Choosing a picture is gated client-side on being signed in with a credit
+   in hand, and every picture route re-checks that server-side (the same 402
+   as `POST /generate`): the vision call runs before anything is frozen, so
+   it is uncompensated Bedrock spend and must not be free to a user with no
+   credits.
+2. The browser normalises the file to one JPEG ≤ 1568 px
    (`frontend/src/picture/prepare.ts`) — Nova reads JPEG/PNG/WebP/GIF only,
    iPhone HEIC needs decoding first, and a canvas re-encode drops EXIF.
-2. `POST /pictures/upload` returns a **presigned S3 POST** for
+3. `POST /pictures/upload` records a `PICTURE#<uuid>` item (status `PENDING`,
+   one-year TTL) and returns a **presigned S3 POST** for
    `pictures/<sub>/<uuid>.jpg`. A POST policy, unlike a presigned PUT, lets
-   the server enforce the size cap (4 MB), the content type and the exact key;
-   the API Lambda is granted `s3:PutObject` on `pictures/*` and nothing else
-   there. The upload starts as soon as the picture is chosen and runs while
-   the user fills in the mood panel.
-3. `POST /generate` takes an optional `picture_id`. The key is rebuilt from
-   the caller's own subject, so a client cannot point a job at anyone else's
-   picture, and it is stored on the JOB item — the execution input carries
-   only `has_picture`.
-4. `describe_picture` asks Amazon Nova Lite (the same model id as the script)
-   for 3–5 keywords and a one-sentence summary as strict JSON, validated by
-   `PictureDescription`. The prompt describes mood, light and place only —
-   never people, never text in the picture (constraint 7 on the vision side).
-   An answer outside the contract fails the step and refunds the credit; it is
-   never silently downgraded to a words-only meditation. The picture is **not
-   deleted** afterwards — that Lambda holds `s3:GetObject` only.
-5. `generate_script` weaves the summary and keywords into its prompt, and
-   `GET /jobs/{id}` exposes `picture_keywords` so the waiting screen can show
-   "In your picture, we found…" while the narration is still being made.
+   the server enforce the size cap (4 MB), the content type and the exact key.
+4. Once S3 has the object, `POST /pictures/{id}/describe` starts the picture
+   state machine — the API never calls Bedrock itself (constraint 2). The
+   execution is named after the picture, so each upload is described at most
+   once. `describe_picture` refuses ids without a PICTURE item (never
+   authorised), asks Amazon Nova Lite for 3–5 keywords and a one-sentence
+   summary as strict JSON (`PictureDescription`; the prompt describes mood,
+   light and place only — never people, never text in the picture), and
+   writes the reading to the item as `DESCRIBED`, or marks it `FAILED` on a
+   permanent error so the screen stops waiting. Nothing to refund: no job
+   exists yet. The picture is **not deleted** — that Lambda holds
+   `s3:GetObject` only.
+5. The PWA polls `GET /pictures/{id}` and shows "In your picture, we found…"
+   with the keywords fading in; only that screen's Begin calls
+   `POST /generate` with `picture_id` (and no `mood` — exactly one of the two).
+   The route requires the picture to be `DESCRIBED`, rebuilds the key from the
+   caller's own subject, copies key, keywords and summary onto the JOB item,
+   and starts the generation chain — which is when a credit is frozen.
+   `generate_script` briefs the model with the reading alone.
 
 ### Dreamscapes — revisit and replay
 
@@ -862,9 +876,10 @@ backend/
                   contracts), tts/ (provider abstraction)
   api/            FastAPI app + Mangum handler, Dockerfile
   functions/      one folder per single-purpose Lambda (freeze_credit,
-                  describe_picture, generate_script, synthesize, commit_credit,
-                  rollback_credit; init_user is the Cognito trigger; mix_audio
-                  is kept but not deployed)
+                  generate_script, synthesize, commit_credit, rollback_credit
+                  in the generation chain; describe_picture in the picture
+                  machine; init_user is the Cognito trigger; mix_audio is kept
+                  but not deployed)
   tests/          pytest + moto
 layers/           generated Lambda layers (gitignored)
 assets/bgm/       background music synced to the audio bucket, mixed in-browser
