@@ -18,12 +18,14 @@ FRAMEWORKS = ("langchain", "langgraph")
 SHARED_AND_NATIVE = sorted(
     [*AGENT_DIR.glob("*.py"), *AGENT_DIR.glob("tools/*.py"), *AGENT_DIR.glob("native/**/*.py")]
 )
-# checkpoint.py is the one bridge to the store; smoke.py is the harness
-# inlined until A4 (it claims, runs and commits turns, as agent_runner will).
+# checkpoint.py is the one bridge to the store; local_harness.py, smoke.py
+# and cli.py are the harness inlined until A4 (they claim, run and commit
+# turns, as agent_runner will).
+LOCAL_DRIVERS = ("checkpoint.py", "local_harness.py", "smoke.py", "cli.py")
 ENGINE_FILES = [
     path
     for path in SHARED_AND_NATIVE
-    if path.name not in ("checkpoint.py", "smoke.py") and "tools" not in path.parts
+    if path.name not in LOCAL_DRIVERS and "tools" not in path.parts
 ]
 
 

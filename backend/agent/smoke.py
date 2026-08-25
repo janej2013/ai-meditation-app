@@ -13,46 +13,46 @@ Environment: TABLE_NAME and STATE_MACHINE_ARN, from the Data and Pipeline
 stack outputs (README, "Calling the deployed API"), plus AWS credentials
 for the dev account.
 
-The model is a scripted stand-in (no Bedrock): three turns that look up
-history, save an insight and finalize a fixed, impersonal brief. A3 swaps
-the stand-in for BedrockConverseProvider at the one marked line. The
-claim / run / commit sequence is the harness's job from A4 on; it is
-inlined here until then.
+By default the model is a scripted stand-in (no Bedrock): three turns that
+look up history, save an insight and finalize a fixed, impersonal brief.
+--bedrock runs the same three user lines through the real model instead
+(costs Bedrock calls; the outcome then depends on the model). The claim /
+run / commit sequence lives in agent.local_harness until A4 moves it into
+the runner.
 """
 
 from __future__ import annotations
 
 import argparse
-import asyncio
 import json
 import logging
 import os
 import sys
 import uuid
 from collections.abc import AsyncIterator
-from datetime import UTC, datetime
 from functools import partial
 from typing import Any
 
 import boto3
 
-from agent.checkpoint import TurnCheckpoint, rebuild_messages
 from agent.contracts import (
     AgentEvent,
     ConverseToolSpec,
-    Deadline,
     Final,
     LLMEvent,
     Message,
     SystemBlock,
     TextBlock,
+    TextDelta,
     ToolChoice,
     ToolStarted,
     ToolUseBlock,
     ToolUseStart,
-    TurnInput,
+    TurnResult,
     Usage,
 )
+from agent.local_harness import DryRunStepFunctions, run_conversation
+from agent.native.llm.converse import BedrockConverseProvider
 from agent.native.loop import NativeEngine
 from agent.tools.default import default_registry
 from agent.tools.registry import ToolContext
@@ -123,18 +123,15 @@ class ScriptedProvider:
         yield Final(content=content, stop_reason="tool_use", usage=Usage())
 
 
-class DryRunStepFunctions:
-    """Prints what would be started instead of starting it."""
-
-    def start_execution(self, **kwargs: Any) -> dict[str, Any]:
-        print(f"[dry-run] start_execution name={kwargs['name']} input={kwargs['input']}")
-        return {"executionArn": "dry-run"}
-
-
 async def _print_event(event: AgentEvent) -> None:
-    # Tool names only; text from the scripted model is not worth echoing.
     if isinstance(event, ToolStarted):
         print(f"  tool: {event.name}")
+    elif isinstance(event, TextDelta) and _SHOW_TEXT:
+        # Only worth showing when a real model wrote it.
+        print(event.text, end="", flush=True)
+
+
+_SHOW_TEXT = False
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -146,6 +143,11 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--duration", type=int, default=3, help="meditation length in minutes")
     parser.add_argument("--dry-run", action="store_true", help="write the rows, start no execution")
+    parser.add_argument(
+        "--bedrock",
+        action="store_true",
+        help="use the real model (AGENT_MODEL_ID) instead of the scripted stand-in",
+    )
     args = parser.parse_args(argv)
 
     for var in ("TABLE_NAME", "STATE_MACHINE_ARN"):
@@ -153,6 +155,8 @@ def main(argv: list[str] | None = None) -> int:
             print(f"{var} is not set", file=sys.stderr)
             return 2
 
+    global _SHOW_TEXT
+    _SHOW_TEXT = args.bedrock
     store = EntitlementStore()
     sfn = DryRunStepFunctions() if args.dry_run else boto3.client("stepfunctions")
     session_id = str(uuid.uuid4())
@@ -162,45 +166,33 @@ def main(argv: list[str] | None = None) -> int:
         store=store,
         start_generation=partial(start_generation, store, sfn),
     )
-    # A3: replace ScriptedProvider with BedrockConverseProvider(...) here.
-    engine = NativeEngine(ScriptedProvider(args.duration), default_registry(), context)
+    provider: Any = (
+        BedrockConverseProvider.from_env() if args.bedrock else ScriptedProvider(args.duration)
+    )
+    model_id = provider.model_id if args.bedrock else "scripted"
+    engine = NativeEngine(provider, default_registry(), context)
 
-    if not store.create_agent_session(
-        args.user_id, session_id, engine="native", model_id="scripted"
-    ):
+    if not store.create_agent_session(args.user_id, session_id, engine="native", model_id=model_id):
         print("could not create the session", file=sys.stderr)
         return 1
-    print(f"session {session_id}")
+    print(f"session {session_id} model {model_id}")
 
-    for turn, (user_text, _, _) in enumerate(SCRIPT):
-        session = store.claim_turn(args.user_id, session_id, engine="native", now=datetime.now(UTC))
-        history = rebuild_messages(store.list_turns(args.user_id, session_id))
-        print(f"turn {turn} (claimed at turn={session.turn})")
-        result = asyncio.run(
-            engine.run_turn(
-                TurnInput(history=history, user_text=user_text, turn=turn),
-                deadline=Deadline.after(110),
-                emit=_print_event,
-            )
-        )
-        checkpoint = TurnCheckpoint.from_result(
-            session_id=session_id, turn=turn, user_text=user_text, result=result
-        )
+    def report(turn: int, result: TurnResult) -> None:
         job_id = result.finalized.job_id if result.finalized else None
-        committed = store.commit_turn(
-            args.user_id,
-            session_id,
-            expected_turn=turn,
-            checkpoint=checkpoint,
-            finalized_job_id=job_id,
-        )
-        print(
-            f"  committed={committed} tools={[r.name for r in result.tool_log]} finalized={job_id}"
-        )
-        if job_id:
-            print(json.dumps({"session_id": session_id, "job_id": job_id}))
-            return 0
+        print(f"\n  turn {turn}: tools={[r.name for r in result.tool_log]} finalized={job_id}")
 
+    job_id = run_conversation(
+        store,
+        engine,
+        args.user_id,
+        session_id,
+        (user_text for user_text, _, _ in SCRIPT),
+        emit=_print_event,
+        on_turn=report,
+    )
+    if job_id:
+        print(json.dumps({"session_id": session_id, "job_id": job_id}))
+        return 0
     print("the script ended without finalizing", file=sys.stderr)
     return 1
 
