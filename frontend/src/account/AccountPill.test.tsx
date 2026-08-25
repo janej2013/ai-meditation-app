@@ -49,6 +49,16 @@ describe('AccountPill', () => {
     expect(screen.getByText('ACCOUNT SCREEN')).toBeInTheDocument()
   })
 
+  it('does not refetch on the waiting screen, where the read would race the freeze', async () => {
+    vi.mocked(isSignedIn).mockResolvedValue(true)
+    vi.mocked(getAccount).mockResolvedValue({ available: 3, frozen: 0, plan: 'free' })
+    renderPill('/generating/j1')
+
+    await new Promise((r) => setTimeout(r, 30))
+    expect(getAccount).not.toHaveBeenCalled()
+    expect(screen.getByText('Sign in')).toBeInTheDocument() // nothing known yet
+  })
+
   it('still offers the account when the balance cannot be read', async () => {
     vi.mocked(isSignedIn).mockResolvedValue(true)
     vi.mocked(getAccount).mockRejectedValue(new Error('offline'))
