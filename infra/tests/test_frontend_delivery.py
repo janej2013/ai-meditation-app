@@ -152,6 +152,16 @@ def test_jobs_requires_a_signed_url(template):
     assert jobs["TrustedKeyGroups"]
 
 
+def test_pictures_requires_a_signed_url(template):
+    """The revisit cloud samples the user's own upload through CloudFront; the
+    key is unguessable but that is not a policy, a signature is."""
+    config = distribution(template, "audio")
+    pictures = next(b for b in config["CacheBehaviors"] if b["PathPattern"] == "pictures/*")
+
+    assert pictures["TrustedKeyGroups"]
+    assert pictures["ViewerProtocolPolicy"] == "redirect-to-https"
+
+
 def test_assets_is_not_signed(template):
     """BGM is shared and switchable mid-session.
 
@@ -165,12 +175,15 @@ def test_assets_is_not_signed(template):
     assert not default.get("TrustedSigners")
 
 
-def test_the_audio_distribution_has_exactly_one_signed_behavior(template):
-    """Guards against a second path quietly joining the signed set."""
+def test_exactly_the_user_content_paths_are_signed(template):
+    """Both directions matter: a path quietly joining the signed set, and --
+    the trap the unsigned default makes easy -- user content that never got a
+    behaviour and falls through to public. Narration and pictures are user
+    content; the shared BGM is not."""
     config = distribution(template, "audio")
-    signed = [b["PathPattern"] for b in config["CacheBehaviors"] if b.get("TrustedKeyGroups")]
+    signed = {b["PathPattern"] for b in config["CacheBehaviors"] if b.get("TrustedKeyGroups")}
 
-    assert signed == ["jobs/*"]
+    assert signed == {"jobs/*", "pictures/*"}
 
 
 def test_the_public_key_reaches_a_key_group(template):

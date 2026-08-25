@@ -223,9 +223,10 @@ class FrontendStack(Stack):
             key_pair_id = public_key.public_key_id
 
         # assets/* is the default: unsigned and cacheable. Making the *signed*
-        # behaviour the explicit one means a new path added later is public by
-        # naming rather than private by accident -- but jobs/* is pinned below,
-        # so the one path that carries user content can never fall through here.
+        # behaviours the explicit ones means a new path added later is public
+        # by naming rather than private by accident -- but the two paths that
+        # carry user content, jobs/* and pictures/*, are pinned below and can
+        # never fall through here.
         distribution = cloudfront.Distribution(
             self,
             "AudioDistribution",
@@ -245,6 +246,19 @@ class FrontendStack(Stack):
                     # Signed URLs only. Without a key group configured this
                     # behaviour is still separate, so wiring the key later does
                     # not move the path.
+                    trusted_key_groups=[key_group] if key_group else None,
+                    cache_policy=cloudfront.CachePolicy.CACHING_OPTIMIZED,
+                    response_headers_policy=cors_headers,
+                    compress=False,
+                ),
+                # A user's uploaded picture, re-sampled into the cloud when a
+                # dreamscape is revisited. User content, so signed like the
+                # narration -- and without this behaviour the path would fall
+                # through to the unsigned default above. CORS because the
+                # cloud samples pixels through an anonymous cross-origin image.
+                "pictures/*": cloudfront.BehaviorOptions(
+                    origin=audio_origin,
+                    viewer_protocol_policy=cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
                     trusted_key_groups=[key_group] if key_group else None,
                     cache_policy=cloudfront.CachePolicy.CACHING_OPTIMIZED,
                     response_headers_policy=cors_headers,
