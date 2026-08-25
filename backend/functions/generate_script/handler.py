@@ -76,8 +76,8 @@ def lambda_handler(event: dict[str, Any], context: object) -> dict[str, Any]:  #
     store = _get_store()
 
     job = store.get_job(state.user_id, state.job_id)
-    if job is None or not job.mood_text:
-        raise ScriptGenerationError(f"job {state.job_id} has no mood text to work from")
+    if job is None:
+        raise ScriptGenerationError(f"job {state.job_id} does not exist")
 
     store.mark_job_generating(state.user_id, state.job_id)
 
@@ -86,12 +86,10 @@ def lambda_handler(event: dict[str, Any], context: object) -> dict[str, Any]:  #
     picture = None
     if job.picture_keywords and job.picture_summary:
         picture = PictureDescription(keywords=job.picture_keywords, summary=job.picture_summary)
-    if state.has_picture and picture is None:
-        # The Choice routed through describe_picture, yet its result never
-        # reached the item (a conditionally rejected write, most likely).
-        # Fail and refund rather than quietly delivering the words-only
-        # meditation the user did not ask for.
-        raise ScriptGenerationError(f"job {state.job_id} lost its picture description")
+    if picture is None and not job.mood_text:
+        # A picture job whose description never landed, or a words job with no
+        # words: fail and refund rather than invent a meditation from nothing.
+        raise ScriptGenerationError(f"job {state.job_id} has neither words nor a picture")
 
     script = _generate(job.mood_text, _effective_duration(state.duration_minutes), picture)
 

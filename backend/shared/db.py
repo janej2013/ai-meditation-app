@@ -27,15 +27,19 @@ from shared.models import (
     DEFAULT_PLAN,
     ENTITLEMENT_SK,
     FREE_SIGNUP_CREDITS,
+    PICTURE_ITEM_TTL_DAYS,
     PROFILE_SK,
     BillingOperationResult,
     CreditOperationResult,
     Entitlement,
     Job,
     JobStatus,
+    Picture,
     PictureDescription,
+    PictureStatus,
     event_sk,
     job_sk,
+    picture_sk,
     subscription_sk,
     user_pk,
 )
@@ -211,15 +215,17 @@ class EntitlementStore:
         self,
         user_id: str,
         job_id: str,
-        mood_text: str,
+        mood_text: str | None,
         duration_minutes: int,
         picture_key: str | None = None,
+        picture: PictureDescription | None = None,
     ) -> bool:
         """Create a PENDING job. False if the job_id was already used.
 
-        ``mood_text`` and ``picture_key`` are stored here rather than passed
-        through the state machine, keeping user input out of the execution
-        history (constraint 7).
+        A job drifts from words (``mood_text``) or from a picture (its key and
+        the description the vision step already produced) -- never both. All
+        of it is stored here rather than passed through the state machine,
+        keeping user input out of the execution history (constraint 7).
         """
         now = _now_iso()
         item: dict[str, Any] = {
@@ -228,14 +234,93 @@ class EntitlementStore:
             "entity_type": "JOB",
             "job_id": job_id,
             "status": JobStatus.PENDING.value,
-            "mood_text": mood_text,
             "duration_minutes": duration_minutes,
             "created_at": now,
             "updated_at": now,
         }
+        if mood_text:
+            item["mood_text"] = mood_text
         if picture_key:
             item["picture_key"] = picture_key
+        if picture is not None:
+            item["picture_keywords"] = picture.keywords
+            item["picture_summary"] = picture.summary
         return self._put_if_absent(item)
+
+    # ------------------------------------------------------------------
+    # Pictures (described before any job exists)
+    # ------------------------------------------------------------------
+
+    def create_picture(self, user_id: str, picture_id: str) -> bool:
+        """Record an upload the caller was authorised for. False on replay."""
+        return self._put_if_absent(
+            {
+                "PK": user_pk(user_id),
+                "SK": picture_sk(picture_id),
+                "entity_type": "PICTURE",
+                "picture_id": picture_id,
+                "status": PictureStatus.PENDING.value,
+                "created_at": _now_iso(),
+                "expires_at": _ttl_epoch(PICTURE_ITEM_TTL_DAYS),
+            }
+        )
+
+    def get_picture(self, user_id: str, picture_id: str) -> Picture | None:
+        response = self.client.get_item(
+            TableName=self.table_name,
+            Key=_marshal({"PK": user_pk(user_id), "SK": picture_sk(picture_id)}),
+            ConsistentRead=True,
+        )
+        item = response.get("Item")
+        if not item:
+            return None
+        return Picture.model_validate({**_unmarshal(item), "user_id": user_id})
+
+    def set_picture_description(
+        self, user_id: str, picture_id: str, description: PictureDescription
+    ) -> None:
+        """Record what the vision model saw. Idempotent: a retry rewrites the
+        same reading; a picture that has moved on is left alone."""
+        self._update_picture(
+            user_id,
+            picture_id,
+            update="SET #status = :described, keywords = :kw, summary = :summary",
+            condition="attribute_exists(PK) AND #status IN (:pending, :described)",
+            values={
+                ":described": PictureStatus.DESCRIBED.value,
+                ":pending": PictureStatus.PENDING.value,
+                ":kw": description.keywords,
+                ":summary": description.summary,
+            },
+        )
+
+    def mark_picture_failed(self, user_id: str, picture_id: str) -> None:
+        """The vision step gave up: the keywords screen stops waiting."""
+        self._update_picture(
+            user_id,
+            picture_id,
+            update="SET #status = :failed",
+            condition="attribute_exists(PK) AND #status = :pending",
+            values={
+                ":failed": PictureStatus.FAILED.value,
+                ":pending": PictureStatus.PENDING.value,
+            },
+        )
+
+    def _update_picture(
+        self, user_id: str, picture_id: str, *, update: str, condition: str, values: dict[str, Any]
+    ) -> None:
+        try:
+            self.client.update_item(
+                TableName=self.table_name,
+                Key=_marshal({"PK": user_pk(user_id), "SK": picture_sk(picture_id)}),
+                UpdateExpression=update,
+                ConditionExpression=condition,
+                ExpressionAttributeNames=dict(_STATUS_NAMES),
+                ExpressionAttributeValues=_marshal(values),
+            )
+        except self.client.exceptions.ConditionalCheckFailedException:
+            logger.info("picture update skipped (replay or missing) picture_id=%s", picture_id)
 
     def set_job_picture_description(
         self, user_id: str, job_id: str, description: PictureDescription

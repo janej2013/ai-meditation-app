@@ -185,6 +185,7 @@ def main() -> None:
         allowed_origins=allowed_origins,
         audio_bucket=data.audio_bucket,
         state_machine=pipeline.state_machine,
+        picture_state_machine=pipeline.picture_state_machine,
         audio_domain_name=frontend.audio_distribution.distribution_domain_name,
         cloudfront_key_pair_id=frontend.audio_key_pair_id,
         cloudfront_key_secret_name=(

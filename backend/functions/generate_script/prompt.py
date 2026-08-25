@@ -60,7 +60,7 @@ def min_script_chars(duration_minutes: int) -> int:
 
 
 def build_user_message(
-    mood_text: str,
+    mood_text: str | None,
     duration_minutes: int,
     picture: PictureDescription | None = None,
 ) -> str:
@@ -73,10 +73,13 @@ def build_user_message(
     already stripped of anything identifying.
     """
     words = target_word_count(duration_minutes)
-    parts = [f"The listener described how they feel:\n\n{mood_text}"]
+    parts: list[str] = []
+    if mood_text:
+        parts.append(f"The listener described how they feel:\n\n{mood_text}")
     if picture is not None:
+        # A picture session has no words: the picture is the whole brief.
         parts.append(
-            f"The listener also chose a picture. It felt like: {picture.summary}\n"
+            f"The listener chose a picture to drift from. It felt like: {picture.summary}\n"
             f"Weave these images through the meditation: {', '.join(picture.keywords)}.\n"
             "Do not mention that a picture was used."
         )

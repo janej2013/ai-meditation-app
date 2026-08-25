@@ -1,8 +1,9 @@
-"""The picture step's wiring: storage, routing, and least privilege.
+"""The picture step's wiring: storage, its own state machine, least privilege.
 
-Pictures are kept for the planned replay feature, so the bucket -- not any
-Lambda -- is what eventually deletes them; and the Choice that routes around
-DescribePicture must never be able to fault on an execution that predates it.
+Pictures are kept so a future replay variant could re-weave them, so the
+bucket -- not any Lambda -- is what eventually deletes them. The vision step
+runs in a one-task machine *before* any job exists, so the generation chain
+no longer routes around it.
 """
 
 from __future__ import annotations
@@ -49,22 +50,45 @@ def test_bucket_cors_admits_only_the_upload_post() -> None:
     assert rules[0]["AllowedOrigins"] == ORIGINS
 
 
-def test_freeze_routes_through_a_choice_on_has_picture(states) -> None:
-    choice = states[states["FreezeCreditTask"]["Next"]]
-    assert choice["Type"] == "Choice"
-
-    [rule] = choice["Choices"]
-    assert rule["Next"] == "DescribePictureTask"
-    # Presence first: a Choice cannot Catch, and comparing a missing path is a
-    # States.Runtime fault that would strand the frozen credit.
-    assert rule["And"][0] == {"Variable": "$.has_picture", "IsPresent": True}
-    assert rule["And"][1] == {"Variable": "$.has_picture", "BooleanEquals": True}
-    assert choice["Default"] == "GenerateScriptTask"
-    assert states["DescribePictureTask"]["Next"] == "GenerateScriptTask"
+def test_the_generation_chain_no_longer_branches_on_a_picture(states) -> None:
+    """The picture is described before Begin; generate_script reads the
+    result off the JOB item, so the chain is straight again."""
+    assert states["FreezeCreditTask"]["Next"] == "GenerateScriptTask"
+    assert "HasPicture" not in states
+    assert "DescribePictureTask" not in states
 
 
-def test_describe_picture_retries_transient_bedrock_errors(states) -> None:
-    [retry] = states["DescribePictureTask"]["Retry"]
+def picture_machine_states(pipeline_stack) -> dict:
+    template = assertions.Template.from_stack(pipeline_stack)
+    machines = template.find_resources("AWS::StepFunctions::StateMachine")
+    [picture] = [
+        m for m in machines.values() if "picture" in str(m["Properties"].get("StateMachineName"))
+    ]
+    # The definition is an Fn::Join over literal chunks and Lambda ARN tokens.
+    chunks = picture["Properties"]["DefinitionString"]["Fn::Join"][1]
+    # Tokens sit inside JSON string values, so a bare placeholder keeps the
+    # document parseable (same trick as conftest.state_machine_definition).
+    text = "".join(c if isinstance(c, str) else "arn" for c in chunks)
+    import json
+
+    return json.loads(text)["States"]
+
+
+def test_the_picture_machine_describes_then_succeeds_or_fails_without_a_refund(
+    pipeline_stack,
+) -> None:
+    states = picture_machine_states(pipeline_stack)
+    task = states["DescribePictureTask"]
+    assert task["Next"] == "PictureDescribed"
+    assert states["PictureDescribed"]["Type"] == "Succeed"
+    [catch] = task["Catch"]
+    assert catch["Next"] == "PictureDescriptionFailed"
+    assert states["PictureDescriptionFailed"]["Type"] == "Fail"
+    assert "RollbackCreditTask" not in states  # nothing was frozen
+
+
+def test_describe_picture_retries_transient_bedrock_errors(pipeline_stack) -> None:
+    [retry] = picture_machine_states(pipeline_stack)["DescribePictureTask"]["Retry"]
     assert "BedrockTransientError" in retry["ErrorEquals"]
     assert retry["MaxAttempts"] == 3
 

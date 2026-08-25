@@ -39,6 +39,7 @@ class ApiStack(Stack):
         allowed_origins: list[str],
         audio_bucket: s3.IBucket,
         state_machine: sfn.IStateMachine,
+        picture_state_machine: sfn.IStateMachine,
         audio_domain_name: str,
         cloudfront_key_pair_id: str,
         cloudfront_key_secret_name: str = DEFAULT_CLOUDFRONT_KEY_SECRET_NAME,
@@ -74,6 +75,7 @@ class ApiStack(Stack):
                 "TABLE_NAME": table.table_name,
                 "AUDIO_BUCKET": audio_bucket.bucket_name,
                 "STATE_MACHINE_ARN": state_machine.state_machine_arn,
+                "PICTURE_STATE_MACHINE_ARN": picture_state_machine.state_machine_arn,
                 # Signing config for GET /jobs/{id}. The key pair id is public;
                 # only the ARN of the private key travels here (constraint 4).
                 "CLOUDFRONT_AUDIO_DOMAIN": audio_domain_name,
@@ -108,6 +110,9 @@ class ApiStack(Stack):
         # Starting the pipeline is the API's only write to Step Functions
         # (constraint 2) -- it never describes or stops an execution.
         state_machine.grant_start_execution(self.api_function)
+        # POST /pictures/{id}/describe starts the vision step the same way:
+        # the API never calls Bedrock itself.
+        picture_state_machine.grant_start_execution(self.api_function)
 
         # GET /jobs/{id} mints a CloudFront signed URL, so the Lambda needs the
         # signing key -- and no longer needs s3:GetObject at all. Bytes are
@@ -196,6 +201,16 @@ class ApiStack(Stack):
         self.http_api.add_routes(
             path="/pictures/upload",
             methods=[apigwv2.HttpMethod.POST],
+            integration=integration,
+        )
+        self.http_api.add_routes(
+            path="/pictures/{picture_id}/describe",
+            methods=[apigwv2.HttpMethod.POST],
+            integration=integration,
+        )
+        self.http_api.add_routes(
+            path="/pictures/{picture_id}",
+            methods=[apigwv2.HttpMethod.GET],
             integration=integration,
         )
         self.http_api.add_routes(

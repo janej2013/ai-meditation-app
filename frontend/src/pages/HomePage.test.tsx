@@ -16,6 +16,7 @@ vi.mock('../api/client', async (importOriginal) => {
     getAccount: vi.fn(),
     startGeneration: vi.fn(),
     uploadPicture: vi.fn(),
+    describeUploadedPicture: vi.fn(),
   }
 })
 vi.mock('../auth/cognito', () => ({
@@ -27,7 +28,13 @@ vi.mock('../picture/prepare', () => ({
   prepareJpeg: vi.fn(),
 }))
 
-import { ApiError, getAccount, startGeneration, uploadPicture } from '../api/client'
+import {
+  ApiError,
+  describeUploadedPicture,
+  getAccount,
+  startGeneration,
+  uploadPicture,
+} from '../api/client'
 import { isSignedIn } from '../auth/cognito'
 import { prepareJpeg } from '../picture/prepare'
 import HomePage from './HomePage'
@@ -65,6 +72,7 @@ beforeEach(() => {
   URL.revokeObjectURL = vi.fn()
   vi.mocked(prepareJpeg).mockResolvedValue(new Blob(['jpeg'], { type: 'image/jpeg' }))
   vi.mocked(uploadPicture).mockResolvedValue('pic-1')
+  vi.mocked(describeUploadedPicture).mockResolvedValue(['dusk', 'ocean', 'longing'])
 })
 
 afterEach(() => vi.restoreAllMocks())
@@ -79,7 +87,7 @@ describe('HomePage', () => {
     await user.click(screen.getByRole('button', { name: 'Begin drifting' }))
 
     await waitFor(() => expect(screen.getByText('GENERATING SCREEN')).toBeInTheDocument())
-    expect(startGeneration).toHaveBeenCalledWith('Stressed', 10, undefined)
+    expect(startGeneration).toHaveBeenCalledWith({ mood: 'Stressed' }, 10)
   })
 
   it('folds the destination into the mood string', async () => {
@@ -93,9 +101,8 @@ describe('HomePage', () => {
 
     await waitFor(() =>
       expect(startGeneration).toHaveBeenCalledWith(
-        "Can't sleep — drifting to ocean",
+        { mood: "Can't sleep — drifting to ocean" },
         10,
-        undefined,
       ),
     )
   })
@@ -110,7 +117,7 @@ describe('HomePage', () => {
     await user.click(screen.getByRole('button', { name: 'Begin drifting' }))
 
     await waitFor(() =>
-      expect(startGeneration).toHaveBeenCalledWith('tired but restless', 10, undefined),
+      expect(startGeneration).toHaveBeenCalledWith({ mood: 'tired but restless' }, 10),
     )
   })
 
@@ -136,12 +143,11 @@ describe('HomePage', () => {
     await waitFor(() => expect(screen.getByText(/already being created/i)).toBeInTheDocument())
   })
 
-  it('lets any user drift from a picture — no gate on the way in', async () => {
+  it('reads the picture first and starts from its keywords -- no mood asked', async () => {
     vi.mocked(startGeneration).mockResolvedValue({ job_id: 'j1', status: 'PENDING' })
     const { container } = renderHome()
     const { userEvent } = await import('@testing-library/user-event')
     const user = userEvent.setup()
-
     await user.click(screen.getByRole('button', { name: 'a picture' }))
     expect(screen.getByText('Let a picture become your dreamscape')).toBeInTheDocument()
 
@@ -150,36 +156,59 @@ describe('HomePage', () => {
       target: { files: [new File(['x'], 'sunset.png', { type: 'image/png' })] },
     })
 
-    // Straight onto the mood panel, dreamscape kept — no Plus wall. The
-    // upload starts now, in the background.
-    expect(await screen.findByText('Choose another picture')).toBeInTheDocument()
+    // The reading arrives; Begin is offered only then, and never a mood chip.
+    expect(await screen.findByText('In your picture, we found…')).toBeInTheDocument()
+    expect(screen.getByText('longing')).toBeInTheDocument()
     expect(uploadPicture).toHaveBeenCalledTimes(1)
-    await user.click(screen.getByRole('button', { name: 'Low' }))
+    expect(describeUploadedPicture).toHaveBeenCalledWith('pic-1', expect.anything())
     await user.click(screen.getByRole('button', { name: 'Begin drifting' }))
 
     await waitFor(() => expect(screen.getByText('GENERATING SCREEN')).toBeInTheDocument())
-    // Begin hands the upload's id to the API so the pipeline describes it.
-    expect(startGeneration).toHaveBeenCalledWith('Low', 10, 'pic-1')
+    expect(startGeneration).toHaveBeenCalledWith({ pictureId: 'pic-1' }, 10)
   })
 
-  it('stays put with a message when the picture upload failed', async () => {
-    vi.mocked(uploadPicture).mockRejectedValue(new ApiError(403, 'Forbidden'))
+  it('gates the file dialog on a credit in hand', async () => {
+    vi.mocked(getAccount).mockResolvedValue({ available: 0, frozen: 0, plan: 'free' })
     const { container } = renderHome()
     const { userEvent } = await import('@testing-library/user-event')
     const user = userEvent.setup()
+    await user.click(screen.getByRole('button', { name: 'a picture' }))
+    const input = container.querySelector('input[type="file"]') as HTMLInputElement
+    const click = vi.spyOn(input, 'click')
 
+    await user.click(screen.getByRole('button', { name: 'Choose a picture' }))
+
+    await waitFor(() => expect(screen.getByText('PLANS SCREEN')).toBeInTheDocument())
+    expect(click).not.toHaveBeenCalled()
+  })
+
+  it('sends a signed-out user to signup before the file dialog', async () => {
+    vi.mocked(isSignedIn).mockResolvedValue(false)
+    renderHome()
+    const { userEvent } = await import('@testing-library/user-event')
+    const user = userEvent.setup()
+    await user.click(screen.getByRole('button', { name: 'a picture' }))
+
+    await user.click(screen.getByRole('button', { name: 'Choose a picture' }))
+
+    await waitFor(() => expect(screen.getByText('SIGNUP SCREEN')).toBeInTheDocument())
+  })
+
+  it('says so when the picture cannot be read, and offers another', async () => {
+    vi.mocked(describeUploadedPicture).mockRejectedValue(new ApiError(422, 'unreadable'))
+    const { container } = renderHome()
+    const { userEvent } = await import('@testing-library/user-event')
+    const user = userEvent.setup()
     await user.click(screen.getByRole('button', { name: 'a picture' }))
     const input = container.querySelector('input[type="file"]') as HTMLInputElement
     fireEvent.change(input, {
       target: { files: [new File(['x'], 'sunset.png', { type: 'image/png' })] },
     })
-    await screen.findByText('Choose another picture')
-    await user.click(screen.getByRole('button', { name: 'Low' }))
-    await user.click(screen.getByRole('button', { name: 'Begin drifting' }))
 
-    await waitFor(() =>
-      expect(screen.getByText(/didn't finish uploading/i)).toBeInTheDocument(),
-    )
+    expect(
+      await screen.findByText("We couldn't read that picture. Try another one."),
+    ).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Begin drifting' })).toBeDisabled()
     expect(startGeneration).not.toHaveBeenCalled()
   })
 
@@ -188,14 +217,15 @@ describe('HomePage', () => {
     const { container } = renderHome()
     const { userEvent } = await import('@testing-library/user-event')
     const user = userEvent.setup()
-
     await user.click(screen.getByRole('button', { name: 'a picture' }))
     const input = container.querySelector('input[type="file"]') as HTMLInputElement
     fireEvent.change(input, {
       target: { files: [new File(['x'], 'photo.heic', { type: 'image/heic' })] },
     })
 
-    await waitFor(() => expect(screen.getByText(/could not be read/i)).toBeInTheDocument())
+    expect(
+      await screen.findByText('That picture could not be read. Please choose a JPEG or PNG.'),
+    ).toBeInTheDocument()
     expect(uploadPicture).not.toHaveBeenCalled()
   })
 

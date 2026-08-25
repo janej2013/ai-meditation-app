@@ -30,6 +30,7 @@ export default function GeneratingPage() {
     feeling?: string
     destination?: string
     pic?: boolean
+    keywords?: string[] | null
   } | null
   const duration = state?.duration ?? 10
   const pic = state?.pic ?? false
@@ -38,7 +39,9 @@ export default function GeneratingPage() {
   const [capOpacity, setCapOpacity] = useState(1)
   const [ready, setReady] = useState(false)
   const [fade, setFade] = useState(1)
-  const [keywords, setKeywords] = useState<string[] | null>(null)
+  // Known before Begin now (the keywords screen); the poll only fills them
+  // in for a session resumed without its handoff state.
+  const [keywords, setKeywords] = useState<string[] | null>(state?.keywords ?? null)
   const abortRef = useRef<AbortController | null>(null)
   const handedOff = useRef(false)
 

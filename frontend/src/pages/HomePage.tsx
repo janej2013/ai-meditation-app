@@ -4,20 +4,27 @@
  * how are you feeling (chips or own words), where to drift to, duration,
  * Begin drifting — or the picture chooser.
  *
- * The picture path is available to everyone. The chosen file is normalised to
- * a small JPEG in the browser (picture/prepare.ts); that blob becomes the
- * object URL the particle cloud samples into the dreamscape (ParticleCloud's
- * src prop), and is uploaded to S3 in the background while the user fills in
- * the panel. Begin waits for the upload and hands its id to POST /generate,
- * where the pipeline's describe_picture step turns it into the keywords the
- * waiting screen shows ("In your picture, we found…").
+ * The picture path is its own brief -- no mood, no destination. Choosing a
+ * picture first checks that the user is signed in with a credit in hand
+ * (the vision call is spent before any credit is frozen); the file is then
+ * normalised to a small JPEG (picture/prepare.ts), becomes the object URL the
+ * particle cloud samples into the dreamscape, is uploaded to S3, and is
+ * described by the picture state machine while the cloud dissolves. The
+ * keywords screen ("In your picture, we found…") shows the reading, and only
+ * its Begin starts a job -- which is when a credit is frozen.
  *
- * The API takes one mood string; the destination is folded into it, so the
- * backend contract is unchanged.
+ * The words path takes one mood string; the destination is folded into it.
  */
 import { useEffect, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { ApiError, NotSignedInError, startGeneration, uploadPicture } from '../api/client'
+import {
+  ApiError,
+  NotSignedInError,
+  describeUploadedPicture,
+  getAccount,
+  startGeneration,
+  uploadPicture,
+} from '../api/client'
 import { DEFAULT_BGM_TRACK, bgmUrl, mixer } from '../audio/mixer'
 import { isSignedIn } from '../auth/cognito'
 import { useDreamCount } from '../dreamscapes/useDreamscapes'
@@ -47,7 +54,7 @@ export default function HomePage() {
   const navigate = useNavigate()
   const { setFocus, cloudSrc, setCloudSrc, setDissolve, setHeroDim } = useScene()
 
-  const [view, setView] = useState<'sentence' | 'picture' | 'panel'>('sentence')
+  const [view, setView] = useState<'sentence' | 'picture' | 'keywords' | 'panel'>('sentence')
   const [moods, setMoods] = useState<string[]>([])
   const [moodMode, setMoodMode] = useState<'chips' | 'text'>('chips')
   const [moodText, setMoodText] = useState('')
@@ -59,14 +66,18 @@ export default function HomePage() {
   const [signedIn, setSignedIn] = useState(false)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  // The picture path's state: the upload id once S3 has it, the reading once
+  // the vision step has, and how many keyword chips have faded in.
+  const [pictureId, setPictureId] = useState<string | null>(null)
+  const [keywords, setKeywords] = useState<string[] | null>(null)
+  const [kwStage, setKwStage] = useState(0)
+  const [pictureError, setPictureError] = useState<string | null>(null)
+  const describeAbort = useRef<AbortController | null>(null)
+  const kwTimers = useRef<ReturnType<typeof setTimeout>[]>([])
 
   const dreamCount = useDreamCount()
   const fileRef = useRef<HTMLInputElement>(null)
   const dissolveTimer = useRef<ReturnType<typeof setInterval> | null>(null)
-  // The in-flight upload of the current picture, started the moment it is
-  // chosen so it is usually done by the time Begin is pressed. Null when the
-  // session is words-only.
-  const upload = useRef<Promise<string> | null>(null)
 
   useEffect(() => {
     // Only whether to gate Begin behind sign-in; the balance itself lives in
@@ -101,10 +112,47 @@ export default function HomePage() {
       return (prev.length >= 2 ? prev.slice(1) : prev).concat(m)
     })
 
+  const clearPicture = () => {
+    describeAbort.current?.abort()
+    kwTimers.current.forEach(clearTimeout)
+    kwTimers.current = []
+    if (dissolveTimer.current) clearInterval(dissolveTimer.current)
+    if (cloudSrc) URL.revokeObjectURL(cloudSrc)
+    setCloudSrc('')
+    setDissolve(1)
+    setPictureId(null)
+    setKeywords(null)
+    setKwStage(0)
+    setPictureError(null)
+  }
+
+  /** The gate in front of the file dialog: the vision step spends before any
+   * credit is frozen, so it is only offered to a signed-in user with one. */
+  const choosePicture = async () => {
+    if (!signedIn) {
+      navigate('/signup', { state: { resume: true } })
+      return
+    }
+    try {
+      const account = await getAccount()
+      if (account.available < 1) {
+        navigate('/plans')
+        return
+      }
+    } catch (e) {
+      if (e instanceof NotSignedInError) {
+        navigate('/signup', { state: { resume: true } })
+        return
+      }
+      // Balance unreadable: let the API's own 402 decide on upload.
+    }
+    fileRef.current?.click()
+  }
+
   const onFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const f = e.target.files && e.target.files[0]
     // Clear the input now: browsers fire no change event when the same file
-    // is re-picked, which would dead-end the "please choose it again" path.
+    // is re-picked, which would dead-end the "choose another" path.
     e.target.value = ''
     if (!f) return
     let picture: Blob
@@ -117,23 +165,70 @@ export default function HomePage() {
       return
     }
     setError(null)
-    if (cloudSrc) URL.revokeObjectURL(cloudSrc)
+    clearPicture()
     setCloudSrc(URL.createObjectURL(picture))
-    // Not awaited: the user fills in the panel meanwhile. A rejection is
-    // caught at Begin, where there is something useful to say about it.
-    const pending = uploadPicture(picture)
-    pending.catch(() => undefined)
-    upload.current = pending
-    // Crisp picture first, then scattering into the dreamy cloud.
+    // Crisp picture first, then scattering into the dreamy cloud -- the
+    // prototype's 3.4 s dissolve, running while the picture is read.
     setDissolve(0)
-    if (dissolveTimer.current) clearInterval(dissolveTimer.current)
     const t0 = Date.now()
     dissolveTimer.current = setInterval(() => {
       const p = Math.min(1, (Date.now() - t0) / DISSOLVE_MS)
       setDissolve(p)
       if (p >= 1 && dissolveTimer.current) clearInterval(dissolveTimer.current)
     }, 60)
-    setView('panel')
+    setView('keywords')
+
+    const controller = new AbortController()
+    describeAbort.current = controller
+    try {
+      const id = await uploadPicture(picture)
+      if (controller.signal.aborted) return
+      setPictureId(id)
+      const found = await describeUploadedPicture(id, { signal: controller.signal })
+      if (controller.signal.aborted) return
+      setKeywords(found)
+      // The prototype's staggered reveal: 900 / 1600 / 2300 ms.
+      found.forEach((_, i) => {
+        kwTimers.current.push(setTimeout(() => setKwStage(i + 1), 900 + i * 700))
+      })
+    } catch (e) {
+      if (controller.signal.aborted) return
+      if (e instanceof NotSignedInError) {
+        navigate('/signup', { state: { resume: true } })
+      } else if (e instanceof ApiError && e.status === 402) {
+        navigate('/plans')
+      } else {
+        setPictureError("We couldn't read that picture. Try another one.")
+      }
+    }
+  }
+
+  const beginFromPicture = async () => {
+    if (!pictureId || !keywords || busy) return
+    setBusy(true)
+    setError(null)
+    if (dissolveTimer.current) clearInterval(dissolveTimer.current)
+    setDissolve(1)
+    // Still inside the click: the only place a mobile browser lets audio
+    // start. The music then runs through the waiting screen into the player.
+    void mixer.startAmbient(bgmUrl(DEFAULT_BGM_TRACK))
+    try {
+      const { job_id } = await startGeneration({ pictureId }, duration)
+      navigate(`/generating/${job_id}`, { state: { duration, keywords, pic: true } })
+    } catch (e) {
+      mixer.stopAmbient()
+      if (e instanceof NotSignedInError) {
+        navigate('/signup', { state: { resume: true } })
+      } else if (e instanceof ApiError && e.status === 402) {
+        navigate('/plans')
+      } else if (e instanceof ApiError && e.status === 429) {
+        setError('A session is already being created. Give it a moment.')
+      } else {
+        setError('Could not start. Please try again.')
+      }
+    } finally {
+      setBusy(false)
+    }
   }
 
   const feeling = moodMode === 'text' ? moodText.trim() : moods.join(', ')
@@ -159,20 +254,9 @@ export default function HomePage() {
     // start. The music then runs through the waiting screen into the player.
     void mixer.startAmbient(bgmUrl(DEFAULT_BGM_TRACK))
     try {
-      let pictureId: string | undefined
-      if (upload.current) {
-        try {
-          pictureId = await upload.current
-        } catch (e) {
-          if (e instanceof NotSignedInError) throw e
-          mixer.stopAmbient()
-          setError("Your picture didn't finish uploading. Please choose it again.")
-          return
-        }
-      }
-      const { job_id } = await startGeneration(mood, duration, pictureId)
+      const { job_id } = await startGeneration({ mood }, duration)
       navigate(`/generating/${job_id}`, {
-        state: { duration, feeling, destination, pic: cloudSrc !== '' },
+        state: { duration, feeling, destination, pic: false },
       })
     } catch (e) {
       mixer.stopAmbient()
@@ -236,12 +320,8 @@ export default function HomePage() {
           <button
             onClick={() => {
               setFocus('idle')
-              // Taking the words path drops any picture chosen earlier: the
-              // upload id must not ride along into a words-only session.
-              if (cloudSrc) URL.revokeObjectURL(cloudSrc)
-              setCloudSrc('')
-              upload.current = null
-              setDissolve(1)
+              // Taking the words path drops any picture chosen earlier.
+              clearPicture()
               setView('panel')
             }}
             onPointerDown={() => setFocus('lines')}
@@ -291,6 +371,7 @@ export default function HomePage() {
 
       {/* Picture chooser. */}
       <div
+        aria-hidden={view !== 'picture'}
         style={{
           position: 'absolute',
           inset: 0,
@@ -365,7 +446,7 @@ export default function HomePage() {
             onChange={onFile}
             style={{ display: 'none' }}
           />
-          <button className="btn-primary" onClick={() => fileRef.current?.click()}>
+          <button className="btn-primary" onClick={() => void choosePicture()}>
             Choose a picture
           </button>
           <div
@@ -380,8 +461,139 @@ export default function HomePage() {
         </div>
       </div>
 
+      {/* Keywords view — the prototype's "In your picture, we found…". Hidden
+          from the accessibility tree when inactive: it carries its own Begin. */}
+      <div
+        aria-hidden={view !== 'keywords'}
+        style={{
+          position: 'absolute',
+          inset: 0,
+          padding: '0 30px',
+          display: 'flex',
+          flexDirection: 'column',
+          transition: 'opacity .3s ease, transform .34s ease',
+          opacity: view === 'keywords' ? 1 : 0,
+          transform: view === 'keywords' ? 'translateY(0)' : 'translateY(16px)',
+          pointerEvents: view === 'keywords' ? 'auto' : 'none',
+        }}
+      >
+        <div style={{ flex: 'none', marginTop: 14 }}>
+          <button
+            onClick={() => {
+              clearPicture()
+              setView('picture')
+            }}
+            style={{
+              background: 'none',
+              border: 'none',
+              padding: '9px 6px 9px 0',
+              margin: '-9px 0',
+              fontSize: 15,
+              color: 'var(--text-back)',
+              cursor: 'pointer',
+            }}
+          >
+            ←
+          </button>
+        </div>
+        <div
+          style={{
+            flex: 1,
+            minHeight: 0,
+            display: 'flex',
+            flexDirection: 'column',
+            justifyContent: 'center',
+            gap: 22,
+            margin: '0 -30px',
+            padding: '0 30px',
+            background:
+              'linear-gradient(to bottom, oklch(0.20 0.032 265 / 0) 0%, oklch(0.20 0.032 265 / 0.58) 26%, oklch(0.20 0.032 265 / 0.78) 50%, oklch(0.20 0.032 265 / 0.72) 78%, oklch(0.20 0.032 265 / 0.30) 100%)',
+          }}
+        >
+          <div
+            style={{
+              font: '300 23px/1.45 var(--font-sans)',
+              color: 'var(--text-primary)',
+              textShadow: '0 0 30px oklch(0.10 0.03 265 / 0.9)',
+            }}
+          >
+            {pictureError
+              ? pictureError
+              : keywords
+                ? 'In your picture, we found…'
+                : 'Reading your picture…'}
+          </div>
+          {keywords && (
+            <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+              {keywords.map((k, i) => (
+                <span
+                  key={k}
+                  style={{
+                    flex: 'none',
+                    borderRadius: 20,
+                    padding: '11px 17px',
+                    font: '400 14.5px var(--font-sans)',
+                    color: 'var(--text-primary)',
+                    background: 'oklch(0.30 0.038 265 / 0.55)',
+                    backdropFilter: 'blur(14px)',
+                    boxShadow: 'inset 0 0 0 1px oklch(0.80 0.085 285 / 0.3)',
+                    transition: 'opacity .8s ease, transform .8s ease',
+                    opacity: kwStage > i ? 1 : 0,
+                    transform: kwStage > i ? 'translateY(0)' : 'translateY(8px)',
+                  }}
+                >
+                  {k}
+                </span>
+              ))}
+            </div>
+          )}
+        </div>
+        <div
+          style={{
+            flex: 'none',
+            margin: '0 -30px',
+            padding: '16px 30px 34px',
+            display: 'flex',
+            flexDirection: 'column',
+            gap: 14,
+            background:
+              'linear-gradient(to bottom, oklch(0.20 0.032 265 / 0.30) 0%, oklch(0.20 0.032 265 / 0.80) 34%, oklch(0.20 0.032 265 / 0.94) 100%)',
+          }}
+        >
+          <button
+            className="btn-primary"
+            onClick={() => void beginFromPicture()}
+            disabled={!keywords || busy}
+          >
+            {busy ? 'Starting…' : 'Begin drifting'}
+          </button>
+          <button
+            className="btn-ghost"
+            style={{ padding: '11px 0' }}
+            onClick={() => {
+              clearPicture()
+              setView('picture')
+            }}
+          >
+            Choose another picture
+          </button>
+          {view === 'keywords' && error && (
+            <div
+              style={{
+                textAlign: 'center',
+                font: '400 12.5px var(--font-sans)',
+                color: 'var(--error)',
+              }}
+            >
+              {error}
+            </div>
+          )}
+        </div>
+      </div>
+
       {/* Panel view — the actual generation form. */}
       <div
+        aria-hidden={!onPanel}
         style={{
           position: 'absolute',
           inset: 0,
@@ -558,11 +770,6 @@ export default function HomePage() {
           >
             {busy ? 'Starting…' : 'Begin drifting'}
           </button>
-          {cloudSrc !== '' && (
-            <button className="btn-ghost" onClick={() => setView('picture')}>
-              Choose another picture
-            </button>
-          )}
           <div
             style={{
               minHeight: 17,
