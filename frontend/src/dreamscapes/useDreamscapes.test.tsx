@@ -87,6 +87,16 @@ describe('useDreamscapes', () => {
     expect(result.current.items?.map((d) => d.job_id)).toEqual(['a', 'b', 'c'])
   })
 
+  it('flags failed (not signedOut) when the first page cannot be loaded', async () => {
+    vi.mocked(listDreamscapes).mockRejectedValue(new Error('500'))
+
+    const { result } = renderHook(() => useDreamscapes())
+
+    await waitFor(() => expect(result.current.failed).toBe(true))
+    expect(result.current.signedOut).toBe(false)
+    expect(result.current.items).toBeNull()
+  })
+
   it('flags signedOut so the page can redirect', async () => {
     vi.mocked(listDreamscapes).mockRejectedValue(new NotSignedInError())
 
@@ -121,14 +131,27 @@ describe('useDreamCount', () => {
     expect(result.current).toBeNull()
   })
 
-  it('refetches after invalidation, so a finished session or a sign-out shows through', async () => {
+  it('paints the last known count at once, then revalidates', async () => {
+    vi.mocked(listDreamscapes).mockResolvedValueOnce(page(['a'], null, 1))
+    const first = renderHook(() => useDreamCount())
+    await waitFor(() => expect(first.result.current).toBe(1))
+
+    // A session completed elsewhere: the next mount shows 1 immediately (no
+    // spinner) and settles on the server's 2 without anyone invalidating.
+    vi.mocked(listDreamscapes).mockResolvedValueOnce(page(['a', 'b'], null, 2))
+    const second = renderHook(() => useDreamCount())
+    expect(second.result.current).toBe(1)
+    await waitFor(() => expect(second.result.current).toBe(2))
+  })
+
+  it('forgets the count on invalidation, so a new account never sees the last one', async () => {
     vi.mocked(listDreamscapes).mockResolvedValueOnce(page(['a'], null, 1))
     const first = renderHook(() => useDreamCount())
     await waitFor(() => expect(first.result.current).toBe(1))
 
     invalidateDreamCount()
-    vi.mocked(listDreamscapes).mockResolvedValueOnce(page(['a', 'b'], null, 2))
+    vi.mocked(listDreamscapes).mockReturnValue(new Promise(() => {}))
     const second = renderHook(() => useDreamCount())
-    await waitFor(() => expect(second.result.current).toBe(2))
+    expect(second.result.current).toBeNull()
   })
 })

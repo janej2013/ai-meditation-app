@@ -8,7 +8,7 @@
  * Deletion is optimistic: the card drifts out immediately; if the API
  * refuses, the card returns and a quiet line says so.
  */
-import { memo, useEffect, useRef, useState } from 'react'
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { type DreamscapeItem } from '../api/client'
 import { dreamThumb } from '../dreamscapes/thumb'
@@ -39,7 +39,7 @@ const DreamCard = memo(function DreamCard({
   onDelete,
 }: CardProps) {
   const downX = useRef<number | null>(null)
-  const thumb = dreamThumb(dream.job_id)
+  const thumb = useMemo(() => dreamThumb(dream.job_id), [dream.job_id])
   const when = dream.created_at ? wovenAgo(new Date(dream.created_at)) : 'woven once'
 
   const onUp = (e: React.PointerEvent) => {
@@ -122,7 +122,7 @@ const DreamCard = memo(function DreamCard({
 
 export default function DreamscapesPage() {
   const navigate = useNavigate()
-  const { items, hasMore, signedOut, loadMore, remove } = useDreamscapes()
+  const { items, hasMore, failed, signedOut, loadMore, remove } = useDreamscapes()
   const [swipeId, setSwipeId] = useState<string | null>(null)
   const [confirming, setConfirming] = useState<DreamscapeItem | null>(null)
   const [failedDelete, setFailedDelete] = useState(false)
@@ -132,17 +132,22 @@ export default function DreamscapesPage() {
     if (signedOut) navigate('/signup', { replace: true })
   }, [signedOut, navigate])
 
-  const open = (d: DreamscapeItem) => {
-    navigate(`/player/${d.job_id}`, {
-      state: {
-        from: 'dreamscapes',
-        keywords: d.keywords,
-        moodExcerpt: d.mood_excerpt,
-        createdAt: d.created_at,
-        pic: d.source_type === 'picture',
-      },
-    })
-  }
+  // Stable, or every card re-renders (and rebuilds its thumbnail) on each
+  // swipe -- DreamCard's memo only holds while its props keep identity.
+  const open = useCallback(
+    (d: DreamscapeItem) => {
+      navigate(`/player/${d.job_id}`, {
+        state: {
+          from: 'dreamscapes',
+          keywords: d.keywords,
+          moodExcerpt: d.mood_excerpt,
+          createdAt: d.created_at,
+          pic: d.source_type === 'picture',
+        },
+      })
+    },
+    [navigate],
+  )
 
   const confirmDelete = async () => {
     if (!confirming) return
@@ -221,6 +226,35 @@ export default function DreamscapesPage() {
             Free plan keeps your latest 3 dreamscapes — Plus keeps them all.
           </div>
         </>
+      )}
+
+      {failed && items === null && (
+        <div
+          style={{
+            flex: 1,
+            minHeight: 0,
+            display: 'flex',
+            flexDirection: 'column',
+            alignItems: 'center',
+            justifyContent: 'center',
+            gap: 20,
+            padding: '0 44px',
+          }}
+        >
+          <div
+            style={{
+              font: '300 19px/1.6 var(--font-sans)',
+              color: 'oklch(0.880 0.016 275)',
+              textAlign: 'center',
+              textWrap: 'pretty',
+            }}
+          >
+            Your dreamscapes could not be reached.
+          </div>
+          <button className="dream-entry" onClick={() => void loadMore()}>
+            Try again
+          </button>
+        </div>
       )}
 
       {empty && (

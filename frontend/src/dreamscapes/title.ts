@@ -13,7 +13,7 @@ export function dreamTitle(
   keywords: string[] | null | undefined,
   moodExcerpt?: string | null,
 ): string {
-  return keywords?.length ? keywords.join(' · ') : (moodExcerpt ?? FALLBACK)
+  return keywords?.length ? keywords.join(' · ') : moodExcerpt || FALLBACK
 }
 
 /** The player's two-line form; a single line when there is nothing to split. */

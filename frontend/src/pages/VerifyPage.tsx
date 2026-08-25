@@ -6,6 +6,7 @@
 import { useState } from 'react'
 import { useLocation, useNavigate } from 'react-router-dom'
 import { confirmSignUp, resendCode, signIn } from '../auth/cognito'
+import { invalidateDreamCount } from '../dreamscapes/useDreamscapes'
 
 export default function VerifyPage() {
   const navigate = useNavigate()
@@ -28,6 +29,7 @@ export default function VerifyPage() {
       await confirmSignUp(email, code)
       // The post-confirmation trigger grants the free credit server-side.
       if (state?.password) await signIn(email, state.password)
+      invalidateDreamCount()
       navigate(state?.resume ? '/' : '/account', { replace: true })
     } catch (e) {
       const err = e as Error & { code?: string }

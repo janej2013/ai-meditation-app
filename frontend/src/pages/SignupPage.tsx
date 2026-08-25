@@ -7,6 +7,7 @@
 import { useState } from 'react'
 import { useLocation, useNavigate } from 'react-router-dom'
 import { signIn, signUp } from '../auth/cognito'
+import { invalidateDreamCount } from '../dreamscapes/useDreamscapes'
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/
 
@@ -35,6 +36,7 @@ export default function SignupPage() {
         navigate('/verify', { state: { email: email.trim(), password, resume } })
       } else {
         await signIn(email.trim(), password)
+        invalidateDreamCount()
         navigate(resume ? '/' : '/account')
       }
     } catch (e) {
