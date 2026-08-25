@@ -97,7 +97,7 @@ def _extract_pem(payload: str) -> str:
 
 
 def signed_url(key: str, expires_in: timedelta = DEFAULT_EXPIRY) -> str:
-    """A signed CloudFront URL for an object key under ``jobs/``."""
+    """A signed CloudFront URL for a user-content key (``jobs/``, ``pictures/``)."""
     domain = os.environ.get(DOMAIN_ENV_VAR)
     key_pair_id = os.environ.get(KEY_PAIR_ID_ENV_VAR)
     if not domain or not key_pair_id:

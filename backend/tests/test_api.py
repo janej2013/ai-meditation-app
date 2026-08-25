@@ -458,6 +458,7 @@ def test_job_status_while_running(client, dynamodb_client, store, sfn_client):
         "status": "FROZEN",
         "audio_url": None,
         "picture_keywords": None,
+        "picture_url": None,
     }
 
 
@@ -482,6 +483,47 @@ def test_done_job_returns_a_cloudfront_signed_url(
     assert response.json()["status"] == "DONE"
     assert response.json()["audio_url"] == signer.signed_url.return_value
     signer.signed_url.assert_called_once_with(f"jobs/{job_id}/final.mp3")
+
+
+def test_a_done_picture_job_also_signs_its_picture(
+    client, dynamodb_client, store, sfn_client, monkeypatch
+):
+    """Revisiting a picture dreamscape re-samples the upload into the cloud;
+    the picture is user content, so it travels the same signed path."""
+    from api.routers import generate as generate_router
+
+    seed_entitlement(dynamodb_client, available=1)
+    seed_described_picture(store)
+    job_id = client.post(
+        "/generate", json={"picture_id": PICTURE_ID, "duration_minutes": 10}
+    ).json()["job_id"]
+    store.freeze_credit(USER_ID, job_id)
+    store.set_job_audio_key(USER_ID, job_id, f"jobs/{job_id}/narration.mp3")
+    store.commit_credit(USER_ID, job_id)
+    signer = MagicMock()
+    signer.signed_url.side_effect = lambda key: f"https://a/{key}?sig"
+    monkeypatch.setattr(generate_router, "cloudfront_signer", signer)
+
+    body = client.get(f"/jobs/{job_id}").json()
+
+    assert body["audio_url"] == f"https://a/jobs/{job_id}/narration.mp3?sig"
+    assert body["picture_url"] == f"https://a/pictures/{USER_ID}/{PICTURE_ID}.jpg?sig"
+
+
+def test_a_words_job_has_no_picture_url(client, dynamodb_client, store, sfn_client, monkeypatch):
+    from api.routers import generate as generate_router
+
+    seed_entitlement(dynamodb_client, available=1)
+    job_id = client.post("/generate", json=GOOD_BODY).json()["job_id"]
+    store.freeze_credit(USER_ID, job_id)
+    store.set_job_audio_key(USER_ID, job_id, f"jobs/{job_id}/narration.mp3")
+    store.commit_credit(USER_ID, job_id)
+    signer = MagicMock()
+    signer.signed_url.return_value = "https://a/x?sig"
+    monkeypatch.setattr(generate_router, "cloudfront_signer", signer)
+
+    assert client.get(f"/jobs/{job_id}").json()["picture_url"] is None
+    signer.signed_url.assert_called_once()
 
 
 def test_every_call_signs_a_fresh_url(client, dynamodb_client, store, sfn_client, monkeypatch):

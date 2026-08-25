@@ -64,8 +64,11 @@ class JobResponse(BaseModel):
     job_id: str
     status: JobStatus
     audio_url: str | None = None
-    # Present once describe_picture has run; the waiting screen shows them.
+    # Picture jobs: the keywords for the waiting screen and, once DONE, a
+    # signed URL to the upload so a revisited dreamscape's cloud is the
+    # user's own picture again. Both are minted per call, like audio_url.
     picture_keywords: list[str] | None = None
+    picture_url: str | None = None
 
 
 @router.post(
@@ -149,8 +152,11 @@ def get_job(job_id: str, user: CurrentUserDep, store: StoreDep) -> JobResponse:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found.")
 
     audio_url = None
+    picture_url = None
     if job.status is JobStatus.DONE and job.audio_key:
-        audio_url = _audio_url(job.audio_key)
+        audio_url = _signed_url(job.audio_key)
+        if job.picture_key:
+            picture_url = _signed_url(job.picture_key)
 
     return JobResponse(
         job_id=job.job_id,
@@ -159,6 +165,7 @@ def get_job(job_id: str, user: CurrentUserDep, store: StoreDep) -> JobResponse:
         status=JobStatus.FAILED if job.status is JobStatus.ROLLED_BACK else job.status,
         audio_url=audio_url,
         picture_keywords=job.picture_keywords,
+        picture_url=picture_url,
     )
 
 
@@ -181,12 +188,13 @@ def _reject_if_job_in_flight(frozen: int) -> None:
         )
 
 
-def _audio_url(audio_key: str) -> str:
-    """A short-lived CloudFront signed URL for the narration (constraint 6).
+def _signed_url(key: str) -> str:
+    """A short-lived CloudFront signed URL for user content (constraint 6).
 
     Signing happens at the edge distribution, not on the bucket: the object is
     served from CloudFront and the bucket stays reachable only through OAC.
-    Only ``jobs/*`` is signed -- the shared BGM under ``assets/*`` is public and
-    cached, so the player can switch tracks without a round trip here.
+    ``jobs/*`` (narration) and ``pictures/*`` (the upload) are the signed
+    behaviours; the shared BGM under ``assets/*`` is public and cached, so the
+    player can switch tracks without a round trip here.
     """
-    return cloudfront_signer.signed_url(audio_key)
+    return cloudfront_signer.signed_url(key)
