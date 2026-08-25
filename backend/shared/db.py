@@ -47,6 +47,7 @@ from shared.models import (
     Entitlement,
     Insight,
     Job,
+    JobSource,
     JobStatus,
     Memory,
     Picture,
@@ -270,6 +271,9 @@ class EntitlementStore:
         duration_minutes: int,
         picture_key: str | None = None,
         picture: PictureDescription | None = None,
+        *,
+        source: JobSource | None = None,
+        agent_session_id: str | None = None,
     ) -> bool:
         """Create a PENDING job. False if the job_id was already used.
 
@@ -296,6 +300,10 @@ class EntitlementStore:
         if picture is not None:
             item["picture_keywords"] = picture.keywords
             item["picture_summary"] = picture.summary
+        if source is not None:
+            item["source"] = source
+        if agent_session_id is not None:
+            item["agent_session_id"] = agent_session_id
         return self._put_if_absent(item)
 
     # ------------------------------------------------------------------
@@ -480,13 +488,14 @@ class EntitlementStore:
             "TableName": self.table_name,
             "KeyConditionExpression": "PK = :pk AND begins_with(SK, :job)",
             "FilterExpression": "#status = :done",
-            "ExpressionAttributeNames": dict(_STATUS_NAMES),
+            # "source" is a reserved word too.
+            "ExpressionAttributeNames": {**_STATUS_NAMES, "#source": "source"},
             "ExpressionAttributeValues": _marshal(
                 {":pk": user_pk(user_id), ":job": "JOB#", ":done": JobStatus.DONE.value}
             ),
             "ProjectionExpression": (
                 "job_id, #status, picture_keywords, mood_text, "
-                "duration_minutes, picture_key, created_at"
+                "duration_minutes, picture_key, created_at, #source"
             ),
         }
         while True:

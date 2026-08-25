@@ -49,7 +49,9 @@ def engine(provider: FakeProvider) -> NativeEngine:
             ToolSpec("finalize_meditation_brief", "end", FinishIn, finish, terminal=True),
         ]
     )
-    return NativeEngine(provider, tools, ToolContext(user_id=USER_ID), system_prompt="S")
+    return NativeEngine(
+        provider, tools, ToolContext(user_id=USER_ID, session_id=SESSION), system_prompt="S"
+    )
 
 
 async def silent(event) -> None:

@@ -18,8 +18,12 @@ FRAMEWORKS = ("langchain", "langgraph")
 SHARED_AND_NATIVE = sorted(
     [*AGENT_DIR.glob("*.py"), *AGENT_DIR.glob("tools/*.py"), *AGENT_DIR.glob("native/**/*.py")]
 )
+# checkpoint.py is the one bridge to the store; smoke.py is the harness
+# inlined until A4 (it claims, runs and commits turns, as agent_runner will).
 ENGINE_FILES = [
-    path for path in SHARED_AND_NATIVE if path.name != "checkpoint.py" and "tools" not in path.parts
+    path
+    for path in SHARED_AND_NATIVE
+    if path.name not in ("checkpoint.py", "smoke.py") and "tools" not in path.parts
 ]
 
 
@@ -41,6 +45,18 @@ def test_agent_package_has_files():
 @pytest.mark.parametrize("path", SHARED_AND_NATIVE, ids=lambda p: str(p.relative_to(AGENT_DIR)))
 def test_no_framework_imports_outside_the_langgraph_package(path: Path):
     offending = {name for name in imported_modules(path) if name.split(".")[0] in FRAMEWORKS}
+    assert not offending, f"{path.name} imports {sorted(offending)}"
+
+
+ALL_AGENT_FILES = sorted(AGENT_DIR.glob("**/*.py"))
+HTTP_LAYER = ("api", "fastapi")
+
+
+@pytest.mark.parametrize("path", ALL_AGENT_FILES, ids=lambda p: str(p.relative_to(AGENT_DIR)))
+def test_agent_never_imports_the_http_layer(path: Path):
+    """The agent must run without FastAPI on the path, and must not reach
+    into the API's request-scoped helpers -- shared logic lives in shared/."""
+    offending = {name for name in imported_modules(path) if name.split(".")[0] in HTTP_LAYER}
     assert not offending, f"{path.name} imports {sorted(offending)}"
 
 

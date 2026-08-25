@@ -13,7 +13,8 @@ from __future__ import annotations
 import logging
 import time
 from collections.abc import Awaitable, Callable, Iterable, Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, ValidationError
@@ -35,13 +36,31 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+# ``shared.jobs.start_generation`` with store and client already bound: the
+# terminal tool supplies the job's own fields and nothing about transport.
+StartGeneration = Callable[..., bool]
+
+
+def _utc_now() -> datetime:
+    return datetime.now(UTC)
+
+
 @dataclass(frozen=True)
 class ToolContext:
     """What a handler may touch. Built per request by the harness; the
-    engine passes it through untouched."""
+    engine passes it through untouched.
+
+    ``store`` and ``start_generation`` are optional so the loop can be
+    exercised without a table; a tool that needs one and finds None answers
+    with an error result rather than raising.
+    """
 
     user_id: str
+    session_id: str
     store: EntitlementStore | None = None
+    start_generation: StartGeneration | None = None
+    # Injectable clock, so a test can pin the stamps a tool writes.
+    now: Callable[[], datetime] = field(default=_utc_now)
 
 
 class ToolOutcome(BaseModel):

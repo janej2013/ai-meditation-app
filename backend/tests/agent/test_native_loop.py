@@ -32,7 +32,7 @@ from agent.tools.registry import ToolContext, ToolOutcome, ToolRegistry, ToolSpe
 
 from .fake_provider import FakeProvider, refusal_reply, run, text_reply, tool_reply
 
-USER = ToolContext(user_id="user-1")
+USER = ToolContext(user_id="user-1", session_id="sess-1")
 
 
 class NoopIn(BaseModel):

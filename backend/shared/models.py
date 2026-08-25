@@ -18,6 +18,7 @@ validates its payload on entry.
 
 from __future__ import annotations
 
+import uuid
 from datetime import datetime
 from enum import StrEnum
 from typing import Any, Literal
@@ -97,6 +98,11 @@ def event_sk(stripe_event_id: str) -> str:
     retries deliveries, and a replayed event must not grant credits twice.
     """
     return f"EVENT#{stripe_event_id}"
+
+
+# Where a job's words came from. Jobs written before this field existed
+# read as None; the dreamscapes list infers picture/words from picture_key.
+JobSource = Literal["words", "picture", "agent"]
 
 
 class JobStatus(StrEnum):
@@ -183,6 +189,11 @@ class Job(BaseModel):
     # mood_text's rules: on the item, never in the execution history or logs.
     picture_keywords: list[str] | None = None
     picture_summary: str | None = None
+    source: JobSource | None = None
+    # Agent jobs: the companion session whose brief became mood_text. The
+    # job id is derived from it (AGENT_JOB_NAMESPACE), which is what makes
+    # finalizing idempotent.
+    agent_session_id: str | None = None
     script_key: str | None = None
     audio_key: str | None = None
     created_at: datetime | None = None
@@ -254,6 +265,11 @@ AGENT_INSIGHTS_MAX = 20
 AGENT_SESSIONS_PER_MONTH = 30
 
 MEMORY_SK = "MEMORY"
+
+# uuid5 namespace for agent job ids: job_id = uuid5(AGENT_JOB_NAMESPACE,
+# session_id). Fixed forever -- changing it would let a retried finalize
+# start a second job for the same session.
+AGENT_JOB_NAMESPACE = uuid.UUID("3f6c1c8e-2b7d-4e0a-9c55-7a1e4d2b8f10")
 
 AgentEngineName = Literal["native", "langgraph"]
 
