@@ -125,6 +125,16 @@ def test_both_billing_routes_exist(api_template):
     assert "POST /billing/webhook" in keys
 
 
+def test_cors_preflight_admits_every_method_a_route_uses(api_template):
+    """The site and the API are different origins, so the browser preflights
+    DELETE; a method missing here is refused before the route is reached."""
+    [api] = api_template.find_resources("AWS::ApiGatewayV2::Api").values()
+    allowed = set(api["Properties"]["CorsConfiguration"]["AllowMethods"])
+    used = {key.split(" ")[0] for key in routes(api_template)}
+
+    assert used <= allowed, f"routes use {used - allowed} but CORS allows {allowed}"
+
+
 def test_every_fastapi_route_is_registered_on_the_gateway(api_template):
     """The FastAPI app only serves what API Gateway routes to it; a router
     mounted in main.py without an add_routes() here is a deployed 404 that no

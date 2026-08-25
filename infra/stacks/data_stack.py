@@ -26,6 +26,11 @@ AUDIO_RETENTION_DAYS = 90
 # the api and pipeline stacks import this one, keeping infra to one copy.
 PICTURE_PREFIX = "pictures"
 
+# The tag generate_script puts on intermediates so the lifecycle rule below
+# expires them. Twin of shared/audio.TRANSIENT_TAG_KEY/VALUE, mirrored by hand
+# for the same reason as PICTURE_PREFIX.
+TRANSIENT_TAG = {"transient": "true"}
+
 # Uploaded pictures back the planned replay feature (re-listen without spending
 # a credit), so they outlive the job that used them. Nothing in the pipeline
 # deletes them; this rule is the only reaper. When replay lands, the audio
@@ -103,7 +108,7 @@ class DataStack(Stack):
                     id="ExpireJobIntermediates",
                     enabled=True,
                     prefix="jobs/",
-                    tag_filters={"transient": "true"},
+                    tag_filters=TRANSIENT_TAG,
                     expiration=Duration.days(AUDIO_RETENTION_DAYS),
                 ),
                 s3.LifecycleRule(

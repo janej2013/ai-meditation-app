@@ -166,9 +166,13 @@ class ApiStack(Stack):
             cors_preflight=apigwv2.CorsPreflightOptions(
                 allow_origins=allowed_origins,
                 allow_headers=["Authorization", "Content-Type"],
+                # Every method a route uses: the site and the API are different
+                # origins, so the browser preflights anything beyond a simple
+                # GET/POST and refuses a method missing from this list.
                 allow_methods=[
                     apigwv2.CorsHttpMethod.GET,
                     apigwv2.CorsHttpMethod.POST,
+                    apigwv2.CorsHttpMethod.DELETE,
                     apigwv2.CorsHttpMethod.OPTIONS,
                 ],
                 max_age=Duration.hours(1),

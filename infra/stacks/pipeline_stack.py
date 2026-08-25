@@ -311,9 +311,28 @@ class PipelineStack(Stack):
 
         jobs_prefix = audio_bucket.arn_for_objects("jobs/*")
 
-        # generate_script only ever writes the script.
+        # generate_script only ever writes the script -- tagged transient so
+        # the bucket's lifecycle rule expires it, and S3 requires
+        # PutObjectTagging alongside PutObject to set a tag-set on upload.
         generate.add_to_role_policy(
-            iam.PolicyStatement(actions=["s3:PutObject"], resources=[jobs_prefix])
+            iam.PolicyStatement(
+                actions=["s3:PutObject", "s3:PutObjectTagging"], resources=[jobs_prefix]
+            )
+        )
+        # rollback_credit sweeps a failed job's objects after the refund: a
+        # narration that was synthesized but never committed is untagged (so
+        # never expires) and never DONE (so the user cannot delete it).
+        # Delete on jobs/* only, listing fenced to the same prefix; nothing
+        # on pictures/* (constraint 9).
+        rollback.add_to_role_policy(
+            iam.PolicyStatement(actions=["s3:DeleteObject"], resources=[jobs_prefix])
+        )
+        rollback.add_to_role_policy(
+            iam.PolicyStatement(
+                actions=["s3:ListBucket"],
+                resources=[audio_bucket.bucket_arn],
+                conditions={"StringLike": {"s3:prefix": "jobs/*"}},
+            )
         )
         # synthesize reads the script and writes the narration. It never reads
         # assets/: the BGM is fetched by the browser, not by a Lambda.
