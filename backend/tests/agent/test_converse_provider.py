@@ -420,3 +420,57 @@ def test_loop_replays_the_tool_exchange_in_wire_form():
         ],
     }
     assert result.usage == Usage(input_tokens=20, output_tokens=10)
+
+
+# ----------------------------------------------------------------------
+# Nova's thinking tags
+# ----------------------------------------------------------------------
+
+
+def nova_stream(*chunks: str, index: int = 0):
+    return [start(), *text_events(*chunks, index=index), stop("end_turn"), metadata()]
+
+
+def test_nova_thinking_tags_are_dropped_even_when_split_across_deltas():
+    client = FakeBedrockClient(
+        [nova_stream("<thin", "king>secret plan</thin", "king>\n\nHel", "lo there")]
+    )
+
+    events = run(collect(provider(client)))
+
+    assert [e for e in events if isinstance(e, TextDelta)] == [
+        TextDelta("Hel"),
+        TextDelta("lo there"),
+    ]
+    final = events[-1]
+    assert isinstance(final, Final)
+    assert final.content == [TextBlock(text="Hello there")]
+
+
+def test_nova_thinking_only_reply_yields_no_text():
+    client = FakeBedrockClient([nova_stream("<thinking>just", " thoughts</thinking>")])
+
+    events = run(collect(provider(client)))
+
+    assert not any(isinstance(e, TextDelta) for e in events)
+    final = events[-1]
+    assert isinstance(final, Final) and final.content == []
+
+
+def test_angle_brackets_that_are_not_tags_pass_through():
+    client = FakeBedrockClient([nova_stream("a < b and <b>bold</b>")])
+
+    events = run(collect(provider(client)))
+
+    assert "".join(e.text for e in events if isinstance(e, TextDelta)) == "a < b and <b>bold</b>"
+
+
+def test_claude_text_is_left_alone():
+    client = FakeBedrockClient([nova_stream("<thinking>kept</thinking> hi")])
+    claude = BedrockConverseProvider(CLAUDE, client=client, sleep=Sleeps(), jitter=lambda: 0.0)
+
+    events = run(collect(claude))
+
+    final = events[-1]
+    assert isinstance(final, Final)
+    assert final.content == [TextBlock(text="<thinking>kept</thinking> hi")]

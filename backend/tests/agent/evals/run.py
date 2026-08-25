@@ -182,7 +182,9 @@ def main(argv: list[str] | None = None) -> int:
     print(f"model {provider.model_id}")
     print(_row("case", "pass", "turns", "fin", "tokens in/out", "cache%", "ms", "reasons"))
     for o in outcomes:
-        cache = f"{100 * o.cache_read_tokens // max(o.input_tokens, 1)}%"
+        # Bedrock's inputTokens excludes what was served from cache.
+        total_in = o.input_tokens + o.cache_read_tokens
+        cache = f"{100 * o.cache_read_tokens // max(total_in, 1)}%"
         print(
             _row(
                 o.name,

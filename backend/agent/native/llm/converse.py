@@ -19,6 +19,7 @@ import json
 import logging
 import os
 import random
+import re
 from collections.abc import AsyncIterator, Callable, Iterable, Iterator
 from dataclasses import dataclass, field
 from enum import StrEnum
@@ -276,6 +277,66 @@ class StreamParser:
         return parsed
 
 
+# Nova's tool-use template makes the model narrate its reasoning inside
+# these tags before answering. It is not user-facing text and must not
+# reach the client or the checkpoint; Claude never emits them.
+_THINKING_OPEN = "<thinking>"
+_THINKING_CLOSE = "</thinking>"
+_THINKING_RE = re.compile(r"<thinking>.*?</thinking>\s*", re.DOTALL)
+
+
+class _ThinkingFilter:
+    """Drops ``<thinking>...</thinking>`` from streamed text, safely across
+    delta boundaries: a tag may arrive split over several chunks, so the
+    filter holds back any suffix that could be the start of one."""
+
+    def __init__(self) -> None:
+        self._inside = False
+        self._pending = ""
+        self._emitted_visible = False
+
+    def delta(self, chunk: str) -> str:
+        buf = self._pending + chunk
+        self._pending = ""
+        out: list[str] = []
+        while buf:
+            if self._inside:
+                end = buf.find(_THINKING_CLOSE)
+                if end == -1:
+                    self._pending = _partial_suffix(buf, _THINKING_CLOSE)
+                    break
+                buf = buf[end + len(_THINKING_CLOSE) :]
+                self._inside = False
+                continue
+            start = buf.find(_THINKING_OPEN)
+            if start == -1:
+                self._pending = _partial_suffix(buf, _THINKING_OPEN)
+                out.append(buf[: len(buf) - len(self._pending)])
+                break
+            out.append(buf[:start])
+            buf = buf[start + len(_THINKING_OPEN) :]
+            self._inside = True
+        text = "".join(out)
+        if not self._emitted_visible:
+            # The reply proper starts after the tags; drop the whitespace
+            # that separated them from it.
+            text = text.lstrip()
+            self._emitted_visible = bool(text)
+        return text
+
+    @staticmethod
+    def clean(text: str) -> str:
+        return _THINKING_RE.sub("", text).strip()
+
+
+def _partial_suffix(buf: str, tag: str) -> str:
+    """The longest suffix of ``buf`` that is a proper prefix of ``tag``."""
+    for size in range(min(len(tag) - 1, len(buf)), 0, -1):
+        if tag.startswith(buf[-size:]):
+            return buf[-size:]
+    return ""
+
+
 def parse_stream(events: Iterable[dict[str, Any]]) -> Iterator[LLMEvent]:
     """Whole-stream form of ``StreamParser``, for tests and offline replay."""
     parser = StreamParser()
@@ -315,6 +376,18 @@ def _classify(exc: ClientError) -> Exception:
     if normalised in _STREAM_TRANSIENT_CODES:
         return BedrockTransientError(f"bedrock transient failure: {detail}")
     return AgentProviderError(f"bedrock call failed: {detail}")
+
+
+def _without_thinking(final: Final) -> Final:
+    content: list[ContentBlock] = []
+    for block in final.content:
+        if isinstance(block, TextBlock):
+            text = _ThinkingFilter.clean(block.text)
+            if text:
+                content.append(TextBlock(text=text))
+        else:
+            content.append(block)
+    return Final(content=content, stop_reason=final.stop_reason, usage=final.usage)
 
 
 class BedrockConverseProvider:
@@ -435,6 +508,7 @@ class BedrockConverseProvider:
 
         worker = loop.run_in_executor(None, produce)
         parser = StreamParser()
+        thinking = _ThinkingFilter() if self.family is ModelFamily.NOVA else None
         try:
             while True:
                 item = await queue.get()
@@ -443,10 +517,17 @@ class BedrockConverseProvider:
                 if isinstance(item, _Failure):
                     raise item.exc
                 for event in parser.feed(item):
+                    if thinking is not None and isinstance(event, TextDelta):
+                        visible = thinking.delta(event.text)
+                        if not visible:
+                            continue
+                        event = TextDelta(visible)
                     yield event
         finally:
             await worker
         final = parser.finish()
+        if thinking is not None:
+            final = _without_thinking(final)
         logger.info(
             "converse done model=%s family=%s attempt=%d stop_reason=%s blocks=%d "
             "in=%d out=%d cache_read=%d cache_write=%d unparseable_tool_inputs=%d",
