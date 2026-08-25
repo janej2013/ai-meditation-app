@@ -137,6 +137,27 @@ input::placeholder {
   cursor: pointer;
 }
 
+/* The account pill: top-right of every screen, above routed content
+   (.content is z-index 2). Placement matches the screens' 30px gutter and the
+   16-20px top rows their back buttons sit in. */
+.account-pill {
+  position: absolute;
+  top: 16px;
+  right: 30px;
+  z-index: 3;
+  border: none;
+  border-radius: 16px;
+  padding: 8px 13px;
+  background: var(--bg-chip);
+  backdrop-filter: blur(14px);
+  font: 400 11.5px var(--font-mono);
+  color: oklch(0.825 0.018 275);
+  cursor: pointer;
+}
+.account-pill:hover {
+  color: var(--text-bright);
+}
+
 /* Home's "N dreamscapes collected" line — quiet, underlined, glows on touch. */
 .dream-entry {
   background: none;

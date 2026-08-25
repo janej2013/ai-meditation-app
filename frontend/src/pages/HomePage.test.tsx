@@ -70,13 +70,6 @@ beforeEach(() => {
 afterEach(() => vi.restoreAllMocks())
 
 describe('HomePage', () => {
-  it('shows the credit pill for a signed-in user', async () => {
-    renderHome()
-    await openPanel()
-
-    await waitFor(() => expect(screen.getByText('3 left')).toBeInTheDocument())
-  })
-
   it('starts a generation from a mood chip and moves to the waiting screen', async () => {
     vi.mocked(startGeneration).mockResolvedValue({ job_id: 'j1', status: 'PENDING' })
     renderHome()

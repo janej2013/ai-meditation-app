@@ -17,13 +17,7 @@
  */
 import { useEffect, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import {
-  ApiError,
-  NotSignedInError,
-  getAccount,
-  startGeneration,
-  uploadPicture,
-} from '../api/client'
+import { ApiError, NotSignedInError, startGeneration, uploadPicture } from '../api/client'
 import { DEFAULT_BGM_TRACK, bgmUrl, mixer } from '../audio/mixer'
 import { isSignedIn } from '../auth/cognito'
 import { useDreamCount } from '../dreamscapes/useDreamscapes'
@@ -62,7 +56,6 @@ export default function HomePage() {
   const [destText, setDestText] = useState('')
   const [duration, setDuration] = useState(10)
 
-  const [creditPill, setCreditPill] = useState('Sign in')
   const [signedIn, setSignedIn] = useState(false)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -76,15 +69,10 @@ export default function HomePage() {
   const upload = useRef<Promise<string> | null>(null)
 
   useEffect(() => {
+    // Only whether to gate Begin behind sign-in; the balance itself lives in
+    // the shell's AccountPill, which every screen shares.
     void (async () => {
-      if (!(await isSignedIn())) return
-      setSignedIn(true)
-      try {
-        const account = await getAccount()
-        setCreditPill(`${account.available} left`)
-      } catch {
-        setCreditPill('Account')
-      }
+      if (await isSignedIn()) setSignedIn(true)
     })()
   }, [])
 
@@ -426,21 +414,6 @@ export default function HomePage() {
             }}
           >
             ←
-          </button>
-          <button
-            onClick={() => navigate(signedIn ? '/account' : '/signup')}
-            style={{
-              border: 'none',
-              borderRadius: 16,
-              padding: '8px 13px',
-              background: 'var(--bg-chip)',
-              backdropFilter: 'blur(14px)',
-              font: '400 11.5px var(--font-mono)',
-              color: 'oklch(0.825 0.018 275)',
-              cursor: 'pointer',
-            }}
-          >
-            {creditPill}
           </button>
         </div>
 
