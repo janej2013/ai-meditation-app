@@ -16,7 +16,6 @@ import { dreamTitle } from '../dreamscapes/title'
 import { useDreamscapes } from '../dreamscapes/useDreamscapes'
 import { wovenAgo } from '../dreamscapes/wovenAgo'
 import { useFadeIn } from '../hooks/useFadeIn'
-import { useScene } from '../scene/SceneContext'
 
 const SWIPE_PX = 36 // the prototype's open/close threshold
 
@@ -128,18 +127,10 @@ export default function DreamscapesPage() {
   const [confirming, setConfirming] = useState<DreamscapeItem | null>(null)
   const [failedDelete, setFailedDelete] = useState(false)
   const fadeIn = useFadeIn()
-  const { setCloudSrc, setDissolve } = useScene()
 
   useEffect(() => {
     if (signedOut) navigate('/signup', { replace: true })
   }, [signedOut, navigate])
-
-  // The collection rests on the procedural cloud: coming back from a picture
-  // dreamscape's player must not leave that picture behind the cards.
-  useEffect(() => {
-    setCloudSrc('')
-    setDissolve(1)
-  }, [setCloudSrc, setDissolve])
 
   // Stable, or every card re-renders (and rebuilds its thumbnail) on each
   // swipe -- DreamCard's memo only holds while its props keep identity.

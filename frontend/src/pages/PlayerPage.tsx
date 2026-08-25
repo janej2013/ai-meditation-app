@@ -71,7 +71,6 @@ export default function PlayerPage() {
   const [trackId, setTrackId] = useState(BGM_TRACKS[0].id)
   const [bgmVolume, setBgmVolume] = useState(DEFAULT_BGM_VOLUME)
   const fadeIn = useFadeIn() // the prototype's playFade: breathe in on arrival
-  const sampledPicture = useRef(false)
   const trackRef = useRef<HTMLDivElement>(null)
 
   // The cloud pulses with playback; leaving the player releases it.
@@ -97,7 +96,6 @@ export default function PlayerPage() {
       // The handoff path never comes through here -- its cloud is already
       // the local blob from the home screen.
       if (job.picture_url && !cancelled) {
-        sampledPicture.current = true
         setCloudSrc(job.picture_url)
         setDissolve(1)
       }
@@ -150,15 +148,9 @@ export default function PlayerPage() {
     return () => {
       cancelled = true
       mixer.onEnded = null
-      // Leaving the player ends the session: narration and music both stop,
-      // and a picture this page sampled into the cloud goes with it -- the
-      // account and sign-in screens must not sit on someone's photo.
+      // Leaving the player ends the session: narration and music both stop.
+      // The picture behind it is SceneLayer's to clear, by route.
       mixer.endSession()
-      if (sampledPicture.current) {
-        sampledPicture.current = false
-        setCloudSrc('')
-        setDissolve(1)
-      }
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps -- mount-only load
   }, [jobId])

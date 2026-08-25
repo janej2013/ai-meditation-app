@@ -19,19 +19,22 @@ import { pollJob } from '../api/client'
 import { mixer } from '../audio/mixer'
 import { invalidateDreamCount } from '../dreamscapes/useDreamscapes'
 
+/** What the home screen hands the waiting screen (and on to the player). */
+export interface GeneratingHandoff {
+  duration: number
+  feeling?: string
+  destination?: string
+  pic: boolean
+  keywords?: string[] | null
+}
+
 const CAPTIONS = ['Creating your meditation…', 'Breathe in…', 'And release…']
 
 export default function GeneratingPage() {
   const { jobId } = useParams<{ jobId: string }>()
   const navigate = useNavigate()
   const location = useLocation()
-  const state = location.state as {
-    duration?: number
-    feeling?: string
-    destination?: string
-    pic?: boolean
-    keywords?: string[] | null
-  } | null
+  const state = location.state as GeneratingHandoff | null
   const duration = state?.duration ?? 10
   const pic = state?.pic ?? false
 

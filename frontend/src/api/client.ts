@@ -160,44 +160,77 @@ function sleep(ms: number, signal?: AbortSignal): Promise<void> {
       reject(new DOMException('Aborted', 'AbortError'))
       return
     }
-    const t = setTimeout(resolve, ms)
-    signal?.addEventListener(
-      'abort',
-      () => {
-        clearTimeout(t)
-        reject(new DOMException('Aborted', 'AbortError'))
-      },
-      { once: true },
-    )
+    const onAbort = () => {
+      clearTimeout(t)
+      reject(new DOMException('Aborted', 'AbortError'))
+    }
+    const t = setTimeout(() => {
+      // `once` only removes a listener that fired; on the normal path it never
+      // does, and a long poll would pile one closure per tick on the signal.
+      signal?.removeEventListener('abort', onAbort)
+      resolve()
+    }, ms)
+    signal?.addEventListener('abort', onAbort, { once: true })
   })
 }
+
+/**
+ * Poll `fetch` until `isDone`, sleeping a growing interval between reads,
+ * giving up with a 408 at the deadline. The one loop under pollJob and the
+ * picture poll, so backoff and abort handling cannot drift apart.
+ */
+async function pollUntil<T>(
+  fetch: () => Promise<T>,
+  isDone: (value: T) => boolean,
+  opts: {
+    signal?: AbortSignal
+    initialIntervalMs: number
+    maxIntervalMs: number
+    timeoutMs: number
+    timeoutMessage: string
+    onUpdate?: (value: T) => void
+  },
+): Promise<T> {
+  const { signal, initialIntervalMs, maxIntervalMs, timeoutMs, timeoutMessage, onUpdate } = opts
+  const deadline = Date.now() + timeoutMs
+  let interval = initialIntervalMs
+  for (;;) {
+    if (signal?.aborted) throw new DOMException('Aborted', 'AbortError')
+    const value = await fetch()
+    onUpdate?.(value)
+    if (isDone(value)) return value
+    if (Date.now() + interval > deadline) throw new ApiError(408, timeoutMessage)
+    await sleep(interval, signal)
+    interval = Math.min(interval * 1.5, maxIntervalMs)
+  }
+}
+
+// Long enough to outlast the picture machine's worst case (four 60 s tries
+// plus backoff) -- giving up sooner would have the user re-upload and pay for
+// a second read while the first was about to succeed.
+const DESCRIBE_TIMEOUT_MS = 180_000
 
 /**
  * Describe an upload and wait for the reading: resolves to the keywords once
  * the vision step has read the picture, throws if the attempt failed. The
  * API only starts a state machine (never a synchronous model call), so this
- * is a short poll with the same growing interval as pollJob.
+ * is a poll, on the same loop as pollJob.
  */
 export async function describeUploadedPicture(
   pictureId: string,
-  opts: {
-    signal?: AbortSignal
-    initialIntervalMs?: number
-    maxIntervalMs?: number
-    timeoutMs?: number
-  } = {},
+  opts: { signal?: AbortSignal } = {},
 ): Promise<string[]> {
-  const { signal, initialIntervalMs = 1500, maxIntervalMs = 5000, timeoutMs = 90_000 } = opts
-  const deadline = Date.now() + timeoutMs
-  let interval = initialIntervalMs
-  let picture = await describePicture(pictureId)
-  while (picture.status === 'PENDING' || picture.status === 'DESCRIBING') {
-    if (Date.now() + interval > deadline)
-      throw new ApiError(408, 'Reading the picture timed out')
-    await sleep(interval, signal)
-    interval = Math.min(interval * 1.5, maxIntervalMs)
-    picture = await getPicture(pictureId)
-  }
+  const first = await describePicture(pictureId)
+  const settled = (p: Picture) => p.status !== 'PENDING' && p.status !== 'DESCRIBING'
+  const picture = settled(first)
+    ? first
+    : await pollUntil(() => getPicture(pictureId), settled, {
+        signal: opts.signal,
+        initialIntervalMs: 1500,
+        maxIntervalMs: 5000,
+        timeoutMs: DESCRIBE_TIMEOUT_MS,
+        timeoutMessage: 'Reading the picture timed out',
+      })
   if (picture.status === 'FAILED' || !picture.keywords)
     throw new ApiError(422, 'The picture could not be read')
   return picture.keywords
@@ -287,21 +320,17 @@ export async function pollJob(
     timeoutMs = jobTimeoutMs(),
   } = opts
 
-  const deadline = Date.now() + timeoutMs
-  let interval = initialIntervalMs
-
-  for (;;) {
-    if (signal?.aborted) throw new DOMException('Aborted', 'AbortError')
-
-    const job = await getJob(jobId)
-    onUpdate?.(job)
-    // The API maps ROLLED_BACK to FAILED, so DONE | FAILED is terminal.
-    if (job.status === 'DONE' || job.status === 'FAILED') return job
-
-    if (Date.now() + interval > deadline) {
-      throw new ApiError(408, 'Generation timed out')
-    }
-    await sleep(interval, signal)
-    interval = Math.min(interval * 1.5, maxIntervalMs)
-  }
+  // The API maps ROLLED_BACK to FAILED, so DONE | FAILED is terminal.
+  return pollUntil(
+    () => getJob(jobId),
+    (job) => job.status === 'DONE' || job.status === 'FAILED',
+    {
+      signal,
+      initialIntervalMs,
+      maxIntervalMs,
+      timeoutMs,
+      timeoutMessage: 'Generation timed out',
+      onUpdate,
+    },
+  )
 }

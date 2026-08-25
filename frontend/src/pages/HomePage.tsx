@@ -30,6 +30,7 @@ import { isSignedIn } from '../auth/cognito'
 import { useDreamCount } from '../dreamscapes/useDreamscapes'
 import { prepareJpeg } from '../picture/prepare'
 import { useScene } from '../scene/SceneContext'
+import type { GeneratingHandoff } from './GeneratingPage'
 
 const MOODS = ['Stressed', "Can't sleep", 'Anxious', 'Restless', 'Low', 'Just tired']
 const PLACES = ['Anywhere', 'Ocean', 'Rainforest', 'Starry night', 'Fireplace']
@@ -52,7 +53,7 @@ const sentenceButtonStyle: React.CSSProperties = {
 
 export default function HomePage() {
   const navigate = useNavigate()
-  const { setFocus, cloudSrc, setCloudSrc, setDissolve, setHeroDim } = useScene()
+  const { setFocus, setCloudSrc, setDissolve, resetCloud, setHeroDim } = useScene()
 
   const [view, setView] = useState<'sentence' | 'picture' | 'keywords' | 'panel'>('sentence')
   const [moods, setMoods] = useState<string[]>([])
@@ -90,9 +91,7 @@ export default function HomePage() {
   // Landing home starts a fresh session: release the previous picture (it was
   // only ever an object URL in this browser) and settle the cloud.
   useEffect(() => {
-    if (cloudSrc) URL.revokeObjectURL(cloudSrc)
-    setCloudSrc('')
-    setDissolve(1)
+    resetCloud()
     return () => {
       if (dissolveTimer.current) clearInterval(dissolveTimer.current)
       // Leaving mid-read: stop the poll and the chip reveal, or they keep
@@ -121,9 +120,7 @@ export default function HomePage() {
     kwTimers.current.forEach(clearTimeout)
     kwTimers.current = []
     if (dissolveTimer.current) clearInterval(dissolveTimer.current)
-    if (cloudSrc) URL.revokeObjectURL(cloudSrc)
-    setCloudSrc('')
-    setDissolve(1)
+    resetCloud()
     setPictureId(null)
     setKeywords(null)
     setKwStage(0)
@@ -214,7 +211,7 @@ export default function HomePage() {
    */
   const startSession = async (
     source: { mood: string } | { pictureId: string },
-    handoff: Record<string, unknown>,
+    handoff: Omit<GeneratingHandoff, 'duration'>,
   ) => {
     setBusy(true)
     setError(null)
@@ -241,9 +238,9 @@ export default function HomePage() {
     }
   }
 
-  const beginFromPicture = () => {
+  const beginFromPicture = async () => {
     if (!pictureId || !keywords || busy) return
-    return startSession({ pictureId }, { keywords, pic: true })
+    await startSession({ pictureId }, { keywords, pic: true })
   }
 
   const feeling = moodMode === 'text' ? moodText.trim() : moods.join(', ')
