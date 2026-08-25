@@ -63,7 +63,7 @@ frontend/           React + Vite PWA
   - `SK = PROFILE`
   - `SK = ENTITLEMENT` — fields: `available` (int), `frozen` (int), `plan`, `period_end`
   - `SK = SUB#<stripe_subscription_id>`
-  - `SK = JOB#<job_id>` — fields: `status` (PENDING | FROZEN | GENERATING | DONE | FAILED | ROLLED_BACK), `audio_key`, `picture_key` / `picture_keywords` / `picture_summary` (picture jobs only), timestamps
+  - `SK = JOB#<job_id>` — fields: `status` (PENDING | FROZEN | GENERATING | DONE | FAILED | ROLLED_BACK | DELETED), `audio_key`, `picture_key` / `picture_keywords` / `picture_summary` (picture jobs only), timestamps
 - Freeze: `available >= 1` condition → `available -= 1, frozen += 1`.
 - Commit: `frozen >= 1` condition → `frozen -= 1`.
 - Rollback: condition on job status not already committed → `frozen -= 1, available += 1`.

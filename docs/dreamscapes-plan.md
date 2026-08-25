@@ -141,8 +141,11 @@
 - `s3:DeleteObject` 于 `arn:...:bucket/jobs/*`（**不含** `pictures/*`，呼应约束 9）；
 - `s3:ListBucket` 于 bucket，`Condition: {"StringLike": {"s3:prefix": "jobs/*"}}`。
 
-**pipeline_stack**：`generate_script` 的 `put_object` 加 Tagging（沿用已有的 `s3:PutObject`
-授权即可，内联 Tagging 不需要额外 action）。
+**pipeline_stack**：`generate_script` 的 `put_object` 加 Tagging。
+**勘误（评审发现）**：带 `x-amz-tagging` 的 PutObject 需要 `s3:PutObjectTagging` 与
+`s3:PutObject` 同时授权，否则部署后每次生成都 AccessDenied；已补授并加测试断言。
+同时 `rollback_credit` 获得 `jobs/*` 的 Delete/List，用于清扫"合成了旁白但未 DONE"的失败任务
+——这类旁白无标签不过期、又非 DONE 不可删，否则会永久留存。
 
 ## 6. 前端方案
 
@@ -163,7 +166,7 @@
    - 左滑删除 + 软确认（Pointer Events 实现，阈值/回弹动效按设计稿）；
    - 空态、免费层 footer 行（**纯展示**，「只保留最近 3 条」的保留策略本期不实现）。
 5. **PlayerPage**：重访头变体（keywords + woven-ago 行）。经路由 state 传入
-   `{ from: 'dreamscapes', keywords, created_at }`；打开时调 `GET /jobs/{id}` 取当次签名 URL。
+   `{ from: 'dreamscapes', keywords, moodExcerpt, createdAt, pic }`；打开时调 `GET /jobs/{id}` 取当次签名 URL。
 
 ## 7. 测试
 
