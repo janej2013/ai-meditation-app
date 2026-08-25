@@ -1,4 +1,5 @@
 import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom'
+import AccountPill from './account/AccountPill'
 import AccountPage from './pages/AccountPage'
 import DreamscapesPage from './pages/DreamscapesPage'
 import FailedPage from './pages/FailedPage'
@@ -17,6 +18,8 @@ export default function App() {
       <SceneProvider>
         <div className="shell">
           <SceneLayer />
+          {/* Above every screen's content: the one account entry. */}
+          <AccountPill />
           <div className="content">
             <Routes>
               <Route path="/" element={<HomePage />} />

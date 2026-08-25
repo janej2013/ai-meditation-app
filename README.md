@@ -704,6 +704,12 @@ other, which CDK rejects as a cycle.
 
 ### The PWA (`frontend/`)
 
+Every screen carries the account entry in its top-right corner: `AccountPill`
+is rendered once in the app shell (above routed content, `App.tsx`), reads
+"Sign in" when signed out and the credits left when signed in, and re-reads the
+balance on every route change — the two things that move it, a generation and
+a purchase, both end in a navigation.
+
 React + Vite + TypeScript; pages/scene/api/auth/audio split. Visuals and flow
 follow the *revised* Claude Design prototype ("Drift": a cool indigo/violet
 oklch palette over a three.js particle cloud, DM Sans/DM Mono — see
