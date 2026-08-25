@@ -26,16 +26,43 @@ AUDIO_RETENTION_DAYS = 90
 # the api and pipeline stacks import this one, keeping infra to one copy.
 PICTURE_PREFIX = "pictures"
 
+# Per-job audio lives under this prefix; the sweep grant below, both
+# lifecycle rules and the step Lambdas' object grants all key on it.
+JOBS_PREFIX = "jobs"
+
 # The tag generate_script puts on intermediates so the lifecycle rule below
 # expires them. Twin of shared/audio.TRANSIENT_TAG_KEY/VALUE, mirrored by hand
 # for the same reason as PICTURE_PREFIX.
 TRANSIENT_TAG = {"transient": "true"}
 
-# Uploaded pictures back the planned replay feature (re-listen without spending
-# a credit), so they outlive the job that used them. Nothing in the pipeline
-# deletes them; this rule is the only reaper. When replay lands, the audio
-# retention above should move to match.
+# Uploaded pictures outlive the job that used them, kept for a possible
+# future variant of replay that re-weaves the picture. Nothing in the pipeline
+# deletes them; this rule is the only reaper. Replay itself (dreamscapes)
+# needs only the narration, which never expires -- so the audio outlives the
+# picture, not the other way round.
 PICTURE_RETENTION_DAYS = 365
+
+
+def grant_job_sweep(grantee: iam.IGrantable, bucket: s3.IBucket) -> None:
+    """Let ``grantee`` remove one job's objects: delete on jobs/* and a
+    listing fenced to the jobs/ prefix. Nothing on pictures/*, whose objects
+    expire by lifecycle rule alone (constraint 9). One helper for the two
+    principals that sweep -- the API's DELETE route and rollback_credit -- so
+    the grant cannot drift between them.
+    """
+    grantee.grant_principal.add_to_principal_policy(
+        iam.PolicyStatement(
+            actions=["s3:DeleteObject"],
+            resources=[bucket.arn_for_objects(f"{JOBS_PREFIX}/*")],
+        )
+    )
+    grantee.grant_principal.add_to_principal_policy(
+        iam.PolicyStatement(
+            actions=["s3:ListBucket"],
+            resources=[bucket.bucket_arn],
+            conditions={"StringLike": {"s3:prefix": f"{JOBS_PREFIX}/*"}},
+        )
+    )
 
 
 class DataStack(Stack):
@@ -107,7 +134,7 @@ class DataStack(Stack):
                 s3.LifecycleRule(
                     id="ExpireJobIntermediates",
                     enabled=True,
-                    prefix="jobs/",
+                    prefix=f"{JOBS_PREFIX}/",
                     tag_filters=TRANSIENT_TAG,
                     expiration=Duration.days(AUDIO_RETENTION_DAYS),
                 ),
@@ -115,7 +142,7 @@ class DataStack(Stack):
                     id="AbortJobUploads",
                     enabled=True,
                     # Multipart uploads only ever target jobs/ (synthesize).
-                    prefix="jobs/",
+                    prefix=f"{JOBS_PREFIX}/",
                     abort_incomplete_multipart_upload_after=Duration.days(7),
                 ),
                 s3.LifecycleRule(

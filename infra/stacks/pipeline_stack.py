@@ -38,7 +38,7 @@ from constructs import Construct
 
 from stacks.paths import ASSETS_DIR, BACKEND_DIR, SHARED_LAYER_DIR
 
-from .data_stack import PICTURE_PREFIX
+from .data_stack import PICTURE_PREFIX, grant_job_sweep
 
 # Transport-level Lambda failures. Always worth retrying, never a code bug.
 LAMBDA_SERVICE_ERRORS = [
@@ -319,21 +319,10 @@ class PipelineStack(Stack):
                 actions=["s3:PutObject", "s3:PutObjectTagging"], resources=[jobs_prefix]
             )
         )
-        # rollback_credit sweeps a failed job's objects after the refund: a
-        # narration that was synthesized but never committed is untagged (so
+        # rollback_credit sweeps a rolled-back job's objects after the refund:
+        # a narration that was synthesized but never committed is untagged (so
         # never expires) and never DONE (so the user cannot delete it).
-        # Delete on jobs/* only, listing fenced to the same prefix; nothing
-        # on pictures/* (constraint 9).
-        rollback.add_to_role_policy(
-            iam.PolicyStatement(actions=["s3:DeleteObject"], resources=[jobs_prefix])
-        )
-        rollback.add_to_role_policy(
-            iam.PolicyStatement(
-                actions=["s3:ListBucket"],
-                resources=[audio_bucket.bucket_arn],
-                conditions={"StringLike": {"s3:prefix": "jobs/*"}},
-            )
-        )
+        grant_job_sweep(rollback, audio_bucket)
         # synthesize reads the script and writes the narration. It never reads
         # assets/: the BGM is fetched by the browser, not by a Lambda.
         synthesize.add_to_role_policy(
