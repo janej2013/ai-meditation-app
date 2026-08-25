@@ -95,6 +95,10 @@ export default function HomePage() {
     setDissolve(1)
     return () => {
       if (dissolveTimer.current) clearInterval(dissolveTimer.current)
+      // Leaving mid-read: stop the poll and the chip reveal, or they keep
+      // hitting the API and setting state on a page that is gone.
+      describeAbort.current?.abort()
+      kwTimers.current.forEach(clearTimeout)
       setHeroDim(null)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps -- mount-only reset
@@ -203,23 +207,29 @@ export default function HomePage() {
     }
   }
 
-  const beginFromPicture = async () => {
-    if (!pictureId || !keywords || busy) return
+  /**
+   * The one way a session starts, from words or from a picture: the ambient
+   * music begins inside the click (the only place a mobile browser allows),
+   * the job is requested, and every refusal routes the same way.
+   */
+  const startSession = async (
+    source: { mood: string } | { pictureId: string },
+    handoff: Record<string, unknown>,
+  ) => {
     setBusy(true)
     setError(null)
     if (dissolveTimer.current) clearInterval(dissolveTimer.current)
     setDissolve(1)
-    // Still inside the click: the only place a mobile browser lets audio
-    // start. The music then runs through the waiting screen into the player.
     void mixer.startAmbient(bgmUrl(DEFAULT_BGM_TRACK))
     try {
-      const { job_id } = await startGeneration({ pictureId }, duration)
-      navigate(`/generating/${job_id}`, { state: { duration, keywords, pic: true } })
+      const { job_id } = await startGeneration(source, duration)
+      navigate(`/generating/${job_id}`, { state: { duration, ...handoff } })
     } catch (e) {
       mixer.stopAmbient()
       if (e instanceof NotSignedInError) {
         navigate('/signup', { state: { resume: true } })
       } else if (e instanceof ApiError && e.status === 402) {
+        // Out of credits: guide to purchase rather than surface an error.
         navigate('/plans')
       } else if (e instanceof ApiError && e.status === 429) {
         setError('A session is already being created. Give it a moment.')
@@ -229,6 +239,11 @@ export default function HomePage() {
     } finally {
       setBusy(false)
     }
+  }
+
+  const beginFromPicture = () => {
+    if (!pictureId || !keywords || busy) return
+    return startSession({ pictureId }, { keywords, pic: true })
   }
 
   const feeling = moodMode === 'text' ? moodText.trim() : moods.join(', ')
@@ -246,33 +261,7 @@ export default function HomePage() {
         ? `${feeling} — drifting to ${destination.toLowerCase()}`
         : feeling
     ).slice(0, 500)
-    setBusy(true)
-    setError(null)
-    if (dissolveTimer.current) clearInterval(dissolveTimer.current)
-    setDissolve(1)
-    // Still inside the click: the only place a mobile browser lets audio
-    // start. The music then runs through the waiting screen into the player.
-    void mixer.startAmbient(bgmUrl(DEFAULT_BGM_TRACK))
-    try {
-      const { job_id } = await startGeneration({ mood }, duration)
-      navigate(`/generating/${job_id}`, {
-        state: { duration, feeling, destination, pic: false },
-      })
-    } catch (e) {
-      mixer.stopAmbient()
-      if (e instanceof NotSignedInError) {
-        navigate('/signup', { state: { resume: true } })
-      } else if (e instanceof ApiError && e.status === 402) {
-        // Out of credits: guide to purchase rather than surface an error.
-        navigate('/plans')
-      } else if (e instanceof ApiError && e.status === 429) {
-        setError('A session is already being created. Give it a moment.')
-      } else {
-        setError('Could not start. Please try again.')
-      }
-    } finally {
-      setBusy(false)
-    }
+    return startSession({ mood }, { feeling, destination, pic: false })
   }
 
   const onSentence = view === 'sentence'

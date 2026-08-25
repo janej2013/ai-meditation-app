@@ -129,7 +129,7 @@ export function startGeneration(
   })
 }
 
-export type PictureStatus = 'PENDING' | 'DESCRIBED' | 'FAILED'
+export type PictureStatus = 'PENDING' | 'DESCRIBING' | 'DESCRIBED' | 'FAILED'
 
 export interface Picture {
   picture_id: string
@@ -149,25 +149,53 @@ export function getPicture(pictureId: string): Promise<Picture> {
   return request<Picture>(`/pictures/${encodeURIComponent(pictureId)}`)
 }
 
-const DESCRIBE_POLL_MS = 1500
-const DESCRIBE_TIMEOUT_MS = 90_000
+/**
+ * Sleep that an AbortSignal can cut short. An abort that landed before the
+ * call would otherwise be missed entirely -- addEventListener never fires on
+ * an already-aborted signal -- so it is checked first.
+ */
+function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(new DOMException('Aborted', 'AbortError'))
+      return
+    }
+    const t = setTimeout(resolve, ms)
+    signal?.addEventListener(
+      'abort',
+      () => {
+        clearTimeout(t)
+        reject(new DOMException('Aborted', 'AbortError'))
+      },
+      { once: true },
+    )
+  })
+}
 
 /**
- * Upload, then describe: resolves to the keywords once the vision step has
- * read the picture, or throws if it gave up. The pipeline never blocks on a
- * synchronous model call (the API only starts a state machine), so this is a
- * short poll, the same shape as pollJob.
+ * Describe an upload and wait for the reading: resolves to the keywords once
+ * the vision step has read the picture, throws if the attempt failed. The
+ * API only starts a state machine (never a synchronous model call), so this
+ * is a short poll with the same growing interval as pollJob.
  */
 export async function describeUploadedPicture(
   pictureId: string,
-  opts: { signal?: AbortSignal } = {},
+  opts: {
+    signal?: AbortSignal
+    initialIntervalMs?: number
+    maxIntervalMs?: number
+    timeoutMs?: number
+  } = {},
 ): Promise<string[]> {
+  const { signal, initialIntervalMs = 1500, maxIntervalMs = 5000, timeoutMs = 90_000 } = opts
+  const deadline = Date.now() + timeoutMs
+  let interval = initialIntervalMs
   let picture = await describePicture(pictureId)
-  const deadline = Date.now() + DESCRIBE_TIMEOUT_MS
-  while (picture.status === 'PENDING') {
-    if (opts.signal?.aborted) throw new DOMException('Aborted', 'AbortError')
-    if (Date.now() > deadline) throw new ApiError(408, 'Reading the picture timed out')
-    await new Promise((r) => setTimeout(r, DESCRIBE_POLL_MS))
+  while (picture.status === 'PENDING' || picture.status === 'DESCRIBING') {
+    if (Date.now() + interval > deadline)
+      throw new ApiError(408, 'Reading the picture timed out')
+    await sleep(interval, signal)
+    interval = Math.min(interval * 1.5, maxIntervalMs)
     picture = await getPicture(pictureId)
   }
   if (picture.status === 'FAILED' || !picture.keywords)
@@ -273,24 +301,7 @@ export async function pollJob(
     if (Date.now() + interval > deadline) {
       throw new ApiError(408, 'Generation timed out')
     }
-    await new Promise<void>((resolve, reject) => {
-      // An abort that landed while getJob was in flight would otherwise be
-      // missed entirely: addEventListener never fires on an already-aborted
-      // signal, and the loop would sleep the full interval before noticing.
-      if (signal?.aborted) {
-        reject(new DOMException('Aborted', 'AbortError'))
-        return
-      }
-      const t = setTimeout(resolve, interval)
-      signal?.addEventListener(
-        'abort',
-        () => {
-          clearTimeout(t)
-          reject(new DOMException('Aborted', 'AbortError'))
-        },
-        { once: true },
-      )
-    })
+    await sleep(interval, signal)
     interval = Math.min(interval * 1.5, maxIntervalMs)
   }
 }
