@@ -8,9 +8,9 @@ Two things are deliberately absent from this state:
 
 * **the user's mood text and picture** -- Step Functions persists execution input in the
   execution history, where it is visible in the console for 90 days. Constraint
-  7 forbids putting user input there, so the API writes ``mood_text`` (and the
-  picture's object key) onto the JOB item and the task Lambdas read them from
-  DynamoDB instead. Only ``has_picture`` travels, to drive the Choice state.
+  7 forbids putting user input there, so the API writes ``mood_text`` or the
+  picture's key and description onto the JOB item and the task Lambdas read
+  them from DynamoDB instead.
 * **the generated script** -- same reasoning, plus it would bloat the state.
   ``generate_script`` writes it to S3 and passes only the key.
 
@@ -39,9 +39,6 @@ class PipelineState(BaseModel):
     user_id: str
     job_id: str
     duration_minutes: int = Field(ge=MIN_DURATION_MINUTES, le=MAX_DURATION_MINUTES)
-    # Routes the execution through describe_picture. The key itself stays on
-    # the JOB item.
-    has_picture: bool = False
 
     # Filled in as the pipeline progresses; each is an S3 object key.
     script_key: str | None = None
@@ -52,6 +49,16 @@ class PipelineState(BaseModel):
 # ----------------------------------------------------------------------
 # Error vocabulary for the state machine
 # ----------------------------------------------------------------------
+
+
+class PictureState(BaseModel):
+    """Payload of the picture state machine's one task: ids only. The key is
+    derived from them and the reading lands on the PICTURE item."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    user_id: str
+    picture_id: str
 
 
 class PipelineError(Exception):

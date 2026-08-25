@@ -215,27 +215,55 @@ def test_generate_caps_max_tokens_at_the_model_limit(
     assert bedrock.converse.call_args.kwargs["inferenceConfig"]["maxTokens"] == expected
 
 
-def test_generate_fails_a_picture_job_whose_description_never_landed(
+def test_generate_fails_a_job_with_neither_words_nor_a_picture(
     store, dynamodb_client, s3_bucket, audio_env, monkeypatch, state
 ):
-    """has_picture routed the execution through describe_picture, yet the JOB
-    item carries no description (e.g. the conditional write was swallowed):
-    fail and refund rather than quietly delivering a words-only meditation."""
+    """A picture job whose description never reached the item, or a words job
+    with no words: fail and refund rather than invent a meditation."""
     from .conftest import seed_entitlement
 
     seed_entitlement(dynamodb_client, available=1)
-    store.create_job(USER_ID, JOB, MOOD, 10)
+    store.create_job(USER_ID, JOB, None, 10, picture_key=f"pictures/{USER_ID}/p.jpg")
     store.freeze_credit(USER_ID, JOB)
     patch_store(monkeypatch, generate_handler, store)
 
+    bedrock = MagicMock()
+    monkeypatch.setattr(generate_handler, "_get_bedrock", lambda: bedrock)
+    monkeypatch.setattr(generate_handler, "_get_s3", lambda: s3_bucket)
+
+    with pytest.raises(ScriptGenerationError, match="neither words nor a picture"):
+        generate_handler.lambda_handler(state, None)
+    bedrock.converse.assert_not_called()
+
+
+def test_generate_from_a_picture_alone_briefs_the_model_with_the_reading(
+    store, dynamodb_client, s3_bucket, audio_env, monkeypatch, state
+):
+    from shared.models import PictureDescription
+
+    from .conftest import seed_entitlement
+
+    seed_entitlement(dynamodb_client, available=1)
+    store.create_job(
+        USER_ID,
+        JOB,
+        None,
+        10,
+        picture_key=f"pictures/{USER_ID}/p.jpg",
+        picture=PictureDescription(keywords=["dusk", "ocean", "longing"], summary="A quiet shore."),
+    )
+    store.freeze_credit(USER_ID, JOB)
+    patch_store(monkeypatch, generate_handler, store)
     bedrock = MagicMock()
     bedrock.converse.return_value = bedrock_response(plausible_script())
     monkeypatch.setattr(generate_handler, "_get_bedrock", lambda: bedrock)
     monkeypatch.setattr(generate_handler, "_get_s3", lambda: s3_bucket)
 
-    with pytest.raises(ScriptGenerationError, match="lost its picture description"):
-        generate_handler.lambda_handler({**state, "has_picture": True}, None)
-    bedrock.converse.assert_not_called()
+    generate_handler.lambda_handler(state, None)
+
+    sent = bedrock.converse.call_args.kwargs["messages"][0]["content"][0]["text"]
+    assert "dusk, ocean, longing" in sent and "A quiet shore." in sent
+    assert "described how they feel" not in sent  # no words section without words
 
 
 def test_generate_rejects_a_script_truncated_at_max_tokens(

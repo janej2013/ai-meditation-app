@@ -168,7 +168,6 @@ def test_generate_accepts_and_starts_the_pipeline(client, dynamodb_client, store
         "user_id": USER_ID,
         "job_id": body["job_id"],
         "duration_minutes": 10,
-        "has_picture": False,
     }
 
 
@@ -243,50 +242,81 @@ def test_generate_without_claims_is_unauthorized(anonymous_client):
 # ----------------------------------------------------------------------
 
 
-def test_generate_with_a_picture_stores_the_key_and_flags_the_execution(
+PICTURE_ID = "3f0c9f8e-6a3b-4c1d-9e2f-1a2b3c4d5e6f"
+DESCRIPTION = {"keywords": ["dusk", "still water", "pines"], "summary": "Quiet dusk lake."}
+
+
+def seed_described_picture(store, picture_id: str = PICTURE_ID) -> None:
+    from shared.models import PictureDescription
+
+    assert store.create_picture(USER_ID, picture_id)
+    store.set_picture_description(USER_ID, picture_id, PictureDescription(**DESCRIPTION))
+
+
+def test_generate_from_a_described_picture_copies_the_reading_onto_the_job(
     client, dynamodb_client, store, sfn_client
 ):
-    """The key lives on the JOB item; the execution input carries only a flag."""
+    """No mood: the picture is the whole brief. Key and description live on
+    the JOB item; the execution input carries neither."""
     seed_entitlement(dynamodb_client, available=1)
-    picture_id = "3f0c9f8e-6a3b-4c1d-9e2f-1a2b3c4d5e6f"
+    seed_described_picture(store)
 
-    response = client.post("/generate", json={**GOOD_BODY, "picture_id": picture_id})
+    response = client.post("/generate", json={"picture_id": PICTURE_ID, "duration_minutes": 10})
 
     assert response.status_code == 202
-    job_id = response.json()["job_id"]
+    job = store.get_job(USER_ID, response.json()["job_id"])
+    assert job.mood_text is None
     # Scoped to the caller's subject: a client cannot name another user's key.
-    assert store.get_job(USER_ID, job_id).picture_key == f"pictures/{USER_ID}/{picture_id}.jpg"
-
+    assert job.picture_key == f"pictures/{USER_ID}/{PICTURE_ID}.jpg"
+    assert job.picture_keywords == DESCRIPTION["keywords"]
     payload = json.loads(sfn_client.start_execution.call_args.kwargs["input"])
-    assert payload["has_picture"] is True
-    assert "pictures/" not in json.dumps(payload)
+    assert set(payload) == {"user_id", "job_id", "duration_minutes"}
 
 
-def test_generate_rejects_a_malformed_picture_id(client, dynamodb_client, sfn_client):
+def test_generate_refuses_a_picture_that_is_not_described_yet(
+    client, dynamodb_client, store, sfn_client
+):
     seed_entitlement(dynamodb_client, available=1)
+    assert store.create_picture(USER_ID, PICTURE_ID)  # PENDING
 
-    response = client.post("/generate", json={**GOOD_BODY, "picture_id": "../other-user"})
+    response = client.post("/generate", json={"picture_id": PICTURE_ID, "duration_minutes": 10})
 
-    assert response.status_code == 422
+    assert response.status_code == 409
     sfn_client.start_execution.assert_not_called()
 
 
-def test_job_status_reports_picture_keywords_once_described(
-    client, dynamodb_client, store, sfn_client
-):
-    from shared.models import PictureDescription
-
+def test_generate_404s_a_picture_it_never_authorised(client, dynamodb_client, sfn_client):
     seed_entitlement(dynamodb_client, available=1)
-    job_id = client.post("/generate", json=GOOD_BODY).json()["job_id"]
-    store.set_job_picture_description(
-        USER_ID,
-        job_id,
-        PictureDescription(keywords=["dusk", "still water", "pines"], summary="Quiet dusk lake."),
-    )
+    response = client.post("/generate", json={"picture_id": PICTURE_ID, "duration_minutes": 10})
+    assert response.status_code == 404
+    sfn_client.start_execution.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"duration_minutes": 10},
+        {**GOOD_BODY, "picture_id": PICTURE_ID},
+        {**GOOD_BODY, "picture_id": "../other-user"},
+    ],
+    ids=["neither", "both", "malformed-id"],
+)
+def test_generate_wants_exactly_one_source(client, dynamodb_client, sfn_client, body):
+    seed_entitlement(dynamodb_client, available=1)
+    assert client.post("/generate", json=body).status_code == 422
+    sfn_client.start_execution.assert_not_called()
+
+
+def test_job_status_reports_picture_keywords(client, dynamodb_client, store, sfn_client):
+    seed_entitlement(dynamodb_client, available=1)
+    seed_described_picture(store)
+    job_id = client.post(
+        "/generate", json={"picture_id": PICTURE_ID, "duration_minutes": 10}
+    ).json()["job_id"]
 
     body = client.get(f"/jobs/{job_id}").json()
 
-    assert body["picture_keywords"] == ["dusk", "still water", "pines"]
+    assert body["picture_keywords"] == DESCRIPTION["keywords"]
     # The summary is prompt material only.
     assert "summary" not in json.dumps(body)
 
@@ -296,13 +326,18 @@ def test_job_status_reports_picture_keywords_once_described(
 # ----------------------------------------------------------------------
 
 
-def test_picture_upload_is_a_presigned_post_scoped_to_the_caller(client, monkeypatch):
+def test_picture_upload_is_a_presigned_post_scoped_to_the_caller(
+    client, dynamodb_client, store, monkeypatch
+):
     monkeypatch.setenv("AUDIO_BUCKET", "meditation-test-audio")
+    seed_entitlement(dynamodb_client, available=1)
 
     response = client.post("/pictures/upload")
 
     assert response.status_code == 200
     body = response.json()
+    # The item is what later authorises describing this upload.
+    assert store.get_picture(USER_ID, body["picture_id"]).status.value == "PENDING"
     assert body["fields"]["key"] == f"pictures/{USER_ID}/{body['picture_id']}.jpg"
     assert body["fields"]["Content-Type"] == "image/jpeg"
     assert body["expires_in"] == 300
@@ -319,6 +354,95 @@ def test_picture_upload_is_a_presigned_post_scoped_to_the_caller(client, monkeyp
 
 def test_picture_upload_without_claims_is_unauthorized(anonymous_client):
     assert anonymous_client.post("/pictures/upload").status_code == 401
+
+
+def test_picture_upload_needs_a_credit_in_hand(client, dynamodb_client, monkeypatch):
+    """The vision call runs before any credit is frozen: unpaid Bedrock spend,
+    so the gate is the same 402 as POST /generate."""
+    monkeypatch.setenv("AUDIO_BUCKET", "meditation-test-audio")
+    seed_entitlement(dynamodb_client, available=0)
+
+    assert client.post("/pictures/upload").status_code == 402
+
+
+# ----------------------------------------------------------------------
+# POST /pictures/{id}/describe, GET /pictures/{id}
+# ----------------------------------------------------------------------
+
+
+@pytest.fixture
+def picture_sfn(monkeypatch):
+    from api.routers import pictures as pictures_router
+
+    fake = MagicMock()
+    monkeypatch.setenv(
+        "PICTURE_STATE_MACHINE_ARN", "arn:aws:states:ap-southeast-2:123:stateMachine:p"
+    )
+    monkeypatch.setattr(pictures_router, "_get_sfn", lambda: fake)
+    return fake
+
+
+def test_describe_starts_the_picture_machine_with_ids_only(
+    client, dynamodb_client, store, picture_sfn
+):
+    seed_entitlement(dynamodb_client, available=1)
+    assert store.create_picture(USER_ID, PICTURE_ID)
+
+    response = client.post(f"/pictures/{PICTURE_ID}/describe")
+
+    assert response.status_code == 202
+    assert response.json() == {"picture_id": PICTURE_ID, "status": "PENDING", "keywords": None}
+    call = picture_sfn.start_execution.call_args.kwargs
+    assert call["name"] == PICTURE_ID  # one execution per picture, ever
+    assert json.loads(call["input"]) == {"user_id": USER_ID, "picture_id": PICTURE_ID}
+
+
+def test_describe_is_idempotent_once_described(client, dynamodb_client, store, picture_sfn):
+    seed_entitlement(dynamodb_client, available=1)
+    seed_described_picture(store)
+
+    response = client.post(f"/pictures/{PICTURE_ID}/describe")
+
+    assert response.status_code == 202
+    assert response.json()["status"] == "DESCRIBED"
+    assert response.json()["keywords"] == DESCRIPTION["keywords"]
+    picture_sfn.start_execution.assert_not_called()
+
+
+def test_describe_tolerates_a_race_on_the_same_picture(client, dynamodb_client, store, picture_sfn):
+    seed_entitlement(dynamodb_client, available=1)
+    assert store.create_picture(USER_ID, PICTURE_ID)
+    picture_sfn.start_execution.side_effect = ClientError(
+        {"Error": {"Code": "ExecutionAlreadyExists"}}, "StartExecution"
+    )
+
+    assert client.post(f"/pictures/{PICTURE_ID}/describe").status_code == 202
+
+
+def test_describe_404s_and_402s_like_the_rest(client, dynamodb_client, store, picture_sfn):
+    seed_entitlement(dynamodb_client, available=1)
+    assert client.post(f"/pictures/{PICTURE_ID}/describe").status_code == 404  # never uploaded
+
+    assert store.create_picture(USER_ID, PICTURE_ID)
+    from .conftest import set_available
+
+    set_available(dynamodb_client, 0)
+    assert client.post(f"/pictures/{PICTURE_ID}/describe").status_code == 402
+    picture_sfn.start_execution.assert_not_called()
+
+
+def test_get_picture_reports_progress_and_never_the_summary(client, dynamodb_client, store):
+    seed_entitlement(dynamodb_client, available=1)
+    assert client.get(f"/pictures/{PICTURE_ID}").status_code == 404
+
+    seed_described_picture(store)
+    body = client.get(f"/pictures/{PICTURE_ID}").json()
+
+    assert body == {
+        "picture_id": PICTURE_ID,
+        "status": "DESCRIBED",
+        "keywords": DESCRIPTION["keywords"],
+    }
 
 
 def test_job_status_while_running(client, dynamodb_client, store, sfn_client):

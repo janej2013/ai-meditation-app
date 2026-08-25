@@ -36,6 +36,20 @@ def picture_key(user_id: str, picture_id: str) -> str:
     return f"{PICTURE_PREFIX}/{user_id}/{picture_id}.jpg"
 
 
+def picture_sk(picture_id: str) -> str:
+    """Sort key for an uploaded picture within a user partition.
+
+    A picture is described before any job exists (the keywords screen comes
+    before Begin), so its reading lives on its own item; POST /generate copies
+    it onto the JOB it starts.
+    """
+    return f"PICTURE#{picture_id}"
+
+
+# PICTURE items outlive nothing useful past the object itself.
+PICTURE_ITEM_TTL_DAYS = 365
+
+
 # The upload contract, shared by its two enforcement points: the presigned
 # POST policy (api/routers/pictures) and the vision step's re-check
 # (functions/describe_picture). One value, so they cannot drift apart --
@@ -82,6 +96,31 @@ class JobStatus(StrEnum):
     # Soft-deleted from the dreamscapes collection; the audio objects are
     # cleaned up by the DELETE route, the item stays as the idempotency anchor.
     DELETED = "DELETED"
+
+
+class PictureStatus(StrEnum):
+    """The vision step's progress on an upload: the keywords screen polls it."""
+
+    PENDING = "PENDING"
+    DESCRIBED = "DESCRIBED"
+    FAILED = "FAILED"
+
+
+class Picture(BaseModel):
+    """An uploaded picture and, once the vision step has run, its reading.
+
+    Keywords and summary derive from the user's picture: on this item, never
+    in an execution payload, never in INFO logs (constraint 7).
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    user_id: str
+    picture_id: str
+    status: PictureStatus
+    keywords: list[str] | None = None
+    summary: str | None = None
+    created_at: datetime | None = None
 
 
 class Entitlement(BaseModel):

@@ -16,11 +16,11 @@ from uuid import UUID
 import boto3
 from botocore.exceptions import ClientError
 from fastapi import APIRouter, HTTPException, status
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from api import cloudfront_signer
 from api.deps import CurrentUserDep, StoreDep
-from shared.models import JobStatus, picture_key
+from shared.models import JobStatus, PictureDescription, PictureStatus, picture_key
 from shared.pipeline import MAX_DURATION_MINUTES, MIN_DURATION_MINUTES
 
 logger = logging.getLogger(__name__)
@@ -40,11 +40,19 @@ def _get_sfn() -> Any:
 class GenerateRequest(BaseModel):
     """How the user feels, and how long a meditation they want."""
 
-    mood: str = Field(min_length=1, max_length=500)
+    # A session drifts from words or from a picture -- exactly one of them.
+    mood: str | None = Field(default=None, min_length=1, max_length=500)
     duration_minutes: int = Field(ge=MIN_DURATION_MINUTES, le=MAX_DURATION_MINUTES)
-    # From POST /pictures/upload. The key is rebuilt from the caller's own
-    # subject, so a client cannot point a job at anyone else's picture.
+    # From POST /pictures/upload, already described. The key is rebuilt from
+    # the caller's own subject, so a client cannot point a job at anyone
+    # else's picture.
     picture_id: UUID | None = None
+
+    @model_validator(mode="after")
+    def _one_source(self) -> GenerateRequest:
+        if (self.mood is None) == (self.picture_id is None):
+            raise ValueError("provide either mood or picture_id, not both")
+        return self
 
 
 class GenerateResponse(BaseModel):
@@ -75,9 +83,26 @@ def generate(payload: GenerateRequest, user: CurrentUserDep, store: StoreDep) ->
 
     _reject_if_job_in_flight(entitlement.frozen)
 
+    key: str | None = None
+    description: PictureDescription | None = None
+    if payload.picture_id is not None:
+        picture = store.get_picture(user.sub, str(payload.picture_id))
+        if picture is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Picture not found.")
+        if picture.status is not PictureStatus.DESCRIBED or not picture.keywords:
+            # The keywords screen waits for DESCRIBED before offering Begin;
+            # reaching here otherwise is a client racing itself.
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="The picture has not been read yet.",
+            )
+        key = picture_key(user.sub, str(payload.picture_id))
+        description = PictureDescription(keywords=picture.keywords, summary=picture.summary or "")
+
     job_id = str(uuid.uuid4())
-    key = picture_key(user.sub, str(payload.picture_id)) if payload.picture_id else None
-    if not store.create_job(user.sub, job_id, payload.mood, payload.duration_minutes, key):
+    if not store.create_job(
+        user.sub, job_id, payload.mood, payload.duration_minutes, key, description
+    ):
         # A uuid4 collision is not a thing; this means a retry replayed.
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="That job already exists.")
 
@@ -90,9 +115,6 @@ def generate(payload: GenerateRequest, user: CurrentUserDep, store: StoreDep) ->
                     "user_id": user.sub,
                     "job_id": job_id,
                     "duration_minutes": payload.duration_minutes,
-                    # A flag, never the key: it routes the Choice state and
-                    # keeps the execution history free of user content.
-                    "has_picture": key is not None,
                 }
             ),
         )

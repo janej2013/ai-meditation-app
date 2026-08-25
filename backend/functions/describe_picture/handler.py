@@ -1,10 +1,14 @@
-"""Optional step between FreezeCredit and GenerateScript: describe the picture
-the user drifted from, with Amazon Nova Lite.
+"""Describe an uploaded picture with Amazon Nova Lite -- before any job
+exists, so the keywords screen can show what was found and the user decides
+whether to Begin. Runs as the single task of the picture state machine.
 
-The picture's object key is read from the JOB item, never the payload, and the
-description is written back there for generate_script -- both are user content
-under constraint 7. The object itself is left in place: it backs the planned
-replay feature and only expires by the bucket's lifecycle rule.
+The payload names only ``user_id`` and ``picture_id``; the reading is written
+to the PICTURE item and copied onto the JOB by POST /generate -- user content
+under constraint 7 stays off the execution history. A permanent failure is
+recorded on the item (status FAILED) so the screen stops waiting, then
+re-raised so the execution fails visibly; transient Bedrock errors are left
+for the state machine's Retry. The object itself is never deleted: it expires
+by the bucket's lifecycle rule alone (constraint 9).
 """
 
 from __future__ import annotations
@@ -19,8 +23,13 @@ from botocore.exceptions import ClientError
 from pydantic import ValidationError
 
 from shared.db import EntitlementStore
-from shared.models import MAX_PICTURE_BYTES, PictureDescription
-from shared.pipeline import PictureDescriptionError, PipelineState, raise_for_bedrock_error
+from shared.models import MAX_PICTURE_BYTES, PictureDescription, picture_key
+from shared.pipeline import (
+    BedrockTransientError,
+    PictureDescriptionError,
+    PictureState,
+    raise_for_bedrock_error,
+)
 
 from .prompt import SYSTEM_PROMPT, USER_MESSAGE
 
@@ -54,21 +63,28 @@ def _get_s3() -> Any:
 
 
 def lambda_handler(event: dict[str, Any], context: object) -> dict[str, Any]:  # noqa: ARG001
-    state = PipelineState.model_validate(event)
+    state = PictureState.model_validate(event)
     store = _get_store()
 
-    job = store.get_job(state.user_id, state.job_id)
-    if job is None or not job.picture_key:
-        # The Choice state routed here on has_picture, yet the item carries no
-        # key: an inconsistency worth failing on rather than silently skipping.
-        raise PictureDescriptionError(f"job {state.job_id} has no picture to describe")
+    if store.get_picture(state.user_id, state.picture_id) is None:
+        # Only POST /pictures/upload creates the item, so a missing one means
+        # an execution nobody authorised. Nothing to mark; just refuse.
+        raise PictureDescriptionError(f"picture {state.picture_id} was never authorised")
 
-    image = _fetch(job.picture_key)
-    description = _describe(image)
-    store.set_job_picture_description(state.user_id, state.job_id, description)
+    try:
+        image = _fetch(picture_key(state.user_id, state.picture_id))
+        description = _describe(image)
+    except BedrockTransientError:
+        raise  # the state machine retries; the item stays PENDING meanwhile
+    except PictureDescriptionError:
+        store.mark_picture_failed(state.user_id, state.picture_id)
+        raise
+    store.set_picture_description(state.user_id, state.picture_id, description)
 
     # Count only -- the keywords derive from the user's picture (constraint 7).
-    logger.info("picture described job_id=%s keywords=%d", state.job_id, len(description.keywords))
+    logger.info(
+        "picture described picture_id=%s keywords=%d", state.picture_id, len(description.keywords)
+    )
     return state.model_dump()
 
 

@@ -1,9 +1,10 @@
-"""describe_picture: reads the key off the JOB item, asks Nova, writes the
-description back -- and never deletes the picture.
+"""describe_picture: reads an authorised upload, asks Nova, writes the reading
+to the PICTURE item -- before any job exists -- and never deletes the picture.
 
 The error taxonomy matters as much as the happy path: only BedrockTransientError
-is retried by the state machine, so a missing object or an off-contract answer
-must surface as PictureDescriptionError and fall straight through to rollback.
+is retried by the state machine; a missing object or an off-contract answer is
+permanent, marks the item FAILED so the keywords screen stops waiting, and
+fails the execution visibly.
 """
 
 from __future__ import annotations
@@ -20,8 +21,8 @@ from shared.pipeline import BedrockTransientError, PictureDescriptionError
 
 from .conftest import BUCKET, USER_ID, bedrock_response, seed_entitlement
 
-JOB = "job-picture"
-KEY = f"pictures/{USER_ID}/0f0e0d0c-0b0a-4908-8706-050403020100.jpg"
+PICTURE_ID = "0f0e0d0c-0b0a-4908-8706-050403020100"
+KEY = f"pictures/{USER_ID}/{PICTURE_ID}.jpg"
 GOOD_ANSWER = {
     "keywords": ["dusk", "still water", "pine shore"],
     "summary": "You stand at the edge of a quiet lake as the light fades.",
@@ -30,7 +31,7 @@ GOOD_ANSWER = {
 
 @pytest.fixture
 def state() -> dict:
-    return {"user_id": USER_ID, "job_id": JOB, "duration_minutes": 10, "has_picture": True}
+    return {"user_id": USER_ID, "picture_id": PICTURE_ID}
 
 
 @pytest.fixture
@@ -42,8 +43,7 @@ def env(monkeypatch):
 
 def prepare(store, dynamodb_client, s3_bucket, monkeypatch, *, upload: bool = True):
     seed_entitlement(dynamodb_client, available=1)
-    store.create_job(USER_ID, JOB, "calm", 10, picture_key=KEY)
-    store.freeze_credit(USER_ID, JOB)
+    assert store.create_picture(USER_ID, PICTURE_ID)
     if upload:
         s3_bucket.put_object(
             Bucket=BUCKET, Key=KEY, Body=b"\xff\xd8jpeg-bytes", ContentType="image/jpeg"
@@ -55,7 +55,7 @@ def prepare(store, dynamodb_client, s3_bucket, monkeypatch, *, upload: bool = Tr
     return bedrock
 
 
-def test_describes_the_picture_onto_the_job_item(
+def test_describes_the_picture_onto_its_item(
     store, dynamodb_client, s3_bucket, env, monkeypatch, state
 ):
     bedrock = prepare(store, dynamodb_client, s3_bucket, monkeypatch)
@@ -63,9 +63,10 @@ def test_describes_the_picture_onto_the_job_item(
 
     result = handler.lambda_handler(state, None)
 
-    job = store.get_job(USER_ID, JOB)
-    assert job.picture_keywords == GOOD_ANSWER["keywords"]
-    assert job.picture_summary == GOOD_ANSWER["summary"]
+    picture = store.get_picture(USER_ID, PICTURE_ID)
+    assert picture.status.value == "DESCRIBED"
+    assert picture.keywords == GOOD_ANSWER["keywords"]
+    assert picture.summary == GOOD_ANSWER["summary"]
     # The state passes through untouched: the description is item-only.
     assert {k: result[k] for k in state} == state
     assert "keywords" not in json.dumps(result)
@@ -98,7 +99,7 @@ def test_tolerates_prose_or_a_code_fence_around_the_json(
 
     handler.lambda_handler(state, None)
 
-    assert store.get_job(USER_ID, JOB).picture_keywords == GOOD_ANSWER["keywords"]
+    assert store.get_picture(USER_ID, PICTURE_ID).keywords == GOOD_ANSWER["keywords"]
 
 
 @pytest.mark.parametrize(
@@ -112,6 +113,7 @@ def test_transient_bedrock_errors_are_retryable(
 
     with pytest.raises(BedrockTransientError):
         handler.lambda_handler(state, None)
+    assert store.get_picture(USER_ID, PICTURE_ID).status.value == "PENDING"  # retry pending
 
 
 def test_a_validation_error_is_permanent(
@@ -129,12 +131,13 @@ def test_a_validation_error_is_permanent(
 
 
 def test_a_missing_upload_is_permanent(store, dynamodb_client, s3_bucket, env, monkeypatch, state):
-    """The user clicked Begin before the upload landed: fail and refund."""
+    """Described before the upload landed: permanent, and the item says so."""
     bedrock = prepare(store, dynamodb_client, s3_bucket, monkeypatch, upload=False)
 
     with pytest.raises(PictureDescriptionError, match="never uploaded"):
         handler.lambda_handler(state, None)
     bedrock.converse.assert_not_called()
+    assert store.get_picture(USER_ID, PICTURE_ID).status.value == "FAILED"
 
 
 def test_an_oversized_picture_is_permanent(
@@ -168,19 +171,23 @@ def test_an_off_contract_answer_is_permanent_not_downgraded(
 
     with pytest.raises(PictureDescriptionError):
         handler.lambda_handler(state, None)
-    assert store.get_job(USER_ID, JOB).picture_keywords is None
+    picture = store.get_picture(USER_ID, PICTURE_ID)
+    assert picture.keywords is None
+    assert picture.status.value == "FAILED"
 
 
-def test_a_job_without_a_picture_key_fails(
+def test_an_unauthorised_picture_id_is_refused(
     store, dynamodb_client, s3_bucket, env, monkeypatch, state
 ):
-    """Routed here on has_picture, yet the item has no key: inconsistent, not skippable."""
-    seed_entitlement(dynamodb_client, available=1)
-    store.create_job(USER_ID, JOB, "calm", 10)
+    """Only POST /pictures/upload creates the item; an execution for an id
+    without one was never authorised and must not spend on Bedrock."""
     monkeypatch.setattr(handler, "_get_store", lambda: store)
+    bedrock = MagicMock()
+    monkeypatch.setattr(handler, "_get_bedrock", lambda: bedrock)
 
-    with pytest.raises(PictureDescriptionError, match="no picture"):
+    with pytest.raises(PictureDescriptionError, match="never authorised"):
         handler.lambda_handler(state, None)
+    bedrock.converse.assert_not_called()
 
 
 def test_prompt_forbids_identifying_people_or_reading_text():
