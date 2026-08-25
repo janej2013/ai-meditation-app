@@ -37,29 +37,40 @@ vi.mock('../audio/mixer', async (importOriginal) => {
 })
 
 import { NotSignedInError, getJob } from '../api/client'
+import { SceneProvider, useScene } from '../scene/SceneContext'
 import PlayerPage from './PlayerPage'
 
 const JOB_ID = 'job-abc'
 const FRESH_URL = 'https://d111.cloudfront.net/jobs/job-abc/narration.mp3?Signature=new'
 
+/** Exposes what the cloud would be sampling, so tests can see the handoff. */
+function CloudProbe() {
+  const { cloudSrc } = useScene()
+  return <div data-testid="cloud-src">{cloudSrc}</div>
+}
+
 function renderPlayer(state?: { audioUrl?: string }) {
   return render(
     <MemoryRouter initialEntries={[{ pathname: `/player/${JOB_ID}`, state: state ?? null }]}>
-      <Routes>
-        <Route path="/player/:jobId" element={<PlayerPage />} />
-        <Route path="/" element={<div>HOME SCREEN</div>} />
-        <Route path="/signup" element={<div>SIGNUP SCREEN</div>} />
-      </Routes>
+      <SceneProvider>
+        <CloudProbe />
+        <Routes>
+          <Route path="/player/:jobId" element={<PlayerPage />} />
+          <Route path="/" element={<div>HOME SCREEN</div>} />
+          <Route path="/signup" element={<div>SIGNUP SCREEN</div>} />
+        </Routes>
+      </SceneProvider>
     </MemoryRouter>,
   )
 }
 
-function job(audioUrl: string | null) {
+function job(audioUrl: string | null, pictureUrl: string | null = null) {
   return {
     job_id: JOB_ID,
     status: 'DONE' as const,
     audio_url: audioUrl,
     picture_keywords: null,
+    picture_url: pictureUrl,
   }
 }
 

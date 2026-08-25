@@ -336,6 +336,11 @@ original design; the shape now:
    caller's own subject, copies key, keywords and summary onto the JOB item,
    and starts the generation chain — which is when a credit is frozen.
    `generate_script` briefs the model with the reading alone.
+6. Revisiting a picture dreamscape from the collection: `GET /jobs/{id}` also
+   signs a URL to the upload (`picture_url`, same key group as the narration,
+   via the distribution's signed `pictures/*` behaviour), and the player
+   samples it back into the cloud — fully dissolved, the way the prototype
+   shows a dream being replayed.
 
 ### Dreamscapes — revisit and replay
 
@@ -672,6 +677,7 @@ behaviours with opposite rules:
 | path | access | why |
 |---|---|---|
 | `jobs/*` | **signed URL** (trusted key group) | one user's narration |
+| `pictures/*` | **signed URL** (same key group) | one user's uploaded picture, re-sampled into the cloud when a dreamscape is revisited |
 | `assets/*` | public, cached | shared BGM — the player switches tracks mid-session without a round trip |
 
 `GET /jobs/{id}` now mints CloudFront signed URLs (`api/cloudfront_signer.py`,

@@ -28,6 +28,8 @@ export interface Job {
   audio_url: string | null
   /** Set once the pipeline has described the user's picture; null until then. */
   picture_keywords: string[] | null
+  /** DONE picture jobs: a signed URL to the upload, for the revisit cloud. */
+  picture_url?: string | null
 }
 
 /** A one-shot S3 POST, signed by the API, for one JPEG. */
