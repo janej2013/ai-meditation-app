@@ -4,12 +4,14 @@
  * in the top-right corner. Signed out it reads "Sign in" and opens the
  * sign-in flow; signed in it shows the credits left and opens the account.
  *
- * It re-reads the account on the routes a credit change lands on -- home,
- * the player, the account and plans screens, the collection -- and not on
- * the waiting screen, where the read would race the freeze and show a stale
- * number anyway.
+ * It reads the account once when it mounts, whatever the route (a reload on
+ * the companion or the waiting screen used to leave it at "Sign in" for a
+ * signed-in user), then re-reads on the routes a credit change lands on --
+ * home, the player, the account and plans screens, the collection -- and
+ * not on the waiting screen, where the read would race the freeze and show
+ * a stale number anyway.
  */
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useLocation, useNavigate } from 'react-router-dom'
 import { getAccount } from '../api/client'
 import { isSignedIn } from '../auth/cognito'
@@ -21,9 +23,12 @@ export default function AccountPill() {
   const { pathname } = useLocation()
   const [signedIn, setSignedIn] = useState(false)
   const [label, setLabel] = useState('Sign in')
+  const mounted = useRef(false)
 
   useEffect(() => {
-    if (!REFRESH_ON.test(pathname)) return
+    const first = !mounted.current
+    mounted.current = true
+    if (!first && !REFRESH_ON.test(pathname)) return
     let cancelled = false
     void (async () => {
       if (!(await isSignedIn())) {

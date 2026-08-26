@@ -80,7 +80,7 @@ export interface CompanionState {
   busy: boolean
 }
 
-export function useCompanion(onStarted: (jobId: string) => void) {
+export function useCompanion(onStarted: (jobId: string, durationMinutes: number) => void) {
   const [gate, setGate] = useState<Gate>('open')
   const [sessionId, setSessionId] = useState<string | null>(() => {
     try {
@@ -293,19 +293,22 @@ export function useCompanion(onStarted: (jobId: string) => void) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [busy, sessionId])
 
-  const start = useCallback(async () => {
-    if (!sessionId || !proposal || starting) return
+  /** Confirm the proposal. True when a generation started. */
+  const start = useCallback(async (): Promise<boolean> => {
+    if (!sessionId || !proposal || starting) return false
     setStarting(true)
     setCompError(null)
     try {
       const { job_id } = await confirmSession(sessionId)
       remember(null)
-      onStarted(job_id)
+      onStarted(job_id, proposal.duration_minutes)
+      return true
     } catch (e) {
       setStarting(false)
       if (e instanceof ApiError && e.detail === 'no_credit') setCompError('nocredit')
       else if (e instanceof ApiError && e.detail === 'nothing_to_confirm') setProposal(null)
       else setCompError('start')
+      return false
     }
   }, [sessionId, proposal, starting, onStarted])
 

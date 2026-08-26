@@ -342,10 +342,30 @@ export default function HomePage() {
             a picture
           </button>
         </div>
+        {/* The collection's entry line: absent (not a spinner) until the
+            count is known, then fades in with it. */}
+        <div
+          style={{
+            marginTop: 40,
+            display: 'flex',
+            transition: 'opacity .8s ease',
+            opacity: dreamCount === null ? 0 : 1,
+          }}
+        >
+          {dreamCount !== null && (
+            <button className="dream-entry" onClick={() => navigate('/dreamscapes')}>
+              {dreamCount === 0
+                ? 'No dreamscapes yet'
+                : dreamCount === 1
+                  ? '1 dreamscape collected'
+                  : `${dreamCount} dreamscapes collected`}
+            </button>
+          )}
+        </div>
         {/* The companion's entry ([Home · Companion entry]): the card for a
             Pro plan, dimmed with a lock otherwise -- never hidden, so the
             feature is discoverable. */}
-        <div style={{ marginTop: 34, display: 'flex' }}>
+        <div style={{ marginTop: 22, display: 'flex' }}>
           <button
             className={plan === 'pro' ? 'companion-entry' : 'companion-entry locked'}
             onClick={() => navigate(plan === 'pro' ? '/companion' : '/plans?plan=plan_pro')}
@@ -377,26 +397,6 @@ export default function HomePage() {
             <span className="companion-entry-sub">A companion that remembers what helps you.</span>
             {plan !== 'pro' && <span className="companion-entry-lock">Part of Pro</span>}
           </button>
-        </div>
-        {/* The collection's entry line: absent (not a spinner) until the
-            count is known, then fades in with it. */}
-        <div
-          style={{
-            marginTop: 20,
-            display: 'flex',
-            transition: 'opacity .8s ease',
-            opacity: dreamCount === null ? 0 : 1,
-          }}
-        >
-          {dreamCount !== null && (
-            <button className="dream-entry" onClick={() => navigate('/dreamscapes')}>
-              {dreamCount === 0
-                ? 'No dreamscapes yet'
-                : dreamCount === 1
-                  ? '1 dreamscape collected'
-                  : `${dreamCount} dreamscapes collected`}
-            </button>
-          )}
         </div>
       </div>
 

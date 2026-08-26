@@ -4,7 +4,7 @@
  * tests, and here each turn is a scripted list of events.
  */
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
-import { MemoryRouter, Route, Routes } from 'react-router-dom'
+import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 vi.mock('../api/agent', () => ({
@@ -14,6 +14,11 @@ vi.mock('../api/agent', () => ({
   getSession: vi.fn(),
   abandonSession: vi.fn(),
   getMemory: vi.fn(),
+}))
+vi.mock('../audio/mixer', () => ({
+  mixer: { startAmbient: vi.fn(), stopAmbient: vi.fn() },
+  bgmUrl: () => 'https://audio.test/bgm.mp3',
+  DEFAULT_BGM_TRACK: { path: 'assets/bgm/default_bgm.mp3' },
 }))
 vi.mock('../api/client', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../api/client')>()
@@ -30,18 +35,25 @@ import {
   type TurnEvent,
 } from '../api/agent'
 import { ApiError, getAccount } from '../api/client'
+import { mixer } from '../audio/mixer'
 import CompanionPage from './CompanionPage'
 import { MAX_TURNS } from './useCompanion'
 
 const CRISIS =
   "It sounds like you might be going through something really hard right now, and I'm glad you said it. I'm a meditation companion, not a crisis service, so please reach out to people who can help right now: Lifeline on 13 11 14 (24 hours), Beyond Blue on 1300 22 4636, or 000 if you or someone else is in immediate danger."
 
+/** The waiting screen's stand-in, showing the duration it was handed. */
+function GeneratingProbe() {
+  const { state } = useLocation() as { state: { duration?: number } | null }
+  return <div>GENERATING SCREEN {state?.duration ?? 'no duration'}</div>
+}
+
 function renderPage() {
   return render(
     <MemoryRouter initialEntries={['/companion']}>
       <Routes>
         <Route path="/companion" element={<CompanionPage />} />
-        <Route path="/generating/:jobId" element={<div>GENERATING SCREEN</div>} />
+        <Route path="/generating/:jobId" element={<GeneratingProbe />} />
         <Route path="/plans" element={<div>PLANS SCREEN</div>} />
         <Route path="/" element={<div>HOME SCREEN</div>} />
         <Route path="/signup" element={<div>SIGNUP SCREEN</div>} />
@@ -183,7 +195,9 @@ describe('CompanionPage', () => {
     })
 
     expect(confirmSession).toHaveBeenCalledWith('s1')
-    expect(await screen.findByText('GENERATING SCREEN')).toBeInTheDocument()
+    expect(await screen.findByText('GENERATING SCREEN 10')).toBeInTheDocument()
+    expect(mixer.startAmbient).toHaveBeenCalledWith('https://audio.test/bgm.mp3')
+    expect(mixer.stopAmbient).not.toHaveBeenCalled()
     expect(sessionStorage.getItem('drift:companion-session')).toBeNull()
   })
 
@@ -275,6 +289,8 @@ describe('CompanionPage', () => {
 
     expect(await screen.findByText('No generations left')).toBeInTheDocument()
     expect(screen.getByText('5 min')).toBeInTheDocument()
+    // The music began inside the tap; a refused start silences it again.
+    expect(mixer.stopAmbient).toHaveBeenCalled()
     fireEvent.click(screen.getByText('Add credits'))
     expect(await screen.findByText('PLANS SCREEN')).toBeInTheDocument()
   })

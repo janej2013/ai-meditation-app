@@ -9,6 +9,7 @@
  */
 import { useEffect, useRef } from 'react'
 import { useNavigate } from 'react-router-dom'
+import { DEFAULT_BGM_TRACK, bgmUrl, mixer } from '../audio/mixer'
 import InlineError from './InlineError'
 import PlanRequired from './PlanRequired'
 import ProposalCard from './ProposalCard'
@@ -17,7 +18,9 @@ import { SHOW_TURNS_LEFT_AT, useCompanion } from './useCompanion'
 
 export default function CompanionPage() {
   const navigate = useNavigate()
-  const companion = useCompanion((jobId) => navigate(`/generating/${jobId}`))
+  const companion = useCompanion((jobId, duration) =>
+    navigate(`/generating/${jobId}`, { state: { duration, pic: false } }),
+  )
   const { state } = companion
   const inputRef = useRef<HTMLInputElement>(null)
   const threadRef = useRef<HTMLDivElement>(null)
@@ -118,7 +121,14 @@ export default function CompanionPage() {
             starting={state.starting}
             onOpenBrief={companion.openBrief}
             onCloseBrief={companion.closeBrief}
-            onStart={() => void companion.start()}
+            onStart={() => {
+              // As on Home's Begin: the music starts inside the tap (the only
+              // place a mobile browser allows) and plays through the wait.
+              void mixer.startAmbient(bgmUrl(DEFAULT_BGM_TRACK))
+              void companion.start().then((ok) => {
+                if (!ok) mixer.stopAmbient()
+              })
+            }}
             onChange={() => {
               companion.dismissError()
               companion.beginChange()
