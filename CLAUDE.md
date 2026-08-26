@@ -12,6 +12,7 @@ This is a real product AND a portfolio project demonstrating AWS + GenAI enginee
 - **Backend API**: FastAPI + Mangum on Lambda (container image, built with Docker).
 - **Pipeline**: AWS Step Functions (Standard) orchestrating small single-purpose zip Lambdas.
 - **LLM / vision**: Amazon Bedrock, Amazon Nova Lite by default for both the script and the picture description, invoked on demand in ap-southeast-2 (bare model id, no cross-region profile, so user text and pictures stay in Sydney). Claude Haiku remains a supported override via `-c bedrock_model_id=`; use a cross-region inference profile only if a chosen model is unavailable in ap-southeast-2.
+- **Companion agent**: Bedrock Converse `converse_stream` + `toolConfig`, called directly from `backend/agent/native/llm/converse.py`; Nova Lite (bare id, Sydney) by default, a Claude `au.` profile via `-c agent_model_id=`; `us.`/`eu.`/`apac.`/`global.`/`jp.`/`in.` profiles are refused at synth (`infra/stacks/bedrock.py`). The loop, tools and prompt are `backend/agent/`, the harness `backend/agent_runner/` — all three layers self-built. Never introduce Strands, Bedrock AgentCore, Bedrock Agents or LangGraph Platform; LangGraph itself is allowed only as the planned second engine (`docs/agent-runner-plan.md` §3.4), sharing the tools, prompt and checkpoint format.
 - **TTS**: Volcano Engine TTS (primary) and Amazon Polly (fallback), behind a `TTSProvider` abstraction. Never call a TTS vendor SDK/API directly from business logic.
 - **Data**: DynamoDB, single-table design, on-demand billing.
 - **Auth**: Cognito User Pool, JWT authorizer on API Gateway HTTP API.
@@ -45,20 +46,24 @@ backend/
   shared/           Shared package (Lambda layer): models.py, db.py, tts/
   tests/
 frontend/           React + Vite PWA
+  src/companion/    /companion: hook, thread, proposal card, SSE parsing
+  src/api/agent.ts  runner client: X-Id-Token, payload hash, streamed turns
 .github/workflows/  CI/CD (OIDC role assumption, no long-lived AWS keys)
 ```
 
 ## Hard constraints (never violate)
 
 1. **All credit/entitlement mutations go through `backend/shared/db.py`.** Freeze, commit, and rollback are DynamoDB conditional updates within a single user partition. Never write raw `update_item` calls for credits elsewhere. All three operations must be idempotent (safe to retry with the same `job_id`).
-2. **Generation flow**: API Lambda only validates JWT + starts a Step Functions execution and returns an id. All heavy work (Bedrock, TTS, S3 upload) happens inside a state machine — the generation chain for a job, the one-task picture machine for reading an upload before any job exists. Never call Bedrock or TTS synchronously from the API Lambda. A picture session takes no mood text: the picture is the whole brief, and it is described (client polls `GET /pictures/{id}`) before Begin, which is the first moment a credit is frozen; every picture route requires a credit in hand because that read is uncompensated spend. The companion agent's terminal tool is the second permitted starter; it goes through the same `shared/jobs.start_generation()` as `POST /generate`, and the credit is still frozen only inside the state machine.
+2. **Generation flow**: API Lambda only validates JWT + starts a Step Functions execution and returns an id. All heavy work (Bedrock, TTS, S3 upload) happens inside a state machine — the generation chain for a job, the one-task picture machine for reading an upload before any job exists. Never call Bedrock or TTS synchronously from the API Lambda. A picture session takes no mood text: the picture is the whole brief, and it is described (client polls `GET /pictures/{id}`) before Begin, which is the first moment a credit is frozen; every picture route requires a credit in hand because that read is uncompensated spend. `POST /agent/sessions/{id}/confirm` (`agent_runner/turns.confirm_session`) is the second permitted starter; it goes through the same `shared/jobs.start_generation()` as `POST /generate`, and the credit is still frozen only inside the state machine. The agent's `finalize_meditation_brief` tool only writes `pending_brief` on the session — the model cannot start a generation.
 3. **State machine failure handling**: every task has a `Catch` routing to `rollback_credit`. The external TTS call additionally gets `Retry` with exponential backoff (2–3 attempts) before falling through to `Catch`.
-4. **Secrets** (Volcano TTS key, Stripe secret + webhook signing secret): Secrets Manager or SSM SecureString only. Never in code, `.env` committed files, plaintext Lambda env vars, or CDK context.
+4. **Secrets** (Volcano TTS key, Stripe secret + webhook signing secret): Secrets Manager or SSM SecureString only. Never in code, `.env` committed files, plaintext Lambda env vars, or CDK context. The companion agent introduces no secret: the runner uses its execution role and the user pool's public JWKS, nothing else — keep it that way.
 5. **Stripe webhooks must verify the signature** before any state change. Entitlement updates from webhooks must be idempotent (key on Stripe event id).
 6. **Audio delivery**: CloudFront signed URLs to S3 objects. Never stream audio bytes through Lambda. Applies to per-job narration under `jobs/` and uploaded pictures under `pictures/` (re-sampled into the cloud on a revisit); the shared BGM under `assets/` carries no user content and is served as ordinary cached CloudFront objects so the browser can switch tracks without a round trip for a new signature.
-7. **No PII in prompts or logs.** The LLM prompt must instruct the model not to repeat user personal details verbatim in the script; the vision prompt must not describe people or transcribe text in the picture. Keywords and summaries derived from a user's picture are user content: they live on the JOB item like `mood_text`, never in the state machine payload, and never in INFO logs. Log `job_id`s, status and counts only.
+7. **No PII in prompts or logs.** The LLM prompt must instruct the model not to repeat user personal details verbatim in the script; the vision prompt must not describe people or transcribe text in the picture. Keywords and summaries derived from a user's picture are user content: they live on the JOB item like `mood_text`, never in the state machine payload, and never in INFO logs. Log `job_id`s, status and counts only. The companion's transcript (`AGENT#…#T…`) and insights (`MEMORY`) are user content too: they are injected only into that user's own agent sessions' prompt, never into a log line or a state machine payload; the runner logs `session_id`, `turn`, tool names and counts only, and the user can clear the memory from Account.
 8. **`cdk deploy` and any command that spends money or touches live AWS resources is human-only.** Claude may run `cdk synth`, `cdk diff`, `ruff`, `pytest`, and local builds.
 9. **Uploaded pictures are written only under `pictures/<cognito_sub>/` via a presigned S3 POST that fixes key, content type and size.** They are kept (a future replay variant may re-weave them) and expire by the bucket's lifecycle rule alone — no business code deletes a user's object, and no pipeline or API Lambda holds `s3:DeleteObject` on them. (Deployment custodians are the exception: dev's `auto_delete_objects` on stack destroy, and the BucketDeployment handler's default grant.)
+10. **A companion conversation never freezes a credit, and the model has no way to spend one.** The only spending action is the confirm route, gated by `shared/jobs.generation_gate()` exactly like `POST /generate`; tools return errors, never side effects on the ledger. Sessions are bounded in code (`agent/budget.py`: 12 turns, 4 tool rounds a turn) and per month (`AGENT_SESSIONS_PER_MONTH`), and only `plan == "pro"` may open one.
+11. **The runner is reachable only through the site distribution's `agent/*` behaviour** (CloudFront origin access control; the Function URL is `AWS_IAM`). The ID token travels in `X-Id-Token` — the OAC signature overwrites `Authorization` — and every POST/DELETE carries `x-amz-content-sha256`. SPA routing is a viewer-request CloudFront Function on the site behaviour only; never a distribution-wide custom error response, which would turn the runner's 401/403/404 into a 200 `index.html`.
 
 ## DynamoDB single-table conventions
 
@@ -69,10 +74,10 @@ frontend/           React + Vite PWA
   - `SK = SUB#<stripe_subscription_id>`
   - `SK = PICTURE#<picture_id>` — fields: `status` (PENDING | DESCRIBED | FAILED), `keywords`, `summary`, `expires_at` (TTL); written by `POST /pictures/upload` and the picture state machine, before any job exists
   - `SK = JOB#<job_id>` — fields: `status` (PENDING | FROZEN | GENERATING | DONE | FAILED | ROLLED_BACK | DELETED), `audio_key`, `mood_text` (words jobs) or `picture_key` / `picture_keywords` / `picture_summary` (picture jobs), timestamps
-  - `SK = AGENT#<session_id>` — companion session header: `status` (ACTIVE | FINALIZED | ABANDONED | FAILED), `turn` (committed turns; the fencing token), `engine`, `in_flight`, `usage_*`, `expires_at` (TTL)
-  - `SK = AGENT#<session_id>#T<nnnn>` — one checkpoint per turn: the user text, the assistant content and every tool round in Converse wire form. User content: never logged
-  - `SK = MEMORY` — insights the agent saved across sessions. User content; the user can view and clear it
-  - `SK = AGENTQUOTA#<yyyy-mm>` — monthly companion-session counter, `expires_at` (TTL)
+  - `SK = AGENT#<session_id>` — companion session header: `status` (ACTIVE | FINALIZED | ABANDONED | FAILED), `turn` (committed turns; the fencing token), `engine`, `in_flight`, `usage_*`, `pending_brief` / `pending_duration_minutes` (the proposal awaiting confirmation), `job_id` once confirmed, `expires_at` (TTL 30 days, `AGENT_SESSION_TTL_DAYS`)
+  - `SK = AGENT#<session_id>#T<nnnn>` — one checkpoint per turn: the user text, the assistant content and every tool round in Converse wire form. User content: never logged. Same 30-day TTL as its session
+  - `SK = MEMORY` — insights the agent saved across sessions. User content; no TTL — the user views and clears it
+  - `SK = AGENTQUOTA#<yyyy-mm>` — monthly companion-session counter, `expires_at` (TTL 62 days, `AGENT_QUOTA_TTL_DAYS`)
 - Freeze: `available >= 1` condition → `available -= 1, frozen += 1`.
 - Commit: `frozen >= 1` condition → `frozen -= 1`.
 - Rollback: condition on job status not already committed → `frozen -= 1, available += 1`.
@@ -96,6 +101,11 @@ produces layers and images that fail at runtime. The repo lives at
 
 Run lint + tests + synth before declaring any backend/infra task complete.
 
+Human-only, because they call Bedrock or the dev stack for real: `make dev-agent` (a local
+runner, but against dev's table, state machine and Bedrock), `python -m agent.cli`,
+`python -m agent.smoke` (starts a real job — a credit), `make agent-evals CONFIRM=1`, `make smoke
+CONFIRM=1`. `make e2e` is stubbed and free; Claude may run it.
+
 ## Milestones (work in this order; do not skip ahead)
 
 1. `infra/` skeleton + `data_stack` (DynamoDB + audio bucket). Done when `cdk synth` passes.
@@ -104,6 +114,7 @@ Run lint + tests + synth before declaring any backend/infra task complete.
 4. Volcano TTS provider implementation + provider routing config.
 5. `billing_stack`: Stripe Checkout + webhook → entitlement update.
 6. `frontend_stack` + PWA frontend.
+7. Companion agent A1–A7 (`docs/agent-runner-plan.md` §11) — done; L1–L3 (the LangGraph second engine, its function, the comparison note) are next and start only from a merged, verified native path.
 
 ## Style notes
 

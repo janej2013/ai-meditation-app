@@ -169,3 +169,54 @@ and `lambda:InvokeFunction` must be granted -- the frontend stack does both).
 Metrics land in CloudWatch under `Meditation/Agent` (`AgentTurns`, `TurnLatency`, token counts,
 `AgentTurnErrors` by reason) with one line of JSON per turn in the function's log group — ids and
 counts only, never a word of the conversation.
+
+### Cost
+
+Nothing runs while idle: no VPC, no load balancer, no provisioned concurrency, and the Function
+URL bills per invocation. What a conversation costs is the model, plus a rounding error of
+Lambda.
+
+**The model, estimated** (`docs/agent-runner-plan.md` §7). Assumptions: a full 12-turn session
+accumulates about 40k input tokens with roughly 70% of them served from the prompt cache (cache
+reads bill at a tenth of the input rate) and produces about 4k output tokens. Bedrock on-demand
+prices in `ap-southeast-2`, per million tokens in / out:
+
+| Model | Per full session | 30 sessions (one Pro account's monthly cap) |
+|---|---|---|
+| **Nova Lite** (`amazon.nova-lite-v1:0`, $0.06 / $0.24) — the default | ≈ $0.004 | ≈ $0.10 |
+| Claude Haiku 4.5 (`au.` profile, $1 / $5) | ≈ $0.035 | ≈ $1 |
+| Claude Sonnet 4.6 (`au.` profile, $3 / $15) | ≈ $0.10–0.12 | ≈ $3–4 |
+
+Most sessions are shorter than twelve turns, so these are ceilings. The cap is enforced in code
+— `AGENT_SESSIONS_PER_MONTH = 30` (`backend/shared/models.py`), 12 turns and 4 tool rounds a
+turn (`backend/agent/budget.py`) — so the Bedrock exposure per Pro account per month is the
+right-hand column, whatever the listener does. That figure is a **pricing input**: Pro's price
+has to cover it plus twenty generations' script and narration, and the decision is a product
+one, not made here.
+
+**Lambda.** 512 MB for up to 120 s a turn (`AGENT_MEMORY_MB`, `AGENT_TIMEOUT`,
+`infra/stacks/agent_stack.py`). A turn observed on dev takes 3–30 s depending on tool rounds;
+at $0.0000166667 per GB-second, thirty seconds of 0.5 GB is $0.00025, so a twelve-turn session
+is on the order of a third of a cent — an order of magnitude below the model even on Nova Lite.
+The container image sits in the CDK bootstrap ECR repository (~280 MB, a few cents a month).
+
+**Measured.** Every turn adds its token counts to the session header (`usage_input_tokens`,
+`usage_output_tokens`, `usage_cache_read_tokens` on `AGENT#<session>`, summed by `commit_turn`)
+and emits them as metrics: namespace `Meditation/Agent`, dimension `Engine`, names
+`InputTokens`, `OutputTokens`, `CacheReadTokens`, `TurnLatency`, `AgentTurns`, `ToolErrors`,
+`AgentTurnErrors`, `AgentConfirmations` (`backend/agent_runner/turns.py`,
+`backend/agent_runner/metrics.py`). A month's real numbers:
+
+- CloudWatch → Metrics → `Meditation/Agent` → `SUM(InputTokens)`, `SUM(CacheReadTokens)`,
+  `SUM(OutputTokens)` over the month, times the model's prices; `SUM(AgentTurns)` divided by
+  `SUM(AgentConfirmations)` says how many turns a meditation takes to reach.
+- Cost Explorer → filter *Service = Amazon Bedrock*, group by *Usage type* (the model shows in the
+  usage type string), and *Service = AWS Lambda* with the function name tag — the two together are
+  the agent's bill; nothing else in the account is attributable to it.
+- The cache-hit rate to watch is `CacheReadTokens / (InputTokens + CacheReadTokens)`; the
+  estimate above assumes about 70%, which the eval runs on Nova Lite have shown.
+
+**The evals.** `make agent-evals CONFIRM=1` runs the twenty cases in
+`backend/tests/agent/evals/` — about sixty model calls (`run.py`) — and prints each case's
+tokens; at Nova Lite's prices a full run is on the order of a cent, on Claude Haiku a few tens
+of cents. They are the one Bedrock spend outside a conversation and are never run by CI.
