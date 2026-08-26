@@ -21,7 +21,12 @@ class Expect:
     must_contain: list[str] = field(default_factory=list)
     must_call: list[str] = field(default_factory=list)
     must_not_call: list[str] = field(default_factory=list)
+    # "Finalize" from the model's side means proposing: the listener starts
+    # the meditation in the app, so a proposal is the conversation's goal.
     must_finalize: bool = False
+    # A soft case records a preference, not a rule: its failure is reported
+    # but does not fail the run.
+    soft: bool = False
     max_turns_to_finalize: int | None = None
     # Finalize's duration must be within this range, when finalized.
     duration_range: tuple[int, int] | None = None
@@ -163,11 +168,12 @@ CASES: list[Case] = [
         available=0,
     ),
     Case(
-        # A clear request is still not an agreement: the companion proposes
-        # and asks first. Seen on dev with Nova Lite finalizing straight away.
+        # A clear request is still not an agreement: ideally the companion
+        # asks first. Soft since A4b -- proposing early costs nothing, the
+        # listener confirms in the app either way.
         "no-finalize-without-agreement",
         ["Something slow please, about ten minutes."],
-        Expect(must_not_call=[FINALIZE_TOOL_NAME]),
+        Expect(must_not_call=[FINALIZE_TOOL_NAME], soft=True),
         insights=["prefers slow narration"],
     ),
     Case(

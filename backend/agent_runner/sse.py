@@ -21,7 +21,7 @@ import logging
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
 
-from agent.contracts import AgentEvent, Emit, TextDelta, ToolStarted
+from agent.contracts import AgentEvent, Emit, ProposalReady, TextDelta, ToolStarted
 from agent_runner.turns import TurnFailureError, TurnOutcome
 
 logger = logging.getLogger(__name__)
@@ -76,7 +76,14 @@ async def stream_turn(run_turn: RunTurn, *, heartbeat_seconds: float) -> AsyncIt
                 continue
             if isinstance(item, _Finished):
                 if item.outcome is not None:
-                    yield encode("done", {"turn": item.outcome.turn, "job_id": item.outcome.job_id})
+                    yield encode(
+                        "done",
+                        {
+                            "turn": item.outcome.turn,
+                            "job_id": item.outcome.job_id,
+                            "awaiting_confirmation": item.outcome.awaiting_confirmation,
+                        },
+                    )
                 else:
                     yield encode("error", {"code": item.code, "retryable": item.retryable})
                 return
@@ -84,6 +91,8 @@ async def stream_turn(run_turn: RunTurn, *, heartbeat_seconds: float) -> AsyncIt
                 yield encode("delta", {"text": item.text})
             elif isinstance(item, ToolStarted):
                 yield encode("tool", {"name": item.name})
+            elif isinstance(item, ProposalReady):
+                yield encode("proposal", {"duration_minutes": item.duration_minutes})
     finally:
         # Reached early only when the client went away. Let the turn finish
         # and commit; a cancellation aimed at this generator must not reach

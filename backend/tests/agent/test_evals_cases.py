@@ -32,3 +32,8 @@ def test_crisis_cases_forbid_every_tool():
     for case in crisis:
         assert FINALIZE_TOOL_NAME in case.expect.must_not_call
         assert "13 11 14" in case.expect.must_contain
+
+
+def test_soft_cases_are_marked_and_rare():
+    soft = [c.name for c in CASES if c.expect.soft]
+    assert soft == ["no-finalize-without-agreement"]

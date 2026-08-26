@@ -2,21 +2,19 @@
 
 from __future__ import annotations
 
-import json
 from datetime import UTC, datetime
 from functools import partial
 from unittest.mock import MagicMock
 
 import pytest
-from botocore.exceptions import ClientError
 
 from agent.budget import FINALIZE_TOOL_NAME
-from agent.contracts import Finalized, JsonBlock, TextBlock, ToolUseBlock
+from agent.contracts import JsonBlock, Proposal, TextBlock, ToolUseBlock
 from agent.tools import finalize, history, memory
 from agent.tools.default import default_registry
 from agent.tools.registry import ToolContext
 from shared.jobs import start_generation
-from shared.models import AGENT_JOB_NAMESPACE, JobStatus, job_sk, user_pk
+from shared.models import AGENT_JOB_NAMESPACE, AgentSessionStatus, JobStatus, job_sk, user_pk
 
 from ..conftest import TABLE_NAME, USER_ID, seed_entitlement
 from .fake_provider import run
@@ -109,7 +107,7 @@ def test_default_registry_order_and_terminal_tool():
         "save_user_insight",
         FINALIZE_TOOL_NAME,
     ]
-    assert finalize.SPEC.name == FINALIZE_TOOL_NAME and finalize.SPEC.terminal
+    assert finalize.SPEC.name == FINALIZE_TOOL_NAME and not finalize.SPEC.terminal
     assert not history.SPEC.terminal and not memory.SPEC.terminal
     schema = registry.to_converse_spec()[2]["toolSpec"]["inputSchema"]["json"]
     assert set(schema["required"]) == {"brief", "duration_minutes"}
@@ -217,11 +215,11 @@ def test_insight_length_is_validated(ctx):
 
 
 # ----------------------------------------------------------------------
-# finalize_meditation_brief
+# finalize_meditation_brief: a proposal, never a purchase
 # ----------------------------------------------------------------------
 
 
-def test_finalize_without_credit_is_an_error_result(ctx, sfn, dynamodb_client):
+def test_finalize_without_credit_is_an_error_result(ctx, sfn, store, dynamodb_client):
     seed_entitlement(dynamodb_client, available=0)
 
     execution = call(
@@ -229,7 +227,7 @@ def test_finalize_without_credit_is_an_error_result(ctx, sfn, dynamodb_client):
     )
 
     assert error_text(execution) == finalize.NO_CREDIT_MESSAGE
-    assert execution.finalized is None
+    assert execution.proposal is None
     sfn.start_execution.assert_not_called()
 
 
@@ -244,64 +242,54 @@ def test_finalize_with_a_job_in_flight_is_an_error_result(ctx, sfn, dynamodb_cli
     sfn.start_execution.assert_not_called()
 
 
-def test_finalize_starts_the_job_and_ends_the_session(ctx, sfn, store, dynamodb_client):
+def test_finalize_places_a_proposal_and_starts_nothing(ctx, sfn, store, dynamodb_client):
     seed_entitlement(dynamodb_client, available=1)
+    assert store.create_agent_session(USER_ID, SESSION, engine="native", model_id="m")
 
     execution = call(
         default_registry(), ctx, FINALIZE_TOOL_NAME, {"brief": GOOD_BRIEF, "duration_minutes": 5}
     )
 
-    job_id = finalize.agent_job_id(SESSION)
-    assert execution.finalized == Finalized(job_id=job_id)
-    assert payload(execution) == {"job_id": job_id}
-    job = store.get_job(USER_ID, job_id)
-    assert job is not None
-    assert job.mood_text == GOOD_BRIEF
-    assert job.source == "agent" and job.agent_session_id == SESSION
-    assert job.duration_minutes == 5
-    kwargs = sfn.start_execution.call_args.kwargs
-    assert kwargs["name"] == job_id
-    assert json.loads(kwargs["input"]) == {
-        "user_id": USER_ID,
-        "job_id": job_id,
-        "duration_minutes": 5,
-    }
+    assert execution.finalized is None
+    assert execution.proposal == Proposal(duration_minutes=5)
+    assert payload(execution) == {"status": "awaiting_confirmation", "duration_minutes": 5}
+    session = store.get_agent_session(USER_ID, SESSION)
+    assert session is not None
+    assert session.pending_brief == GOOD_BRIEF and session.pending_duration_minutes == 5
+    sfn.start_execution.assert_not_called()
+    assert store.get_job(USER_ID, finalize.agent_job_id(SESSION)) is None
 
 
-def test_finalize_twice_is_one_job_and_one_start(ctx, sfn, dynamodb_client):
+def test_second_proposal_overwrites_the_first(ctx, store, dynamodb_client):
     seed_entitlement(dynamodb_client, available=1)
+    store.create_agent_session(USER_ID, SESSION, engine="native", model_id="m")
     registry = default_registry()
-    inp = {"brief": GOOD_BRIEF, "duration_minutes": 5}
 
-    first = call(registry, ctx, FINALIZE_TOOL_NAME, inp)
-    # The second attempt meets its own PENDING row and re-issues the start;
-    # Step Functions answers that the name is taken, which is success.
-    sfn.start_execution.side_effect = ClientError(
-        {"Error": {"Code": "ExecutionAlreadyExists", "Message": ""}}, "StartExecution"
-    )
-    second = call(registry, ctx, FINALIZE_TOOL_NAME, inp, tool_use_id="tu-2")
-
-    assert first.finalized == second.finalized
-    assert sfn.start_execution.call_count == 2  # asked twice, one execution
-
-
-def test_finalize_after_a_failed_start_heals(ctx, sfn, dynamodb_client):
-    seed_entitlement(dynamodb_client, available=1)
-    registry = default_registry()
-    inp = {"brief": GOOD_BRIEF, "duration_minutes": 5}
-    sfn.start_execution.side_effect = ClientError(
-        {"Error": {"Code": "ServiceUnavailable", "Message": ""}}, "StartExecution"
+    call(registry, ctx, FINALIZE_TOOL_NAME, {"brief": GOOD_BRIEF, "duration_minutes": 5})
+    call(
+        registry,
+        ctx,
+        FINALIZE_TOOL_NAME,
+        {"brief": GOOD_BRIEF + " Longer, please.", "duration_minutes": 12},
+        tool_use_id="tu-2",
     )
 
-    failed = call(registry, ctx, FINALIZE_TOOL_NAME, inp)
-    assert error_text(failed) == finalize.START_FAILED_MESSAGE
-    assert failed.finalized is None
+    session = store.get_agent_session(USER_ID, SESSION)
+    assert session is not None
+    assert session.pending_duration_minutes == 12
+    assert session.pending_brief is not None and session.pending_brief.endswith("Longer, please.")
 
-    sfn.start_execution.side_effect = None
-    healed = call(registry, ctx, FINALIZE_TOOL_NAME, inp, tool_use_id="tu-2")
 
-    assert healed.finalized == Finalized(job_id=finalize.agent_job_id(SESSION))
-    assert sfn.start_execution.call_count == 2
+def test_finalize_on_a_closed_session_is_an_error_result(ctx, store, dynamodb_client):
+    seed_entitlement(dynamodb_client, available=1)
+    store.create_agent_session(USER_ID, SESSION, engine="native", model_id="m")
+    store.mark_agent_session(USER_ID, SESSION, AgentSessionStatus.ABANDONED)
+
+    execution = call(
+        default_registry(), ctx, FINALIZE_TOOL_NAME, {"brief": GOOD_BRIEF, "duration_minutes": 5}
+    )
+
+    assert error_text(execution) == finalize.SESSION_CLOSED_MESSAGE
 
 
 def test_job_id_is_per_session():

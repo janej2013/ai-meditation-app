@@ -416,3 +416,93 @@ def test_empty_reply_after_the_deadline_falls_back_without_a_retry():
 
     assert result.content == [TextBlock(text=_FALLBACK_TEXT)]
     assert len(provider.calls) == 1
+
+
+# ----------------------------------------------------------------------
+# Proposals
+# ----------------------------------------------------------------------
+
+
+class ProposeIn(BaseModel):
+    minutes: int = 5
+
+
+async def propose(ctx: ToolContext, inp: ProposeIn) -> ToolOutcome:
+    from agent.contracts import Proposal
+
+    return ToolOutcome(
+        content={"status": "awaiting_confirmation"}, proposal=Proposal(duration_minutes=inp.minutes)
+    )
+
+
+def proposing_registry() -> ToolRegistry:
+    reg = registry()
+    reg.register(ToolSpec("propose", "Proposes.", ProposeIn, propose))
+    return reg
+
+
+def test_a_proposal_is_emitted_and_the_turn_goes_on():
+    from agent.contracts import Proposal, ProposalReady
+
+    provider = FakeProvider(
+        [tool_reply(("propose", {"minutes": 8}, "tu-1")), text_reply("ready when you are")]
+    )
+    engine = NativeEngine(provider, proposing_registry(), USER, system_prompt="S")
+    emit = Collector()
+
+    result = run(
+        engine.run_turn(
+            TurnInput(history=[], user_text="go", turn=0), deadline=Deadline.never(), emit=emit
+        )
+    )
+
+    assert emit.events == [
+        ToolStarted("propose"),
+        ProposalReady(8),
+        TextDelta("ready when you are"),
+    ]
+    assert result.proposal == Proposal(duration_minutes=8)
+    assert result.finalized is None
+    assert result.content == [TextBlock(text="ready when you are")]
+    assert len(provider.calls) == 2
+
+
+def test_the_last_proposal_of_a_turn_wins():
+    from agent.contracts import Proposal
+
+    provider = FakeProvider(
+        [
+            tool_reply(("propose", {"minutes": 5}, "tu-1")),
+            tool_reply(("propose", {"minutes": 12}, "tu-2")),
+            text_reply("twelve it is"),
+        ]
+    )
+    engine = NativeEngine(provider, proposing_registry(), USER, system_prompt="S")
+
+    result = run(
+        engine.run_turn(
+            TurnInput(history=[], user_text="go", turn=0),
+            deadline=Deadline.never(),
+            emit=Collector(),
+        )
+    )
+
+    assert result.proposal == Proposal(duration_minutes=12)
+
+
+def test_terminal_tools_still_end_the_turn_at_once():
+    provider = FakeProvider(
+        [tool_reply((FINALIZE_TOOL_NAME, {"brief": "calm"}, "tu-1")), text_reply("never sent")]
+    )
+    engine = NativeEngine(provider, proposing_registry(), USER, system_prompt="S")
+
+    result = run(
+        engine.run_turn(
+            TurnInput(history=[], user_text="go", turn=0),
+            deadline=Deadline.never(),
+            emit=Collector(),
+        )
+    )
+
+    assert result.finalized == Finalized(job_id="job-1") and result.proposal is None
+    assert provider.remaining == 1

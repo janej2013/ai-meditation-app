@@ -405,3 +405,67 @@ def test_release_without_a_claim_is_false(store):
     open_session(store)
 
     assert not store.release_turn(USER_ID, SESSION, expected_turn=0)
+
+
+# ----------------------------------------------------------------------
+# Proposals and confirmation: the fencing token's fourth verb
+# ----------------------------------------------------------------------
+
+
+def test_pending_brief_is_set_overwritten_and_cleared(store):
+    open_session(store)
+
+    assert store.set_pending_brief(USER_ID, SESSION, brief="first brief", duration_minutes=5)
+    assert store.set_pending_brief(USER_ID, SESSION, brief="second brief", duration_minutes=8)
+    session = store.get_agent_session(USER_ID, SESSION)
+    assert session is not None
+    assert (session.pending_brief, session.pending_duration_minutes) == ("second brief", 8)
+
+    assert store.clear_pending_brief(USER_ID, SESSION)
+    assert store.clear_pending_brief(USER_ID, SESSION)  # nothing pending: still fine
+    session = store.get_agent_session(USER_ID, SESSION)
+    assert session is not None
+    assert session.pending_brief is None and session.pending_duration_minutes is None
+
+
+def test_pending_brief_needs_an_active_session(store):
+    open_session(store)
+    store.mark_agent_session(USER_ID, SESSION, AgentSessionStatus.ABANDONED)
+
+    assert not store.set_pending_brief(USER_ID, SESSION, brief="b", duration_minutes=5)
+    assert not store.set_pending_brief(USER_ID, "nope", brief="b", duration_minutes=5)
+
+
+def test_confirm_closes_the_session_without_advancing_the_turn(store):
+    open_session(store)
+    store.set_pending_brief(USER_ID, SESSION, brief="a brief", duration_minutes=5)
+    store.claim_turn(USER_ID, SESSION, engine="native", now=NOW)
+
+    assert store.confirm_session(USER_ID, SESSION, expected_turn=0, job_id="job-1")
+
+    session = store.get_agent_session(USER_ID, SESSION)
+    assert session is not None
+    assert session.status is AgentSessionStatus.FINALIZED and session.job_id == "job-1"
+    assert session.turn == 0 and session.in_flight is None
+    assert session.pending_brief is None and session.pending_duration_minutes is None
+    with pytest.raises(AgentTurnBusyError):
+        store.claim_turn(USER_ID, SESSION, engine="native", now=NOW)
+
+
+def test_confirm_requires_a_claim_and_a_proposal(store):
+    open_session(store)
+    store.set_pending_brief(USER_ID, SESSION, brief="a brief", duration_minutes=5)
+
+    # No claim held.
+    assert not store.confirm_session(USER_ID, SESSION, expected_turn=0, job_id="job-1")
+
+    store.claim_turn(USER_ID, SESSION, engine="native", now=NOW)
+    # Wrong turn.
+    assert not store.confirm_session(USER_ID, SESSION, expected_turn=1, job_id="job-1")
+    store.clear_pending_brief(USER_ID, SESSION)
+    # Nothing pending.
+    assert not store.confirm_session(USER_ID, SESSION, expected_turn=0, job_id="job-1")
+
+    session = store.get_agent_session(USER_ID, SESSION)
+    assert session is not None
+    assert session.status is AgentSessionStatus.ACTIVE and session.in_flight == NOW

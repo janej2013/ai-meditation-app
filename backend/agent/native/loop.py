@@ -25,6 +25,8 @@ from agent.contracts import (
     Final,
     Finalized,
     Message,
+    Proposal,
+    ProposalReady,
     TextBlock,
     TextDelta,
     ToolCallRecord,
@@ -92,6 +94,7 @@ class NativeEngine:
         tool_log: list[ToolCallRecord] = []
         usage = Usage()
         finalized: Finalized | None = None
+        proposal: Proposal | None = None
         final: Final | None = None
         iterations = 0
 
@@ -125,6 +128,13 @@ class NativeEngine:
             tool_log.extend(e.record for e in executions)
             messages.append(Message.assistant(final.content))
             messages.append(Message.tool_results(results))
+
+            for execution in executions:
+                if execution.proposal is not None:
+                    # Not the end of the turn: the model goes on to tell the
+                    # listener what it prepared; starting it is theirs to do.
+                    proposal = execution.proposal
+                    await emit(ProposalReady(proposal.duration_minutes))
 
             finalized = next((e.finalized for e in executions if e.finalized), None)
             if finalized is not None:
@@ -188,6 +198,7 @@ class NativeEngine:
             usage=usage,
             stop_reason=stop_reason,
             finalized=finalized,
+            proposal=proposal,
         )
 
     async def _call(

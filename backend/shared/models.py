@@ -335,6 +335,10 @@ class AgentSession(BaseModel):
     model_id: str
     in_flight: datetime | None = None
     job_id: str | None = None
+    # The brief the model proposed and the listener has not yet confirmed.
+    # User content: on the item, never in a log (constraint 7).
+    pending_brief: str | None = None
+    pending_duration_minutes: int | None = None
     usage: AgentUsage = Field(default_factory=AgentUsage)
     created_at: datetime | None = None
     updated_at: datetime | None = None

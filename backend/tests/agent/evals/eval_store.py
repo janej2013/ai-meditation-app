@@ -5,7 +5,6 @@ point of an eval is the real model with a throwaway table."""
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from typing import Any
 
 from shared.models import Entitlement, Insight, Job, JobStatus, Memory
 
@@ -38,7 +37,9 @@ class EvalStore:
         self.insights: list[Insight] = [
             Insight(text=t, created_at=datetime.now(UTC), session_id="seed") for t in insights or []
         ]
-        self.jobs: dict[str, Job] = {}
+        # The model's proposal, as the session header would hold it.
+        self.pending: tuple[str, int] | None = None
+        self.proposals = 0
         self.history_reads = 0
 
     # -- read by the tools --------------------------------------------
@@ -58,49 +59,13 @@ class EvalStore:
         self.insights.append(Insight(text=text, created_at=now, session_id=session_id))
         return True
 
-    def get_job(self, user_id: str, job_id: str) -> Job | None:  # noqa: ARG002
-        return self.jobs.get(job_id)
-
-    def create_job(
-        self,
-        user_id: str,
-        job_id: str,
-        mood_text: str | None,
-        duration_minutes: int,
-        *_positional: Any,
-        **kwargs: Any,
+    def set_pending_brief(
+        self, user_id: str, session_id: str, *, brief: str, duration_minutes: int
     ) -> bool:
-        if job_id in self.jobs:
-            return False
-        self.jobs[job_id] = Job(
-            user_id=user_id,
-            job_id=job_id,
-            status=JobStatus.PENDING,
-            mood_text=mood_text,
-            duration_minutes=duration_minutes,
-            source=kwargs.get("source"),
-            agent_session_id=kwargs.get("agent_session_id"),
-        )
+        self.pending = (brief, duration_minutes)
+        self.proposals += 1
         return True
 
-
-class FakeStartGeneration:
-    """Records what finalize asked for; never touches Step Functions."""
-
-    def __init__(self, store: EvalStore) -> None:
-        self.store = store
-        self.calls: list[dict[str, Any]] = []
-
-    def __call__(self, **kwargs: Any) -> bool:
-        self.calls.append(kwargs)
-        return (
-            self.store.create_job(
-                kwargs["user_id"],
-                kwargs["job_id"],
-                kwargs.get("mood_text"),
-                kwargs["duration_minutes"],
-                source=kwargs.get("source"),
-                agent_session_id=kwargs.get("agent_session_id"),
-            )
-            or True
-        )
+    def clear_pending_brief(self, user_id: str, session_id: str) -> bool:  # noqa: ARG002
+        self.pending = None
+        return True

@@ -1330,6 +1330,75 @@ class EntitlementStore:
         )
         return True
 
+    def set_pending_brief(
+        self, user_id: str, session_id: str, *, brief: str, duration_minutes: int
+    ) -> bool:
+        """Place the model's proposal on the session. False if it is closed.
+
+        Overwrites an earlier proposal: the model changing its mind is the
+        normal case. Only ever read back by the session's owner and by
+        ``confirm_session``; the brief is user content and stays off the
+        logs. (UpdateItem.)
+        """
+        return self._conditional_update(
+            user_id,
+            agent_session_sk(session_id),
+            kind="agent_session",
+            update=(
+                "SET pending_brief = :brief, pending_duration_minutes = :minutes, updated_at = :now"
+            ),
+            condition="attribute_exists(PK) AND #status = :active",
+            names=dict(_STATUS_NAMES),
+            values={
+                ":brief": brief,
+                ":minutes": duration_minutes,
+                ":active": AgentSessionStatus.ACTIVE.value,
+                ":now": _now_iso(),
+            },
+        )
+
+    def clear_pending_brief(self, user_id: str, session_id: str) -> bool:
+        """Withdraw a proposal. Nothing pending is also success. (UpdateItem.)"""
+        return self._conditional_update(
+            user_id,
+            agent_session_sk(session_id),
+            kind="agent_session",
+            update="REMOVE pending_brief, pending_duration_minutes SET updated_at = :now",
+            condition="attribute_exists(PK)",
+            values={":now": _now_iso()},
+        )
+
+    def confirm_session(
+        self, user_id: str, session_id: str, *, expected_turn: int, job_id: str
+    ) -> bool:
+        """Close the session on the listener's confirmation: the fencing
+        token's fourth verb. Same lock as ``commit_turn`` (the claim must be
+        held, the turn counter must match) but the counter does not move --
+        confirming is not a turn of conversation. Requires a pending brief:
+        there is nothing to confirm otherwise. (UpdateItem.)
+        """
+        return self._conditional_update(
+            user_id,
+            agent_session_sk(session_id),
+            kind="agent_session",
+            update=(
+                "SET #status = :finalized, job_id = :job, updated_at = :now "
+                "REMOVE in_flight, pending_brief, pending_duration_minutes"
+            ),
+            condition=(
+                "attribute_exists(PK) AND #status = :active AND #turn = :expected "
+                "AND attribute_exists(in_flight) AND attribute_exists(pending_brief)"
+            ),
+            names={**_STATUS_NAMES, "#turn": "turn"},
+            values={
+                ":finalized": AgentSessionStatus.FINALIZED.value,
+                ":active": AgentSessionStatus.ACTIVE.value,
+                ":job": job_id,
+                ":expected": expected_turn,
+                ":now": _now_iso(),
+            },
+        )
+
     def release_turn(self, user_id: str, session_id: str, *, expected_turn: int) -> bool:
         """Give the claim back without advancing: the fencing token's third
         verb, for a turn that failed before it could commit.

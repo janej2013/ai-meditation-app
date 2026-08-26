@@ -26,17 +26,32 @@ from agent.native.llm.converse import AgentProviderError
 from agent.native.loop import NativeEngine
 from agent.prompt import render_memory_block
 from agent.tools.default import default_registry
+from agent.tools.finalize import agent_job_id
 from agent.tools.registry import ToolContext
 from agent_runner.metrics import emit_metrics
-from shared.db import EntitlementStore
-from shared.jobs import start_generation
+from shared.db import AgentTurnBusyError, EntitlementStore
+from shared.jobs import GateOutcome, GenerationStartError, generation_gate, start_generation
 from shared.models import AgentEngineName, AgentSession, AgentSessionStatus
 
 logger = logging.getLogger(__name__)
 
 
 class SessionExhaustedError(Exception):
-    """The session has used its MAX_TURNS; it has been marked ABANDONED."""
+    """The session has used its MAX_TURNS. Marked ABANDONED unless a
+    proposal is pending, which the listener may still confirm."""
+
+
+class NothingToConfirmError(Exception):
+    """Confirm was called on a session with no pending proposal."""
+
+
+class ConfirmRefusedError(Exception):
+    """The generation could not be started: ``code`` is one of
+    no_credit / job_in_flight / start_failed."""
+
+    def __init__(self, code: str) -> None:
+        super().__init__(code)
+        self.code = code
 
 
 class TurnFailureError(Exception):
@@ -55,6 +70,12 @@ class TurnOutcome:
     result: TurnResult
     job_id: str | None
 
+    @property
+    def awaiting_confirmation(self) -> bool:
+        # A new message withdraws any earlier proposal (run_claimed), so a
+        # pending brief exists after this turn iff this turn proposed one.
+        return self.result.proposal is not None
+
 
 async def claim_turn(
     store: EntitlementStore, *, user_id: str, session_id: str, engine_name: AgentEngineName
@@ -66,10 +87,17 @@ async def claim_turn(
         store.claim_turn, user_id, session_id, engine=engine_name, now=datetime.now(UTC)
     )
     if session.turn >= MAX_TURNS:
-        # mark_agent_session also drops the claim we just took.
-        await asyncio.to_thread(
-            store.mark_agent_session, user_id, session_id, AgentSessionStatus.ABANDONED
-        )
+        if session.pending_brief is not None:
+            # Out of conversation, but the proposal can still be confirmed:
+            # give the claim back and leave the session open for that.
+            await asyncio.to_thread(
+                store.release_turn, user_id, session_id, expected_turn=session.turn
+            )
+        else:
+            # mark_agent_session also drops the claim we just took.
+            await asyncio.to_thread(
+                store.mark_agent_session, user_id, session_id, AgentSessionStatus.ABANDONED
+            )
         raise SessionExhaustedError(session_id)
     return session
 
@@ -119,6 +147,9 @@ async def run_claimed(
     session_id = session.session_id
     started = time.monotonic()
     try:
+        # A new message withdraws an earlier proposal: the listener kept
+        # talking instead of starting it, so the model proposes afresh.
+        await asyncio.to_thread(store.clear_pending_brief, user_id, session_id)
         turns = await asyncio.to_thread(store.list_turns, user_id, session_id)
         memory = await asyncio.to_thread(store.get_memory, user_id)
         result = await engine.run_turn(
@@ -213,6 +244,82 @@ async def execute_turn(
         deadline=deadline,
         emit=emit,
     )
+
+
+async def confirm_session(
+    store: EntitlementStore,
+    sfn: Any,
+    *,
+    user_id: str,
+    session_id: str,
+    engine_name: AgentEngineName,
+) -> str:
+    """The listener said yes: start the generation the model proposed.
+
+    The one place the companion spends anything. Takes the same claim a
+    turn takes, so a confirmation and a message cannot run at once; runs
+    the same gate ``POST /generate`` runs; starts the job through the same
+    ``start_generation``; then closes the session without advancing the
+    turn counter. Confirming again after that returns the same job id --
+    the job id is derived from the session, and the closed session says so.
+    """
+    try:
+        session = await asyncio.to_thread(
+            store.claim_turn, user_id, session_id, engine=engine_name, now=datetime.now(UTC)
+        )
+    except AgentTurnBusyError:
+        closed = await asyncio.to_thread(store.get_agent_session, user_id, session_id)
+        if (
+            closed is not None
+            and closed.status is AgentSessionStatus.FINALIZED
+            and closed.job_id is not None
+        ):
+            return closed.job_id
+        raise
+
+    if session.pending_brief is None or session.pending_duration_minutes is None:
+        await _release(store, user_id, session_id, session.turn)
+        raise NothingToConfirmError(session_id)
+
+    gate = await asyncio.to_thread(generation_gate, store, user_id)
+    if gate.outcome is not GateOutcome.OK:
+        await _release(store, user_id, session_id, session.turn)
+        code = "no_credit" if gate.outcome is GateOutcome.NO_CREDIT else "job_in_flight"
+        raise ConfirmRefusedError(code)
+
+    job_id = agent_job_id(session_id)
+    try:
+        started = await asyncio.to_thread(
+            start_generation,
+            store,
+            sfn,
+            user_id=user_id,
+            job_id=job_id,
+            duration_minutes=session.pending_duration_minutes,
+            mood_text=session.pending_brief,
+            source="agent",
+            agent_session_id=session_id,
+        )
+    except GenerationStartError as exc:
+        await _release(store, user_id, session_id, session.turn)
+        raise ConfirmRefusedError("start_failed") from exc
+    if not started:
+        # uuid5 makes a foreign job with this id impossible; a guard, not a path.
+        await _release(store, user_id, session_id, session.turn)
+        raise RuntimeError(f"job id {job_id} is held by something else")
+
+    confirmed = await asyncio.to_thread(
+        store.confirm_session, user_id, session_id, expected_turn=session.turn, job_id=job_id
+    )
+    if not confirmed:
+        raise RuntimeError("confirm rejected: the claim was taken over")
+    emit_metrics(
+        dimensions={"Engine": engine_name},
+        metrics={"AgentConfirmations": (1, "Count")},
+        properties={"session_id": session_id, "turn": session.turn},
+    )
+    logger.info("session confirmed job_id=%s", job_id, extra={"session_id": session_id})
+    return job_id
 
 
 async def _release(store: EntitlementStore, user_id: str, session_id: str, turn: int) -> None:

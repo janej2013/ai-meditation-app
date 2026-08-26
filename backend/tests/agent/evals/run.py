@@ -30,7 +30,7 @@ from agent.tools.registry import ToolContext
 from shared.models import AgentTurn
 
 from .cases import CASES, Case
-from .eval_store import EvalStore, FakeStartGeneration
+from .eval_store import EvalStore
 
 
 @dataclass
@@ -50,10 +50,7 @@ class Outcome:
 
 def run_case(case: Case, provider: BedrockConverseProvider) -> Outcome:
     store = EvalStore(available=case.available, insights=case.insights)
-    starter = FakeStartGeneration(store)
-    context = ToolContext(
-        user_id="eval", session_id=f"eval-{case.name}", store=store, start_generation=starter
-    )
+    context = ToolContext(user_id="eval", session_id=f"eval-{case.name}", store=store)
     turns: list[AgentTurn] = []
     replies: list[str] = []
     tools: list[str] = []
@@ -89,11 +86,13 @@ def run_case(case: Case, provider: BedrockConverseProvider) -> Outcome:
                 session_id=context.session_id, turn=turn, user_text=user_text, result=result
             )
         )
-        if result.finalized:
+        if result.proposal is not None:
+            # A proposal is the conversation's end from the model's side; the
+            # listener's confirmation is the app's business, not the model's.
             finalized_on = turn + 1
             break
 
-    reasons = judge(case, replies, tools, finalized_on, starter)
+    reasons = judge(case, replies, tools, finalized_on, store)
     return Outcome(
         name=case.name,
         passed=not reasons,
@@ -124,7 +123,7 @@ def judge(
     replies: list[str],
     tools: list[str],
     finalized_on: int | None,
-    starter: FakeStartGeneration,
+    store: EvalStore,
 ) -> list[str]:
     e = case.expect
     reasons: list[str] = []
@@ -144,14 +143,14 @@ def judge(
         reasons.append("finalized")
     if e.max_turns_to_finalize and finalized_on and finalized_on > e.max_turns_to_finalize:
         reasons.append(f"finalized on turn {finalized_on} > {e.max_turns_to_finalize}")
-    if e.brief_must_not_contain and starter.calls:
-        brief = (starter.calls[-1].get("mood_text") or "").casefold()
+    if e.brief_must_not_contain and store.pending:
+        brief = store.pending[0].casefold()
         leaked = [w for w in e.brief_must_not_contain if w.casefold() in brief]
         if leaked:
             reasons.append(f"brief contains {leaked}")
-    if e.duration_range and starter.calls:
+    if e.duration_range and store.pending:
         lo, hi = e.duration_range
-        got = starter.calls[-1]["duration_minutes"]
+        got = store.pending[1]
         if not lo <= got <= hi:
             reasons.append(f"duration {got} outside {lo}-{hi}")
     return reasons
@@ -202,13 +201,23 @@ def main(argv: list[str] | None = None) -> int:
                 "; ".join(o.reasons),
             )
         )
+    soft = {c.name for c in cases if c.expect.soft}
+    hard_failures = [o for o in outcomes if not o.passed and o.name not in soft]
+    soft_failures = [o for o in outcomes if not o.passed and o.name in soft]
     passed = sum(o.passed for o in outcomes)
-    print(f"\n{passed}/{len(outcomes)} passed")
+    print(f"\n{passed}/{len(outcomes)} passed", end="")
+    if soft_failures:
+        print(
+            f" ({len(soft_failures)} soft failure(s) not counted: "
+            f"{', '.join(o.name for o in soft_failures)})",
+            end="",
+        )
+    print()
 
     if args.json:
         with open(args.json, "w", encoding="utf-8") as fh:
             json.dump([asdict(o) for o in outcomes], fh, indent=2, ensure_ascii=False)
-    return 0 if passed == len(outcomes) else 1
+    return 0 if not hard_failures else 1
 
 
 if __name__ == "__main__":

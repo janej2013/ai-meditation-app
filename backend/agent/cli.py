@@ -108,11 +108,23 @@ def main(argv: list[str] | None = None) -> int:
             f"cache_read={u.cache_read_tokens} tools={[r.name for r in result.tool_log]}]"
         )
 
+    def ask_to_start(minutes: int) -> bool:
+        answer = input(f"\nstart a {minutes}-minute meditation? [y/N] ").strip().lower()
+        return answer == "y"
+
     job_id = run_conversation(
-        store, engine, args.user_id, session_id, _prompt_lines(), emit=_print_event, on_turn=report
+        store,
+        engine,
+        args.user_id,
+        session_id,
+        _prompt_lines(),
+        emit=_print_event,
+        on_turn=report,
+        confirm=ask_to_start,
+        sfn=sfn,
     )
     if job_id:
-        print(f"\nfinalized: job {job_id}")
+        print(f"\nstarted: job {job_id}")
         return 0
     store.mark_agent_session(args.user_id, session_id, AgentSessionStatus.ABANDONED)
     print("\nsession abandoned")

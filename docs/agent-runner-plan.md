@@ -350,14 +350,16 @@ prompt 层的策略（引导资源、不展开）才是对的粒度。价格 $0.
 |---|---|---|---|
 | `get_session_history` | `{limit: 1..10}` | `store.list_done_jobs` → 取最近 N 条的 `created_at / duration_minutes / picture_keywords / mood 摘要(≤60 字)` | 只读 |
 | `save_user_insight` | `{insight: str ≤ 120}` | `store.append_insight`，同文本去重，上限 20 条 FIFO | 同文本重复调用无副作用 |
-| `finalize_meditation_brief` | `{brief: str 40..1200, duration_minutes: 3..30}` | ① `require_credit` 等价检查（不足 → `is_error` 结果「请先充值」，模型据此告知用户，会话保持 ACTIVE）② `create_job(user, job_id, brief, duration, None, None)` + `start_execution`（与 `routers/generate.py` 完全同一路径，抽成 `shared/jobs.py::start_generation()` 供两处复用）③ 返回 `{job_id}` | `job_id` 由 `session_id` 派生（uuid5），同一会话重复 finalize 命中 `create_job` 的条件失败 → 返回已有 job_id |
+| `finalize_meditation_brief` | `brief: str`（40..1200）、`duration_minutes: int`（3..30） | **提议，不花钱**（A4b 改）：① `generation_gate`：`NO_CREDIT` / `JOB_IN_FLIGHT` → error 结果，让模型据此和用户说话；② `store.set_pending_brief()` 把 brief 与时长放到会话头（覆盖旧提议）；③ 返回 `{"status": "awaiting_confirmation", "duration_minutes"}` + `proposal`，loop 发 `ProposalReady` 事件，轮次**继续**——模型再说一句「准备好了，你可以开始或修改」。真正的启动在 `POST /agent/sessions/{id}/confirm`（`agent_runner.turns.confirm_session`）：同一把 claim 锁、同一个 gate、同一个 `start_generation()`，`job_id = uuid5(namespace, session_id)`，会话 FINALIZED 但 `turn` 不推进 | 提议幂等（覆盖）；确认幂等（同 job_id、`ExecutionAlreadyExists` 吞掉；已 FINALIZED 直接返回 job_id） |
 | `offer_choices`（第二阶段） | `{question, options: 2..4}` | **客户端执行的工具**：SSE 把选项推给 PWA 渲染成 chips，用户点选后作为 `tool_result` 回传。这是「带着你走」的载体，也是 harness 里最有讲头的模式（tool result 来自人） | — |
 
 对话里提的 `preview_scene_options / estimate_duration` 是纯函数、没有真实副作用，
 放进工具集会稀释含金量，**不做**。`recall_insights` 也不需要：记忆在会话开始时已注入 system。
 
-`finalize` 是唯一会花钱的工具，所以它的门禁与 `POST /generate` 一致：
-`available >= 1`、`frozen == 0`（一次只能一个在途生成）。credit 的冻结仍在状态机内发生。
+**没有任何工具会花钱**（A4b）：模型只能提议；credit 只在用户在 app 里点了确认、`confirm` 路由调用 `start_generation()`
+之后才由状态机冻结。门禁在提议时与确认时各查一次，都与 `POST /generate` 一致（`available >= 1`、`frozen == 0`）。
+这是 §0.5「花钱的决定在我们的代码里」的直接体现：A4 冒烟里 Nova Lite 曾在用户未同意时直接终结并扣费，两段式之后
+模型的判断不再能触发扣费。
 
 ---
 
@@ -367,8 +369,9 @@ prompt 层的策略（引导资源、不展开）才是对的粒度。价格 $0.
 |---|---|
 | `GET /health` | 无鉴权；CloudFront 不暴露它（behavior 只放行 `/agent/*`），留给本地与 smoke |
 | `POST /agent/sessions` | 门禁：`plan == "pro"`（否则 403 `plan_required`）；配额：`reserve_agent_session` (`sessions < cap`，否则 429)；读 MEMORY；返回 `{session_id, turn: 0, insights_count}` |
-| `POST /agent/sessions/{id}/turns` | body `{text ≤ 1000}`；返回 `text/event-stream`。事件：`delta {text}` / `tool {name}`（只有名字，不带参数 —— 参数是用户内容）/ `done {turn, job_id?}` / `error {code}`。每 15 s 发一条 `: ping` 注释行保活。409 = 已有在途轮或会话非 ACTIVE；credit 不足是工具结果，不是 HTTP 错误 |
-| `GET /agent/sessions/{id}` | 重建 transcript（刷新页面用）；不存在/过期 → 404 |
+| `POST /agent/sessions/{id}/turns` | body `{text ≤ 1000}`；返回 `text/event-stream`。事件：`delta {text}` / `tool {name}`（只有名字，不带参数 —— 参数是用户内容）/ `proposal {duration_minutes}`（模型提议了一份 brief，等用户确认）/ `done {turn, job_id, awaiting_confirmation}` / `error {code, retryable}`。每 15 s 发一条 `: ping` 注释行保活。一条新消息会撤回上一轮的提议。409 = 已有在途轮或会话非 ACTIVE（`busy_or_closed`）/ 轮数用尽（`session_exhausted`）；credit 不足是工具结果，不是 HTTP 错误 |
+| `POST /agent/sessions/{id}/confirm` | **唯一会花钱的请求**：读会话头的 `pending_brief` → 同一把 claim 锁 → `generation_gate` → `start_generation()` → 会话 FINALIZED。200 `{job_id}`（重复确认返回同一个 job_id）；409 `nothing_to_confirm` / `busy_or_closed` / `job_in_flight`；402 `no_credit`；503 `start_failed`（claim 已释放，可重试） |
+| `GET /agent/sessions/{id}` | 重建 transcript（刷新页面用）：`{status, turn, job_id, pending: {brief, duration_minutes} \| null, turns: [{turn, user_text, assistant_text, tools}]}`；不存在/过期 → 404 |
 | `POST /agent/sessions/{id}/abandon` | 状态 → ABANDONED（幂等） |
 | `GET /agent/memory` / `DELETE /agent/memory` | 查看 / 一键清除。清除后下一轮重建 system 即生效 |
 

@@ -23,6 +23,7 @@ from agent.contracts import (
     ConverseToolSpec,
     Finalized,
     JsonBlock,
+    Proposal,
     TextBlock,
     ToolCallRecord,
     ToolOutputBlock,
@@ -72,6 +73,8 @@ class ToolOutcome(BaseModel):
     content: dict[str, Any] | str
     status: Literal["success", "error"] = "success"
     finalized: Finalized | None = None
+    # A brief was placed on the session for the listener to confirm.
+    proposal: Proposal | None = None
 
     @classmethod
     def error(cls, message: str) -> ToolOutcome:
@@ -108,6 +111,7 @@ class ToolExecution:
     result: ToolResultBlock
     record: ToolCallRecord
     finalized: Finalized | None = None
+    proposal: Proposal | None = None
 
 
 class ToolRegistry:
@@ -160,6 +164,7 @@ class ToolRegistry:
             finalized = None
         if finalized is not None and outcome.status == "error":
             finalized = None
+        proposal = outcome.proposal if outcome.status == "success" else None
 
         output = _output_blocks(outcome)
         elapsed_ms = int((time.monotonic() - started) * 1000)
@@ -177,6 +182,7 @@ class ToolRegistry:
                 elapsed_ms=elapsed_ms,
             ),
             finalized=finalized,
+            proposal=proposal,
         )
 
 

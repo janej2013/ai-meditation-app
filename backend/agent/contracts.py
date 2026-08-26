@@ -258,16 +258,38 @@ class Done:
     job_id: str | None = None
 
 
-AgentEvent = TextDelta | ToolStarted | Done
+@dataclass(frozen=True)
+class ProposalReady:
+    """The model proposed a meditation; the listener decides whether to
+    start it. Duration only -- the brief is on the session for the owner
+    to read, and starting it is a separate, deliberate request."""
+
+    duration_minutes: int
+
+
+AgentEvent = TextDelta | ToolStarted | ProposalReady | Done
 Emit = Callable[[AgentEvent], Awaitable[None]]
 
 
 class Finalized(BaseModel):
-    """The terminal tool ran: a generation job exists and the session ends."""
+    """A terminal tool ran: a generation job exists and the session ends.
+
+    No production tool is terminal any more -- generation waits for the
+    listener's confirmation (docs/agent-runner-plan.md §4) -- but the
+    contract keeps the path for test tools and other engines.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
     job_id: str
+
+
+class Proposal(BaseModel):
+    """A brief is waiting on the session for the listener to confirm."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    duration_minutes: int
 
 
 class ToolCallRecord(BaseModel):
@@ -323,6 +345,8 @@ class TurnResult(BaseModel):
     usage: Usage = Field(default_factory=Usage)
     stop_reason: StopReason
     finalized: Finalized | None = None
+    # The last proposal this turn made, if any; the session holds the brief.
+    proposal: Proposal | None = None
 
 
 @dataclass(frozen=True)

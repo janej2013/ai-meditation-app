@@ -1,8 +1,10 @@
-"""Completion criterion 2: a scripted conversation through the real tools.
+"""A scripted conversation through the real tools, then the listener's
+confirmation -- the only step that starts a generation.
 
-History, then an insight, then finalize -- each turn claimed, run on the
-native engine with the default registry, and committed, exactly as the
-harness will do it. The store is moto; Step Functions is a stub.
+History, then an insight, then a proposal: each turn claimed, run on the
+native engine with the default registry, and committed, as the runner
+does it. Step Functions is a stub and is asserted untouched until
+``confirm_session``.
 """
 
 from __future__ import annotations
@@ -16,11 +18,13 @@ import pytest
 
 from agent.budget import FINALIZE_TOOL_NAME
 from agent.checkpoint import TurnCheckpoint, rebuild_messages
-from agent.contracts import Deadline, TurnInput
+from agent.contracts import Deadline, Proposal, TurnInput
 from agent.native.loop import NativeEngine
 from agent.tools.default import default_registry
 from agent.tools.finalize import agent_job_id
 from agent.tools.registry import ToolContext
+from agent_runner.turns import confirm_session
+from shared.db import AgentTurnBusyError
 from shared.jobs import start_generation
 from shared.models import AgentSessionStatus, JobStatus
 
@@ -45,7 +49,10 @@ TURNS = [
     ),
     (
         "Go ahead.",
-        [tool_reply((FINALIZE_TOOL_NAME, {"brief": BRIEF, "duration_minutes": 5}, "tu-3"))],
+        [
+            tool_reply((FINALIZE_TOOL_NAME, {"brief": BRIEF, "duration_minutes": 5}, "tu-3")),
+            text_reply("I've prepared a five-minute meditation; start it whenever you like."),
+        ],
     ),
 ]
 
@@ -84,34 +91,38 @@ def drive(store, sfn, script) -> list:
         checkpoint = TurnCheckpoint.from_result(
             session_id=SESSION, turn=turn, user_text=user_text, result=result
         )
-        assert store.commit_turn(
-            USER_ID,
-            SESSION,
-            expected_turn=turn,
-            checkpoint=checkpoint,
-            finalized_job_id=result.finalized.job_id if result.finalized else None,
-        )
+        assert store.commit_turn(USER_ID, SESSION, expected_turn=turn, checkpoint=checkpoint)
         results.append(result)
     return results
 
 
-def test_scripted_conversation_ends_in_a_started_job(store, dynamodb_client):
+def test_conversation_ends_in_a_proposal_and_confirmation_starts_the_job(store, dynamodb_client):
     seed_entitlement(dynamodb_client, available=1)
     sfn = MagicMock()
     assert store.create_agent_session(USER_ID, SESSION, engine="native", model_id="fake")
 
     results = drive(store, sfn, TURNS)
 
-    job_id = agent_job_id(SESSION)
-    assert results[-1].finalized is not None and results[-1].finalized.job_id == job_id
-    assert [r.finalized for r in results[:2]] == [None, None]
+    # The model proposed; the turn went on to say so; nothing was started.
+    assert results[-1].proposal == Proposal(duration_minutes=5)
+    assert results[-1].finalized is None
+    assert [r.proposal for r in results[:2]] == [None, None]
+    sfn.start_execution.assert_not_called()
+    session = store.get_agent_session(USER_ID, SESSION)
+    assert session is not None
+    assert session.status is AgentSessionStatus.ACTIVE and session.turn == 3
+    assert session.pending_brief == BRIEF and session.pending_duration_minutes == 5
+    assert [i.text for i in store.get_memory(USER_ID).insights] == ["prefers slow narration"]
 
+    job_id = run(
+        confirm_session(store, sfn, user_id=USER_ID, session_id=SESSION, engine_name="native")
+    )
+
+    assert job_id == agent_job_id(SESSION)
     job = store.get_job(USER_ID, job_id)
     assert job is not None
-    assert job.status is JobStatus.PENDING
-    assert job.mood_text == BRIEF
+    assert job.status is JobStatus.PENDING and job.mood_text == BRIEF
     assert job.source == "agent" and job.agent_session_id == SESSION
-
     sfn.start_execution.assert_called_once()
     kwargs = sfn.start_execution.call_args.kwargs
     assert kwargs["name"] == job_id
@@ -120,26 +131,27 @@ def test_scripted_conversation_ends_in_a_started_job(store, dynamodb_client):
         "job_id": job_id,
         "duration_minutes": 5,
     }
-
     session = store.get_agent_session(USER_ID, SESSION)
     assert session is not None
     assert session.status is AgentSessionStatus.FINALIZED and session.job_id == job_id
-    assert session.turn == 3
+    assert session.turn == 3 and session.pending_brief is None
     assert len(store.list_turns(USER_ID, SESSION)) == 3
-    assert [i.text for i in store.get_memory(USER_ID).insights] == ["prefers slow narration"]
-    # The history tool saw an empty collection: the job it started is not DONE.
-    first_round = results[0].tool_log[0]
-    assert first_round.output[0].data == {"sessions": [], "total": 0}
 
 
-def test_finalizing_again_after_the_session_closed_is_refused_by_the_claim(store, dynamodb_client):
+def test_confirming_twice_is_one_job(store, dynamodb_client):
     seed_entitlement(dynamodb_client, available=1)
     sfn = MagicMock()
     store.create_agent_session(USER_ID, SESSION, engine="native", model_id="fake")
     drive(store, sfn, TURNS)
 
-    from shared.db import AgentTurnBusyError
+    first = run(
+        confirm_session(store, sfn, user_id=USER_ID, session_id=SESSION, engine_name="native")
+    )
+    second = run(
+        confirm_session(store, sfn, user_id=USER_ID, session_id=SESSION, engine_name="native")
+    )
 
+    assert first == second
+    assert sfn.start_execution.call_count == 1
     with pytest.raises(AgentTurnBusyError):
         store.claim_turn(USER_ID, SESSION, engine="native", now=NOW)
-    assert sfn.start_execution.call_count == 1

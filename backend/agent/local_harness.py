@@ -13,7 +13,13 @@ from collections.abc import Callable, Iterable
 from typing import Any
 
 from agent.contracts import AgentEngine, Deadline, Emit, TurnResult
-from agent_runner.turns import SessionExhaustedError, TurnFailureError, execute_turn
+from agent_runner.turns import (
+    ConfirmRefusedError,
+    SessionExhaustedError,
+    TurnFailureError,
+    confirm_session,
+    execute_turn,
+)
 from shared.db import EntitlementStore
 
 # What a turn may take locally: the Lambda budget (120 s) less a margin,
@@ -39,12 +45,17 @@ def run_conversation(
     emit: Emit,
     on_turn: Callable[[int, TurnResult], None] | None = None,
     turn_seconds: float = TURN_SECONDS,
+    confirm: Callable[[int], bool] | None = None,
+    sfn: Any = None,
 ) -> str | None:
-    """Drive an existing ACTIVE session through ``turns`` until it finalizes
-    or the input runs out. Returns the job id when finalized.
+    """Drive an existing ACTIVE session through ``turns`` until a proposal
+    is confirmed or the input runs out. Returns the job id when confirmed.
 
-    A failed turn (``TurnFailureError``) is reported and the loop continues with
-    the next input, as a user would resend; the claim was released.
+    ``confirm`` plays the listener's part when the model proposes: it gets
+    the duration and answers whether to start (the CLI asks, smoke says
+    yes). A failed turn (``TurnFailureError``) is reported and the loop
+    continues with the next input, as a user would resend; the claim was
+    released.
     """
     for user_text in turns:
         try:
@@ -69,4 +80,14 @@ def run_conversation(
             on_turn(outcome.turn - 1, outcome.result)
         if outcome.job_id:
             return outcome.job_id
+        proposal = outcome.result.proposal
+        if proposal is not None and confirm is not None and confirm(proposal.duration_minutes):
+            try:
+                return asyncio.run(
+                    confirm_session(
+                        store, sfn, user_id=user_id, session_id=session_id, engine_name="native"
+                    )
+                )
+            except ConfirmRefusedError as exc:
+                print(f"\n  [could not start: {exc.code}]")
     return None

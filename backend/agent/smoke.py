@@ -189,6 +189,10 @@ def main(argv: list[str] | None = None) -> int:
         (user_text for user_text, _, _ in SCRIPT),
         emit=_print_event,
         on_turn=report,
+        # The scripted listener always says yes; the model's proposal is
+        # what the script drives towards.
+        confirm=lambda _minutes: True,
+        sfn=sfn,
     )
     if job_id:
         print(json.dumps({"session_id": session_id, "job_id": job_id}))

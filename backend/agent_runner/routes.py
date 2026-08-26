@@ -19,7 +19,15 @@ from pydantic import BaseModel, field_validator
 from agent_runner.deps import CurrentUserDep, DepsDep
 from agent_runner.lambda_context import deadline_from_headers
 from agent_runner.sse import stream_turn
-from agent_runner.turns import SessionExhaustedError, build_engine, claim_turn, run_claimed
+from agent_runner.turns import (
+    ConfirmRefusedError,
+    NothingToConfirmError,
+    SessionExhaustedError,
+    build_engine,
+    claim_turn,
+    confirm_session,
+    run_claimed,
+)
 from shared.db import AgentTurnBusyError
 from shared.models import AgentSessionStatus, AgentTurn
 
@@ -58,12 +66,25 @@ class TranscriptTurn(BaseModel):
     created_at: datetime | None
 
 
+class PendingProposal(BaseModel):
+    """The brief awaiting the listener's confirmation. Their own words,
+    reflected back to them -- and to nobody else."""
+
+    brief: str
+    duration_minutes: int
+
+
 class Transcript(BaseModel):
     session_id: str
     status: AgentSessionStatus
     turn: int
     job_id: str | None
+    pending: PendingProposal | None
     turns: list[TranscriptTurn]
+
+
+class Confirmed(BaseModel):
+    job_id: str
 
 
 class InsightOut(BaseModel):
@@ -177,8 +198,48 @@ def get_session(session_id: str, user: CurrentUserDep, deps: DepsDep) -> Transcr
         status=session.status,
         turn=session.turn,
         job_id=session.job_id,
+        pending=(
+            PendingProposal(
+                brief=session.pending_brief, duration_minutes=session.pending_duration_minutes
+            )
+            if session.pending_brief is not None and session.pending_duration_minutes is not None
+            else None
+        ),
         turns=[_transcript_turn(t) for t in turns],
     )
+
+
+_CONFIRM_STATUS = {
+    "no_credit": status.HTTP_402_PAYMENT_REQUIRED,
+    "job_in_flight": status.HTTP_409_CONFLICT,
+    "start_failed": status.HTTP_503_SERVICE_UNAVAILABLE,
+}
+
+
+@router.post("/sessions/{session_id}/confirm", response_model=Confirmed)
+async def confirm(session_id: str, user: CurrentUserDep, deps: DepsDep) -> Confirmed:
+    """The listener starts the proposed meditation. The only request that
+    can move a credit, and it moves it through the same path as
+    POST /generate (constraint 2)."""
+    if deps.store.get_agent_session(user.sub, session_id) is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="session_not_found")
+    try:
+        job_id = await confirm_session(
+            deps.store,
+            deps.sfn,
+            user_id=user.sub,
+            session_id=session_id,
+            engine_name=deps.settings.engine,
+        )
+    except AgentTurnBusyError:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="busy_or_closed") from None
+    except NothingToConfirmError:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail="nothing_to_confirm"
+        ) from None
+    except ConfirmRefusedError as exc:
+        raise HTTPException(status_code=_CONFIRM_STATUS[exc.code], detail=exc.code) from None
+    return Confirmed(job_id=job_id)
 
 
 @router.post("/sessions/{session_id}/abandon", status_code=status.HTTP_204_NO_CONTENT)
