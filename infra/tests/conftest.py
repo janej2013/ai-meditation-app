@@ -115,3 +115,45 @@ def states(definition) -> Any:
 def picture_states(pipeline_stack) -> Any:
     """The picture machine's states; synthesized once per module."""
     return state_machine_definition(pipeline_stack, name_contains="picture")["States"]
+
+
+def build_agent_stack(model_id: str = "amazon.nova-lite-v1:0", app: Any = None) -> Any:
+    """An AgentStack with throwaway upstream resources: a table, a one-state
+    machine, a user pool and its client. Pass ``app`` to share one with a
+    frontend stack that must reference the function URL."""
+    import aws_cdk as cdk
+    from aws_cdk import aws_cognito as cognito
+    from aws_cdk import aws_dynamodb as dynamodb
+    from aws_cdk import aws_stepfunctions as sfn
+
+    from stacks.agent_stack import AgentStack
+
+    app = app or cdk.App()
+    env = cdk.Environment(account=ACCOUNT, region=REGION)
+
+    upstream = cdk.Stack(app, "AgentUpstream", env=env)
+    table = dynamodb.Table(
+        upstream,
+        "Table",
+        partition_key=dynamodb.Attribute(name="PK", type=dynamodb.AttributeType.STRING),
+        sort_key=dynamodb.Attribute(name="SK", type=dynamodb.AttributeType.STRING),
+    )
+    machine = sfn.StateMachine(
+        upstream,
+        "Machine",
+        definition_body=sfn.DefinitionBody.from_chainable(sfn.Pass(upstream, "Noop")),
+    )
+    pool = cognito.UserPool(upstream, "Pool")
+    client = pool.add_client("Client")
+
+    return AgentStack(
+        app,
+        "Agent",
+        env_name="dev",
+        table=table,
+        state_machine=machine,
+        user_pool=pool,
+        user_pool_client=client,
+        agent_model_id=model_id,
+        env=env,
+    )

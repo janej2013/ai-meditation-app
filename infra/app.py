@@ -16,6 +16,7 @@ from pathlib import Path
 
 import aws_cdk as cdk
 
+from stacks.agent_stack import DEFAULT_AGENT_MODEL_ID, AgentStack
 from stacks.api_stack import DEFAULT_CLOUDFRONT_KEY_SECRET_NAME, ApiStack
 from stacks.auth_stack import AuthStack
 from stacks.billing_stack import DEFAULT_STRIPE_SECRET_NAME, BillingStack
@@ -155,6 +156,25 @@ def main() -> None:
         description="Step Functions generation pipeline and its task Lambdas.",
     )
 
+    # Before the frontend: the site distribution fronts the agent's Function
+    # URL as its agent/* behaviour, and CDK places the invoke permission in
+    # the frontend stack -- so this is the one direction the reference runs.
+    agent = AgentStack(
+        app,
+        f"Meditation-{env_name}-Agent",
+        env_name=env_name,
+        table=data.table,
+        state_machine=pipeline.state_machine,
+        user_pool=auth.user_pool,
+        user_pool_client=auth.user_pool_client,
+        # The companion's model, separate from the pipeline's: a different
+        # job (conversation with tools) and a different default (Nova Lite,
+        # decided on the evals). An offshore profile is refused at synth.
+        agent_model_id=app.node.try_get_context("agent_model_id") or DEFAULT_AGENT_MODEL_ID,
+        env=env,
+        description="The companion agent: FastAPI + SSE on Lambda Web Adapter, Function URL.",
+    )
+
     # Before the API: the API needs the audio distribution's domain and key
     # pair id to sign playback URLs. Nothing here points back at the API, so
     # the graph stays acyclic.
@@ -170,6 +190,7 @@ def main() -> None:
         audio_public_key_pem=resolve_audio_public_key(app),
         domain_name=domain_name,
         hosted_zone_id=app.node.try_get_context("hosted_zone_id"),
+        agent_function_url=agent.function_url,
         env=env,
         cross_region_references=True,
         description="CloudFront delivery for the PWA and for generated audio.",

@@ -305,3 +305,93 @@ def test_a_domain_without_a_zone_is_rejected():
     """Fail at synth rather than deploy a certificate that never validates."""
     with pytest.raises(ValueError, match="hosted_zone_id"):
         build(domain_name="app.example.com")
+
+
+# ----------------------------------------------------------------------
+# The companion agent's behaviour
+# ----------------------------------------------------------------------
+
+# CloudFront's managed "CachingDisabled" policy id.
+CACHING_DISABLED_ID = "4135ea2d-6df8-44a3-9df3-4b5a84be39ad"
+
+
+def build_with_agent() -> tuple[cdk.Stack, FrontendStack]:
+    from conftest import build_agent_stack
+
+    app = cdk.App()
+    env = cdk.Environment(account=ACCOUNT, region=REGION)
+    data = build_data_stack(app=app)
+    agent = build_agent_stack(app=app)
+    frontend = FrontendStack(
+        app,
+        "Frontend",
+        env_name="dev",
+        audio_bucket=data.audio_bucket,
+        agent_function_url=agent.function_url,
+        env=env,
+        cross_region_references=True,
+    )
+    return agent, frontend
+
+
+@pytest.fixture(scope="module")
+def agent_template() -> assertions.Template:
+    _, frontend = build_with_agent()
+    return assertions.Template.from_stack(frontend)
+
+
+def test_agent_behavior_streams_uncached_over_every_method(agent_template):
+    config = distribution(agent_template, "PWA")
+    [agent] = [b for b in config["CacheBehaviors"] if b["PathPattern"] == "agent/*"]
+
+    assert agent["CachePolicyId"] == CACHING_DISABLED_ID
+    assert {"POST", "DELETE", "GET"} <= set(agent["AllowedMethods"])
+    assert agent["Compress"] is False
+    assert agent["ViewerProtocolPolicy"] == "redirect-to-https"
+    # The Host header must not reach a Function URL; every other viewer
+    # header (Authorization, x-amz-content-sha256) must.
+    assert "OriginRequestPolicyId" in agent
+
+
+def test_agent_origin_is_signed_by_origin_access_control(agent_template):
+    config = distribution(agent_template, "PWA")
+    [agent] = [b for b in config["CacheBehaviors"] if b["PathPattern"] == "agent/*"]
+    [origin] = [o for o in config["Origins"] if o["Id"] == agent["TargetOriginId"]]
+
+    assert origin["OriginAccessControlId"]
+    assert origin["CustomOriginConfig"]["OriginProtocolPolicy"] == "https-only"
+    assert origin["CustomOriginConfig"]["OriginReadTimeout"] == 60
+    agent_template.has_resource_properties(
+        "AWS::CloudFront::OriginAccessControl",
+        {
+            "OriginAccessControlConfig": {
+                "OriginAccessControlOriginType": "lambda",
+                "SigningBehavior": "always",
+                "SigningProtocol": "sigv4",
+            }
+        },
+    )
+
+
+def test_only_this_distribution_may_invoke_the_url(agent_template):
+    """The permission lives here, in the distribution's own stack -- the
+    reason this wiring has no cycle and needs no wildcard."""
+    agent_template.has_resource_properties(
+        "AWS::Lambda::Permission",
+        {"Action": "lambda:InvokeFunctionUrl", "Principal": "cloudfront.amazonaws.com"},
+    )
+    [permission] = agent_template.find_resources("AWS::Lambda::Permission").values()
+    assert "distribution/" in str(permission["Properties"]["SourceArn"])
+
+
+def test_without_the_agent_nothing_of_it_exists(template):
+    config = distribution(template, "PWA")
+
+    assert not any(b["PathPattern"] == "agent/*" for b in config.get("CacheBehaviors", []))
+    template.resource_count_is("AWS::Lambda::Permission", 0)
+    assert not [
+        oac
+        for oac in template.find_resources("AWS::CloudFront::OriginAccessControl").values()
+        if oac["Properties"]["OriginAccessControlConfig"]["OriginAccessControlOriginType"]
+        == "lambda"
+    ]

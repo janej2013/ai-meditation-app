@@ -42,10 +42,14 @@ AUDIO_PUB_KEY ?= cf-signing.pub.pem
 # Deliberately persisted nowhere: CI deploys without it, so ANY merge to main
 # reverts dev to the default (Nova Lite). Debug configuration cannot linger.
 BEDROCK_MODEL ?=
+# Same idea for the companion agent's model (default Nova Lite); offshore
+# profiles are refused at synth.
+AGENT_MODEL ?=
 
 CONTEXT = $(if $(wildcard $(AUDIO_PUB_KEY)),-c audio_public_key_file="$(abspath $(AUDIO_PUB_KEY))",) \
           $(if $(ALLOWED_ORIGINS),-c allowed_origins="$$ALLOWED_ORIGINS") \
-          $(if $(BEDROCK_MODEL),-c bedrock_model_id="$(BEDROCK_MODEL)")
+          $(if $(BEDROCK_MODEL),-c bedrock_model_id="$(BEDROCK_MODEL)") \
+          $(if $(AGENT_MODEL),-c agent_model_id="$(AGENT_MODEL)")
 
 .DEFAULT_GOAL := help
 .PHONY: help check lint test synth layers diff deploy upload-bgm fe-check fe-lint fe-test fe-build \

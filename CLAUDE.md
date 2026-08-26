@@ -31,6 +31,7 @@ infra/            CDK app. One stack per concern:
     pipeline_stack.py   Step Functions + step Lambdas
     billing_stack.py    Stripe webhook route + secrets wiring
     frontend_stack.py   S3 + CloudFront + Route53 + ACM (us-east-1 cert)
+    agent_stack.py      Companion agent Lambda (container, Function URL response streaming) + IAM
 backend/
   api/              FastAPI app (Mangum handler), routers/, deps.py, Dockerfile
   functions/        One folder per Step Functions task Lambda (zip):
