@@ -1,5 +1,6 @@
 import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
+import { StrictMode } from 'react'
 import { MemoryRouter, Route, Routes, useNavigate } from 'react-router-dom'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -18,16 +19,22 @@ function SomeScreen() {
   return <button onClick={() => navigate('/generating/j1')}>GO WAIT</button>
 }
 
-function renderPill(path = '/player/j1') {
+function renderPill(
+  path = '/player/j1',
+  wrap: (ui: React.ReactNode) => React.ReactNode = (ui) => ui,
+) {
   return render(
-    <MemoryRouter initialEntries={[path]}>
-      <AccountPill />
-      <Routes>
-        <Route path="*" element={<SomeScreen />} />
-        <Route path="/signup" element={<div>SIGNUP SCREEN</div>} />
-        <Route path="/account" element={<div>ACCOUNT SCREEN</div>} />
-      </Routes>
-    </MemoryRouter>,
+    wrap(
+      <MemoryRouter initialEntries={[path]}>
+        <AccountPill />
+        <Routes>
+          <Route path="*" element={<SomeScreen />} />
+          <Route path="/generating/:jobId" element={<div>WAIT SCREEN</div>} />
+          <Route path="/signup" element={<div>SIGNUP SCREEN</div>} />
+          <Route path="/account" element={<div>ACCOUNT SCREEN</div>} />
+        </Routes>
+      </MemoryRouter>,
+    ),
   )
 }
 
@@ -62,7 +69,7 @@ describe('AccountPill', () => {
 
     await userEvent.click(screen.getByText('GO WAIT'))
 
-    await new Promise((r) => setTimeout(r, 30))
+    await screen.findByText('WAIT SCREEN')
     expect(getAccount).toHaveBeenCalledTimes(1)
     expect(screen.getByText('3 left')).toBeInTheDocument()
   })
@@ -71,6 +78,24 @@ describe('AccountPill', () => {
     vi.mocked(isSignedIn).mockResolvedValue(true)
     vi.mocked(getAccount).mockResolvedValue({ available: 3, frozen: 0, plan: 'free' })
     renderPill('/companion')
+
+    await waitFor(() => expect(screen.getByText('3 left')).toBeInTheDocument())
+    expect(getAccount).toHaveBeenCalledTimes(1)
+  })
+
+  it('a reload on the waiting screen still shows the balance', async () => {
+    vi.mocked(isSignedIn).mockResolvedValue(true)
+    vi.mocked(getAccount).mockResolvedValue({ available: 3, frozen: 0, plan: 'free' })
+    renderPill('/generating/j1')
+
+    await waitFor(() => expect(screen.getByText('3 left')).toBeInTheDocument())
+    expect(getAccount).toHaveBeenCalledTimes(1)
+  })
+
+  it('survives StrictMode double-invoking the mount read', async () => {
+    vi.mocked(isSignedIn).mockResolvedValue(true)
+    vi.mocked(getAccount).mockResolvedValue({ available: 3, frozen: 0, plan: 'free' })
+    renderPill('/companion', (ui) => <StrictMode>{ui}</StrictMode>)
 
     await waitFor(() => expect(screen.getByText('3 left')).toBeInTheDocument())
   })

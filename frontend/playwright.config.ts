@@ -44,6 +44,11 @@ export default defineConfig({
     // strictPort because the API's CORS allow-list names 5173 exactly; a
     // silent fallback to 5174 fails every request as a cross-origin error.
     command: `npm run dev -- --port ${PORT} --strictPort`,
+    // The stubbed project never reaches a real API, but the client refuses
+    // to run without a base URL and CI has no .env.local; a fixed stub host
+    // (process env outranks .env files in Vite) gives page.route() something
+    // to intercept on every machine.
+    env: { ...process.env, VITE_API_URL: 'https://api.stub' },
     url: `http://localhost:${PORT}`,
     reuseExistingServer: !process.env.CI,
     timeout: 60_000,

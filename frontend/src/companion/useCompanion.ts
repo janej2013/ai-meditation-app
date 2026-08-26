@@ -19,6 +19,7 @@ import {
   type PendingProposal,
   type TurnEvent,
 } from '../api/agent'
+import { DEFAULT_BGM_TRACK, bgmUrl, mixer } from '../audio/mixer'
 import { ApiError, NotSignedInError, getAccount } from '../api/client'
 import { isCrisisReply } from './detectCrisis'
 
@@ -120,13 +121,14 @@ export function useCompanion(onStarted: (jobId: string, durationMinutes: number)
     }
   }
 
-  // Credits for the proposal card's "Uses 1 credit · N left"; a failure here
-  // is cosmetic, so it is swallowed.
-  useEffect(() => {
+  // Credits for the proposal card's "Uses 1 credit · N left", read when a
+  // proposal arrives rather than on open: fresher, and not a second read of
+  // the account behind the shell's own on a reload. A failure is cosmetic.
+  const readCredits = () => {
     getAccount()
       .then((a) => setCredits(a.available))
       .catch(() => setCredits(null))
-  }, [])
+  }
 
   // Whether it remembers anything, for the empty state's line. A GET, so it
   // costs no session quota; any refusal (signed out, not Pro) just means no
@@ -165,6 +167,7 @@ export function useCompanion(onStarted: (jobId: string, durationMinutes: number)
         setTurn(t.turn)
         setTurnsLeft(Math.max(MAX_TURNS - t.turn, 0))
         setProposal(t.pending ? { ...t.pending, summary: summarise(t.pending.brief) } : null)
+        if (t.pending) readCredits()
       })
       .catch(() => remember(null))
     return () => {
@@ -246,6 +249,7 @@ export function useCompanion(onStarted: (jobId: string, durationMinutes: number)
       setTurn(done.turn)
       setTurnsLeft(done.turns_left)
       if (done.awaiting_confirmation && proposed !== null) {
+        readCredits()
         // The brief itself lives on the session; one read fills the card.
         try {
           const t = await getSession(id)
@@ -293,22 +297,27 @@ export function useCompanion(onStarted: (jobId: string, durationMinutes: number)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [busy, sessionId])
 
-  /** Confirm the proposal. True when a generation started. */
-  const start = useCallback(async (): Promise<boolean> => {
-    if (!sessionId || !proposal || starting) return false
+  /** Confirm the proposal: the one tap in the feature that spends a credit. */
+  const start = useCallback(async () => {
+    if (!sessionId || !proposal || starting) return
     setStarting(true)
     setCompError(null)
+    // As on Home's Begin: the music starts inside the tap (the only place a
+    // mobile browser allows) and plays through the wait; a refused start
+    // silences it again. It lives here, not on a button, so every path that
+    // starts -- the card, the error card's retry -- behaves the same.
+    void mixer.startAmbient(bgmUrl(DEFAULT_BGM_TRACK))
     try {
       const { job_id } = await confirmSession(sessionId)
       remember(null)
       onStarted(job_id, proposal.duration_minutes)
-      return true
     } catch (e) {
-      setStarting(false)
+      mixer.stopAmbient()
       if (e instanceof ApiError && e.detail === 'no_credit') setCompError('nocredit')
       else if (e instanceof ApiError && e.detail === 'nothing_to_confirm') setProposal(null)
       else setCompError('start')
-      return false
+    } finally {
+      setStarting(false)
     }
   }, [sessionId, proposal, starting, onStarted])
 

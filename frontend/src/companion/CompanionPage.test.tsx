@@ -116,6 +116,9 @@ describe('CompanionPage', () => {
     expect(screen.queryByText(/I remember a few things/)).not.toBeInTheDocument()
     expect(createSession).not.toHaveBeenCalled()
     expect(screen.getByLabelText('Send')).toBeDisabled()
+    // The shell's pill already reads the account on a reload; the page does
+    // not add a second read until there is a card to put the number on.
+    expect(getAccount).not.toHaveBeenCalled()
   })
 
   it('[empty] mentions memory when it remembers something', async () => {
@@ -293,6 +296,37 @@ describe('CompanionPage', () => {
     expect(mixer.stopAmbient).toHaveBeenCalled()
     fireEvent.click(screen.getByText('Add credits'))
     expect(await screen.findByText('PLANS SCREEN')).toBeInTheDocument()
+  })
+
+  it('[errors] Try again after a failed start plays the music like the first tap', async () => {
+    scriptTurn([{ event: 'proposal', data: { duration_minutes: 5 } }, delta('Ready.'), done(1, true)])
+    vi.mocked(getSession).mockResolvedValue({
+      session_id: 's1',
+      status: 'ACTIVE',
+      turn: 1,
+      job_id: null,
+      pending: { brief: 'A short brief.', duration_minutes: 5 },
+      turns: [],
+    })
+    vi.mocked(confirmSession).mockRejectedValueOnce(new ApiError(503, 'start_failed'))
+    vi.mocked(confirmSession).mockResolvedValueOnce({ job_id: 'job-9' })
+    renderPage()
+    await say('go')
+    await screen.findByText('5 min')
+
+    await act(async () => {
+      fireEvent.click(screen.getByText('Start the meditation'))
+    })
+    expect(await screen.findByText(/Couldn't start it just now/)).toBeInTheDocument()
+    expect(mixer.stopAmbient).toHaveBeenCalledTimes(1)
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Try again' }))
+    })
+
+    expect(await screen.findByText(/GENERATING SCREEN/)).toBeInTheDocument()
+    expect(mixer.startAmbient).toHaveBeenCalledTimes(2)
+    expect(mixer.stopAmbient).toHaveBeenCalledTimes(1)
   })
 
   it('[plan_required] a free account sees the Pro screen', async () => {

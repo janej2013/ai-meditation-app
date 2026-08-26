@@ -48,6 +48,9 @@ export class DualTrackMixer {
   private offset = 0 // seconds into the narration when paused
   private bgmVolume = DEFAULT_BGM_VOLUME
   private playing = false
+  // Set by startAmbient, cleared by stopAmbient/endSession: a stop that
+  // lands while the track is still being fetched must win over the start.
+  private ambientWanted = false
 
   onEnded: (() => void) | null = null
 
@@ -104,11 +107,15 @@ export class DualTrackMixer {
    */
   async startAmbient(url: string | null): Promise<void> {
     if (!url) return
+    this.ambientWanted = true
     try {
       const ctx = this.ensureContext()
       if (ctx.state === 'suspended') await ctx.resume()
       await this.loadBgm(url)
-      if (!this.bgmSource) this.startBgm()
+      // A refused session start calls stopAmbient() while this await is
+      // still fetching; without the flag the decode would land and start
+      // the music anyway, on a screen that never asked for it.
+      if (this.ambientWanted && !this.bgmSource) this.startBgm()
     } catch {
       // No AudioContext (tests), a blocked fetch, a decode failure: silence.
     }
@@ -116,6 +123,7 @@ export class DualTrackMixer {
 
   /** Stop the background track without touching the narration. */
   stopAmbient(): void {
+    this.ambientWanted = false
     this.stopBgm()
   }
 
@@ -127,6 +135,7 @@ export class DualTrackMixer {
    * them without a refetch.
    */
   endSession(): void {
+    this.ambientWanted = false
     this.stopSources()
     this.narrationBuffer = null
     this.offset = 0

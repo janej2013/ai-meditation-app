@@ -101,6 +101,12 @@ test('a free account is shown the Pro screen', async ({ page }) => {
   await page.addInitScript(() => {
     sessionStorage.setItem('drift:e2e-id-token', 'e2e.id.token')
   })
+  await page.route('**/account', (route) =>
+    route.fulfill({ json: { available: 1, frozen: 0, plan: 'free' } }),
+  )
+  await page.route('**/agent/memory', (route) =>
+    route.fulfill({ status: 403, json: { detail: 'plan_required' } }),
+  )
   await page.route('**/agent/sessions', (route) =>
     route.fulfill({ status: 403, json: { detail: 'plan_required' } }),
   )
