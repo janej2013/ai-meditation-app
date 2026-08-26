@@ -140,11 +140,17 @@ def test_reserved_concurrency_is_opt_in():
     assert functions(capped)["langgraph"]["ReservedConcurrentExecutions"] == 5
 
 
-def test_a_reservation_is_split_and_never_zero():
+def test_a_reservation_is_split_exactly_with_the_remainder_to_native():
     assert split_concurrency(None) == (None, None)
     assert split_concurrency(10) == (5, 5)
-    assert split_concurrency(3) == (1, 1)
-    assert split_concurrency(1) == (1, 1)
+    assert split_concurrency(3) == (2, 1)
+    assert split_concurrency(2) == (1, 1)
+
+
+@pytest.mark.parametrize("total", [0, 1])
+def test_a_reservation_too_small_for_two_engines_fails_the_synth(total):
+    with pytest.raises(ValueError, match="one per engine"):
+        build_agent_stack(reserved_concurrency=total)
 
 
 def test_environment_is_exactly_what_the_runner_reads(template):

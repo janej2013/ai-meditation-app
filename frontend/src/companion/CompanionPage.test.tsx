@@ -425,6 +425,17 @@ describe('CompanionPage', () => {
     expect(createSession).toHaveBeenCalledWith('native')
   })
 
+  it('[engine] wrong_engine offers Start over rather than a retry that cannot land', async () => {
+    scriptTurn([], { reject: new ApiError(409, 'wrong_engine') })
+    renderPage()
+
+    await say('hello')
+
+    expect(await screen.findByText(/We've talked for a while/)).toBeInTheDocument()
+    expect(screen.getByText('Start over')).toBeInTheDocument()
+    expect(screen.queryByText('Send again')).not.toBeInTheDocument()
+  })
+
   it('[engine] the pre-L2 storage format still resumes, as native', async () => {
     sessionStorage.setItem('drift:companion-session', 's1')
     renderPage()

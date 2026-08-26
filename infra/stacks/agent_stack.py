@@ -77,12 +77,18 @@ DASHBOARD_METRICS = (
 
 
 def split_concurrency(total: int | None) -> tuple[int | None, int | None]:
-    """One reservation, two functions: half each, rounded down, at least
-    one -- it is the same account quota either way, and a ceiling of zero
-    would switch an engine off."""
+    """One reservation, two functions: the native engine gets the larger
+    half of an odd total, and the sum is exactly what was asked for -- it
+    is the same account quota either way. Fewer than two cannot give each
+    engine one, and a ceiling of zero would switch an engine off, so that
+    is refused at synth rather than half-applied at deploy."""
     if total is None:
         return None, None
-    return max(total // 2, 1), max(total // 2, 1)
+    if total < 2:
+        raise ValueError(
+            f"agent_reserved_concurrency={total}: at least 2 is needed, one per engine"
+        )
+    return total - total // 2, total // 2
 
 
 class AgentStack(Stack):

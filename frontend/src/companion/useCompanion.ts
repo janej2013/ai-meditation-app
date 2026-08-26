@@ -111,24 +111,11 @@ export function useCompanion(
 ) {
   const engine: Engine = options.engine ?? 'native'
   const [gate, setGate] = useState<Gate>('open')
+  // Only a session opened on this engine resumes; one from the other is let
+  // go by the effect below (an initializer must stay pure).
   const [sessionId, setSessionId] = useState<string | null>(() => {
     const stored = readStored()
-    if (!stored) return null
-    if (stored.engine !== engine) {
-      // A session runs on one engine from start to finish: its checkpoints
-      // would replay on the other, but the runner refuses (409
-      // wrong_engine) so the two engines' metrics stay comparable. The
-      // old conversation is let go; the new one starts on the asked-for
-      // engine with the first message.
-      abandonSession(stored.id, stored.engine).catch(() => undefined)
-      try {
-        sessionStorage.removeItem(STORAGE_KEY)
-      } catch {
-        /* storage may be unavailable */
-      }
-      return null
-    }
-    return stored.id
+    return stored && stored.engine === engine ? stored.id : null
   })
   const [thread, setThread] = useState<Message[]>([])
   const [draft, setDraft] = useState('')
@@ -177,6 +164,23 @@ export function useCompanion(
     getMemory()
       .then((m) => setInsightsCount(m.insights.length))
       .catch(() => undefined)
+  }, [])
+
+  // A stored session on the other engine is abandoned, not resumed: a
+  // session runs on one engine from start to finish (its checkpoints would
+  // replay on the other, but the runner refuses with 409 wrong_engine so
+  // the two engines' metrics stay comparable). The new conversation starts
+  // on the asked-for engine with the first message.
+  useEffect(() => {
+    const stored = readStored()
+    if (!stored || stored.engine === engine) return
+    abandonSession(stored.id, stored.engine).catch(() => undefined)
+    try {
+      sessionStorage.removeItem(STORAGE_KEY)
+    } catch {
+      /* storage may be unavailable */
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- once, on mount; the page remounts per engine
   }, [])
 
   // A reload resumes the conversation the store still holds.
@@ -268,7 +272,11 @@ export function useCompanion(
     try {
       await sendTurn(id, text, handle, abort.current.signal, engine)
     } catch (e) {
-      if (e instanceof ApiError && e.detail === 'session_exhausted') setCompError('exhausted')
+      // wrong_engine: this session belongs to the other function. Nothing
+      // sent again would land, so it is offered the same way out as an
+      // exhausted session: start over.
+      if (e instanceof ApiError && (e.detail === 'session_exhausted' || e.detail === 'wrong_engine'))
+        setCompError('exhausted')
       else if (e instanceof ApiError && e.detail === 'busy_or_closed') {
         setDraft(text)
         setCompError('model')
@@ -355,6 +363,7 @@ export function useCompanion(
       mixer.stopAmbient()
       if (e instanceof ApiError && e.detail === 'no_credit') setCompError('nocredit')
       else if (e instanceof ApiError && e.detail === 'nothing_to_confirm') setProposal(null)
+      else if (e instanceof ApiError && e.detail === 'wrong_engine') setCompError('exhausted')
       else setCompError('start')
     } finally {
       setStarting(false)

@@ -18,11 +18,17 @@ import Thread from './Thread'
 import { SHOW_TURNS_LEFT_AT, useCompanion } from './useCompanion'
 
 export default function CompanionPage() {
-  const navigate = useNavigate()
   const [params] = useSearchParams()
   // `?engine=langgraph` picks the second engine (plan §8): the only place
-  // the PWA knows there are two. Nothing on screen changes.
+  // the PWA knows there are two. Nothing on screen changes. Keyed on the
+  // engine so a query-only navigation remounts the screen and its hook
+  // rather than carrying a session across engines.
   const engine: Engine = params.get('engine') === 'langgraph' ? 'langgraph' : 'native'
+  return <CompanionScreen key={engine} engine={engine} />
+}
+
+function CompanionScreen({ engine }: { engine: Engine }) {
+  const navigate = useNavigate()
   const companion = useCompanion(
     (jobId, duration) => {
       const handoff: GeneratingHandoff = { duration, pic: false }

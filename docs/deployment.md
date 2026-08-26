@@ -140,8 +140,9 @@ make deploy ENV=dev STACKS=Meditation-dev-Agent AGENT_MODEL=au.anthropic.claude-
 Australia.
 
 **Concurrency ceiling.** The functions' reserved concurrency (the agent's cost ceiling) is off
-by default; when set, the number is split in half between the two functions (rounded down,
-never below one), because it is one account quota either way. It is off by default: Lambda refuses a reservation that would leave the account under 10 unreserved
+by default; when set, the number is split between the two functions (the native engine gets
+the larger half of an odd total; fewer than 2 fails the synth), because it is one account quota
+either way. It is off by default: Lambda refuses a reservation that would leave the account under 10 unreserved
 executions, and a new account's whole concurrency quota is 10 -- which already caps the function
 at 10. Once the quota has been raised (Service Quotas → Lambda → *Concurrent executions*), turn
 the ceiling on:
