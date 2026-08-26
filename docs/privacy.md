@@ -2,8 +2,10 @@
 
 A plain-language account of the personal information this product handles, written from the
 code rather than from intentions. Every statement below names the place that enforces it, so a
-reader who wants to check can. It is not legal advice and not yet a published privacy policy;
-whether it becomes a page in the app is an open product decision (README, *Known gaps*).
+reader who wants to check can. It is not legal advice and not yet a reviewed privacy policy.
+The in-app version is `/privacy` (`frontend/src/pages/PrivacyPage.tsx`); this file is the
+annotated source, and a test holds the page's numbers to it. Last checked against the code:
+2026-08-26.
 
 Everything runs in AWS's Sydney region (`ap-southeast-2`, `infra/app.py`). Models are called on
 demand by bare model id, never through a cross-region inference profile, so the text and
@@ -85,7 +87,7 @@ The companion is a conversation that ends in a meditation. It is available on th
   it replies with a fixed text — Lifeline on 13 11 14, Beyond Blue on 1300 22 4636, 000 in an
   emergency (`CRISIS_TEXT`, `backend/agent/prompt.py`) — and does not propose a meditation. That
   reply is the same for everyone and is not medical advice.
-- **How much.** Thirty conversations a calendar month per account (`AGENT_SESSIONS_PER_MONTH`);
+- **How much.** 30 conversations a calendar month per account (`AGENT_SESSIONS_PER_MONTH`);
   the counter that enforces it expires after 62 days (`AGENT_QUOTA_TTL_DAYS`).
 
 ## Summary of retention

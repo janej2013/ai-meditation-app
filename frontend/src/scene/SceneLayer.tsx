@@ -31,7 +31,12 @@ function sceneFor(pathname: string, withPicture: boolean): RouteScene {
     return { heroOpacity: 0.85, mood: 'ambient', scrimOpacity: 0, paused: false }
   if (pathname === '/failed' || pathname === '/plans')
     return { heroOpacity: 0.52, mood: 'settle', scrimOpacity: 0.5, paused: false }
-  if (pathname === '/signup' || pathname === '/verify' || pathname === '/account')
+  if (
+    pathname === '/signup' ||
+    pathname === '/verify' ||
+    pathname === '/account' ||
+    pathname === '/privacy'
+  )
     return { heroOpacity: 0.56, mood: 'whisper', scrimOpacity: 0.5, paused: false }
   // The prototype rests the cloud at 0.50 behind a conversation, as it does
   // behind the collection: present, but not competing with the text.

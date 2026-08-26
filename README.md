@@ -118,10 +118,6 @@ Deliberate deferrals, recorded so they read as decisions rather than oversights.
   re-reads it. Recorded from the code review rather than fixed: the alternative was a shared
   account store, which is more machinery than the display is worth.
 
-- **There is no in-app privacy page.** What the product keeps and for how long is written down in
-  `docs/privacy.md`, from the code; whether it becomes a `/privacy` route in the PWA is a product
-  decision still open.
-
 - **The prototype's passwordless sign-in and player captions stay aspirational.** Cognito's
   standard flow needs a password (the signup screen says so honestly), and there is no caption
   track in the pipeline, so the player omits the prototype's dead "Captions" label. The

@@ -26,6 +26,7 @@ function renderAccount() {
       <Routes>
         <Route path="/account" element={<AccountPage />} />
         <Route path="/plans" element={<div>PLANS SCREEN</div>} />
+        <Route path="/privacy" element={<div>PRIVACY SCREEN</div>} />
       </Routes>
     </MemoryRouter>,
   )
@@ -90,6 +91,15 @@ describe('AccountPage · What it remembers', () => {
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
     expect(clearMemory).not.toHaveBeenCalled()
     expect(screen.getByText('Prefers slow narration')).toBeInTheDocument()
+  })
+
+  it('links to the privacy page', async () => {
+    renderAccount()
+    await screen.findByText('someone@example.com')
+
+    fireEvent.click(screen.getByText('Privacy'))
+
+    expect(screen.getByText('PRIVACY SCREEN')).toBeInTheDocument()
   })
 
   it('Forget clears the list', async () => {

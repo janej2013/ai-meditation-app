@@ -12,6 +12,10 @@ export default defineConfig({
     proxy: {
       '/agent': { target: 'http://localhost:8080', changeOrigin: true },
     },
+    // The privacy page's test reads docs/privacy.md (?raw) to hold the page
+    // to the document; Vite serves nothing outside the project root unless
+    // told, so open that one directory and nothing else.
+    fs: { allow: ['.', '../docs'] },
   },
   // amazon-cognito-identity-js is written for Node and dereferences `global`,
   // which no browser defines -- the module throws on import, before any of our
