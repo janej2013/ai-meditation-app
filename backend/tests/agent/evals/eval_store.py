@@ -60,7 +60,7 @@ class EvalStore:
         return True
 
     def set_pending_brief(
-        self, user_id: str, session_id: str, *, brief: str, duration_minutes: int
+        self, _user_id: str, _session_id: str, *, brief: str, duration_minutes: int
     ) -> bool:
         self.pending = (brief, duration_minutes)
         self.proposals += 1
