@@ -32,6 +32,11 @@ NO_MORE_TOOLS_HINT = (
     "(Guidance: do not call any more tools. Reply to the listener directly with what you have.)"
 )
 
+# What stands in for a reply the listener never got: shown when a turn
+# ends without visible text, and used when replaying such a turn to the
+# model (Converse rejects an empty assistant message).
+EMPTY_REPLY_TEXT = "Let's pause here for a moment. What would you like to do next?"
+
 # Sent when a model call produced nothing the listener could see -- Nova
 # occasionally answers entirely inside thinking tags, which the provider
 # strips. One nudge, then a fixed line: an empty bubble is never shown.

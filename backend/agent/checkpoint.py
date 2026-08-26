@@ -23,13 +23,14 @@ from datetime import UTC, datetime
 from agent.contracts import (
     ContentBlock,
     Message,
+    TextBlock,
     ToolResultBlock,
     ToolRound,
     TurnResult,
     block_from_converse,
     block_to_converse,
 )
-from agent.prompt import user_message_text
+from agent.prompt import EMPTY_REPLY_TEXT, user_message_text
 from shared.models import AgentTurn, AgentUsage
 
 
@@ -80,6 +81,12 @@ def rebuild_messages(turns: Iterable[AgentTurn]) -> list[Message]:
             messages.append(Message.tool_results(tool_round.results))
         if turn.finalized_job_id is None:
             content: list[ContentBlock] = [block_from_converse(b) for b in turn.assistant_content]
+            if not any(isinstance(b, TextBlock) and b.text.strip() for b in content):
+                # A turn stored before the loop guarded against empty
+                # replies. Converse refuses an empty assistant message and
+                # the roles must alternate, so the reply the listener was
+                # shown in its place stands in here too.
+                content = [TextBlock(text=EMPTY_REPLY_TEXT)]
             messages.append(Message.assistant(content))
     return messages
 

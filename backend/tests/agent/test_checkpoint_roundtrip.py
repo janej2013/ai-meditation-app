@@ -154,3 +154,28 @@ def test_rebuild_reapplies_the_converge_hint_from_the_turn_number():
     assert history[0].content[0].text.endswith(CONVERGE_HINT)
     # The raw user words are what the item keeps; the hint is not user content.
     assert checkpoint.user_text == "late"
+
+
+def test_a_stored_empty_reply_is_replayed_as_the_fallback_line():
+    """Rows written before the empty-reply guard: still a valid history."""
+    from agent.prompt import EMPTY_REPLY_TEXT
+    from shared.models import AgentTurn
+
+    turns = [
+        AgentTurn(
+            session_id=SESSION, turn=0, user_text="hi", assistant_content=[], stop_reason="end_turn"
+        ),
+        AgentTurn(
+            session_id=SESSION,
+            turn=1,
+            user_text="again",
+            assistant_content=[{"text": "  "}],
+            stop_reason="end_turn",
+        ),
+    ]
+
+    history = rebuild_messages(turns)
+
+    assert [m.role for m in history] == ["user", "assistant", "user", "assistant"]
+    assert history[1] == Message.assistant([TextBlock(text=EMPTY_REPLY_TEXT)])
+    assert history[3] == Message.assistant([TextBlock(text=EMPTY_REPLY_TEXT)])

@@ -40,6 +40,7 @@ from agent.contracts import (
 from agent.native.llm.base import LLMProvider
 from agent.prompt import (
     EMPTY_REPLY_HINT,
+    EMPTY_REPLY_TEXT,
     NO_MORE_TOOLS_HINT,
     REFUSAL_TEXT,
     SYSTEM_PROMPT,
@@ -49,9 +50,9 @@ from agent.tools.registry import ToolContext, ToolRegistry
 
 logger = logging.getLogger(__name__)
 
-# When the model ignores the no-more-tools hint there is nothing to say for
-# it; this keeps the transcript from ending on an empty assistant message.
-_FALLBACK_TEXT = "Let's pause here for a moment. What would you like to do next?"
+# When the model ignores the no-more-tools hint, or says nothing visible,
+# this keeps the transcript from ending on an empty assistant message.
+_FALLBACK_TEXT = EMPTY_REPLY_TEXT
 
 
 class ProviderProtocolError(Exception):
