@@ -148,7 +148,8 @@ make deploy ENV=dev STACKS=Meditation-dev-Agent AGENT_CONCURRENCY=10
 SITE=https://<SiteUrl>        # Frontend stack output
 curl -s -o /dev/null -w '%{http_code}\n' -X POST "$SITE/agent/sessions" \
   -H "x-amz-content-sha256: e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
-# 401: the behaviour reaches the function, which wants an ID token
+# 401: the behaviour reaches the function, which wants an ID token (in X-Id-Token -- the OAC
+#      signature overwrites Authorization, so a bearer token sent that way never arrives)
 
 curl -s -o /dev/null -w '%{http_code}\n' -X POST "$(aws cloudformation describe-stacks \
   --stack-name Meditation-dev-Agent --query "Stacks[0].Outputs[?OutputKey=='AgentFunctionUrl'].OutputValue" \
@@ -158,6 +159,12 @@ curl -s -o /dev/null -w '%{http_code}\n' -X POST "$(aws cloudformation describe-
 
 With a Pro account's ID token, the sequence in README ("Calling the deployed API") opens a
 session, streams a turn and confirms a proposal; a minute later the job is DONE like any other.
+A 200 with `index.html` from any `/agent/*` request means the *origin* answered 403/404 and the
+site's SPA error mapping (403/404 → index.html) dressed it up; read `x-cache: Error from cloudfront`
+and the function's log group, not the status code. An empty log group means the Function URL
+refused CloudFront before Lambda ran (both `lambda:InvokeFunctionUrl` and `lambda:InvokeFunction`
+must be granted -- the frontend stack does both).
+
 Metrics land in CloudWatch under `Meditation/Agent` (`AgentTurns`, `TurnLatency`, token counts,
 `AgentTurnErrors` by reason) with one line of JSON per turn in the function's log group — ids and
 counts only, never a word of the conversation.

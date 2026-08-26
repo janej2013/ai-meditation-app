@@ -563,8 +563,9 @@ The design note is `docs/agent-runner-plan.md`; the short version:
   frontend stack (and the stack adds the `lambda:InvokeFunction` half that newer Function URLs also
   check, which CDK still omits — aws/aws-cdk#35872) — the reference runs one way, which is why
   this needs none of the wildcard the audio bucket needs (Known gaps). The function verifies the Cognito ID token itself
-  (`agent_runner/auth.py`, same claim rules as `api/deps.py`) and reaches Bedrock and the table
-  with its execution role.
+  (`agent_runner/auth.py`, same claim rules as `api/deps.py`; the token travels in `X-Id-Token`
+  because the OAC signature overwrites `Authorization`) and reaches Bedrock and the table with its
+  execution role.
 - **The model proposes; the listener pays.** `finalize_meditation_brief` only places a pending
   brief on the session. `POST /agent/sessions/{id}/confirm` is the one request that can move a
   credit — through `shared/jobs.start_generation()`, the same function the API uses, with the
@@ -895,24 +896,25 @@ curl -s -H "Authorization: Bearer $TOKEN" "$API_URL/jobs/$JOB" | jq
 ```
 
 The companion agent lives on the *site* domain, not the API's (see the agent section). The
-account needs `plan == "pro"`; POSTs through CloudFront's origin access control must carry the
-payload hash:
+account needs `plan == "pro"`. Two things differ from the API: the ID token goes in `X-Id-Token`
+(CloudFront's origin access control overwrites `Authorization` with its own signature), and POSTs
+must carry the payload hash:
 
 ```bash
 SITE=$(python -c "import json;d=json.load(open('cdk-outputs.json'));\
 print(next(v['SiteUrl'] for v in d.values() if 'SiteUrl' in v))")
 EMPTY_SHA=$(printf '' | sha256sum | cut -d' ' -f1)
 
-SID=$(curl -s -X POST "$SITE/agent/sessions" -H "Authorization: Bearer $TOKEN" \
+SID=$(curl -s -X POST "$SITE/agent/sessions" -H "X-Id-Token: $TOKEN" \
   -H "x-amz-content-sha256: $EMPTY_SHA" | jq -r .session_id)
 
 BODY='{"text":"Something slow to wind down tonight, about ten minutes."}'
-curl -N -X POST "$SITE/agent/sessions/$SID/turns" -H "Authorization: Bearer $TOKEN" \
+curl -N -X POST "$SITE/agent/sessions/$SID/turns" -H "X-Id-Token: $TOKEN" \
   -H 'Content-Type: application/json' -H "x-amz-content-sha256: $(printf '%s' "$BODY" | sha256sum | cut -d' ' -f1)" \
   -d "$BODY"
 # event: tool / proposal / delta ... / done {"awaiting_confirmation": true}
 
-curl -s -X POST "$SITE/agent/sessions/$SID/confirm" -H "Authorization: Bearer $TOKEN" \
+curl -s -X POST "$SITE/agent/sessions/$SID/confirm" -H "X-Id-Token: $TOKEN" \
   -H "x-amz-content-sha256: $EMPTY_SHA" | jq        # {"job_id": ...} -- this is the step that spends a credit
 ```
 

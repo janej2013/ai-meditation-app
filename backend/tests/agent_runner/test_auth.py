@@ -23,7 +23,35 @@ def test_missing_header_is_401(app):
     response = Api(app, None).request("GET", "/agent/memory", auth=False)
 
     assert response.status_code == 401
-    assert "Authorization" in response.json()["detail"]
+    assert "x-id-token" in response.json()["detail"]
+
+
+def test_id_token_header_is_the_production_path(app, token):
+    """Through CloudFront's OAC the Authorization header is overwritten by
+    the origin signature, so the PWA sends the token in X-Id-Token."""
+    response = Api(app, None).request("GET", "/agent/memory", headers={"X-Id-Token": token})
+
+    assert response.status_code == 200
+
+
+def test_id_token_header_wins_over_authorization(app, token, other_rsa_keys):
+    # What CloudFront delivers: a good X-Id-Token next to an Authorization
+    # header that is not a JWT at all.
+    response = Api(app, None).request(
+        "GET",
+        "/agent/memory",
+        headers={"X-Id-Token": token, "Authorization": "AWS4-HMAC-SHA256 Credential=cloudfront"},
+    )
+
+    assert response.status_code == 200
+
+
+def test_bad_id_token_header_is_401(app, other_rsa_keys):
+    response = Api(app, None).request(
+        "GET", "/agent/memory", headers={"X-Id-Token": make_token(other_rsa_keys[0])}
+    )
+
+    assert response.status_code == 401
 
 
 def test_malformed_scheme_is_401(app, token):

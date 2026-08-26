@@ -386,6 +386,7 @@ prompt 层的策略（引导资源、不展开）才是对的粒度。价格 $0.
   用 `PyJWT[crypto]` 按 Cognito JWKS（冷启动时拉取、按 `kid` 缓存于模块级）校验签名、`iss`、`aud`、`exp`，
   再套用与 `api/deps.py` 完全相同的 claims 规则（`token_use == "id"`、必须有 `sub`）。
   单独放 `agent_runner/auth.py`，测试用本地生成的 RSA 密钥对。
+- **ID token 走 `X-Id-Token` 头**（A5 发现）：CloudFront OAC 签名会覆盖 viewer 的 `Authorization`，bearer token 永远到不了函数；`Authorization: Bearer` 仅作本机 uvicorn 的回退。前端（§8）的 `agent.ts` 用这个头。
 - **不用 `EventSource`**：它不能带 Authorization 头。前端用 `fetch` + `ReadableStream` 手工解析 SSE（§8）。
 - **CORS**：走站点分发的同源 behavior（§6），函数本身不需要 CORS；本地 dev 由 vite 代理 `/agent` 到 `localhost:8080`。
 - **冷启动**：容器镜像 + Python ≈ 1–2 s，落在第一条 `delta` 之前；前端在收到首个事件前显示「正在想」。

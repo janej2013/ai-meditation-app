@@ -8,6 +8,7 @@ FastAPI's ``dependency_overrides`` with a ``Deps`` over moto and fakes.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -17,9 +18,11 @@ import boto3
 from fastapi import Depends, HTTPException, Request, status
 
 from agent.native.llm.converse import BedrockConverseProvider
-from agent_runner.auth import AuthError, CurrentUser, TokenVerifier
+from agent_runner.auth import ID_TOKEN_HEADER, AuthError, CurrentUser, TokenVerifier
 from agent_runner.settings import Settings
 from shared.db import EntitlementStore
+
+logger = logging.getLogger(__name__)
 
 
 def _utc_now() -> datetime:
@@ -58,8 +61,13 @@ DepsDep = Annotated[Deps, Depends(get_deps)]
 
 def current_user(request: Request, deps: DepsDep) -> CurrentUser:
     try:
-        return deps.verifier.verify(request.headers.get("authorization"))
+        return deps.verifier.verify(
+            request.headers.get("authorization"), request.headers.get(ID_TOKEN_HEADER)
+        )
     except AuthError as exc:
+        # The reason, never the token: enough to tell "no header arrived"
+        # from "the token was bad" when reading the function's logs.
+        logger.info("unauthenticated request: %s", exc)
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=str(exc)) from None
 
 

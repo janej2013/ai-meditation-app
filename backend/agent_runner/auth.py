@@ -8,6 +8,13 @@ authorizer did: signature against the pool's JWKS, issuer, audience,
 expiry. It then applies exactly the rules ``api/deps.py`` applies to the
 claims (ID token only, subject required). The two must not drift;
 tests/agent_runner/test_auth.py checks them against each other.
+
+The token travels in ``X-Id-Token``, not ``Authorization``: CloudFront's
+origin access control signs every request to the Function URL and, in
+doing so, *replaces* the viewer's Authorization header with its own SigV4
+one. A bearer token sent that way never reaches the function. The
+``Authorization: Bearer`` form is still accepted so a laptop can talk to
+uvicorn the ordinary way.
 """
 
 from __future__ import annotations
@@ -26,6 +33,10 @@ logger = logging.getLogger(__name__)
 # Cognito's marker for its two token types; access tokens carry neither
 # `aud` nor `email`, so only ID tokens are accepted (same as api/deps.py).
 ID_TOKEN_USE = "id"
+
+# The header the PWA sends the ID token in (see the module docstring for
+# why not Authorization).
+ID_TOKEN_HEADER = "x-id-token"
 _ALGORITHMS = ["RS256"]
 
 
@@ -67,13 +78,19 @@ class TokenVerifier:
             key_resolver=lambda token: client.get_signing_key_from_jwt(token).key,
         )
 
-    def verify(self, authorization: str | None) -> CurrentUser:
-        if not authorization:
-            raise AuthError("missing Authorization header")
-        scheme, _, token = authorization.partition(" ")
-        if scheme.lower() != "bearer" or not token.strip():
-            raise AuthError("Authorization must be a Bearer token")
-        token = token.strip()
+    def verify(self, authorization: str | None, id_token: str | None = None) -> CurrentUser:
+        """``id_token`` is the ``X-Id-Token`` header; ``authorization`` the
+        Bearer fallback. Through CloudFront only the former can arrive."""
+        token = (id_token or "").strip()
+        if not token:
+            if not authorization:
+                raise AuthError(f"missing {ID_TOKEN_HEADER} header")
+            scheme, _, bearer = authorization.partition(" ")
+            if scheme.lower() != "bearer" or not bearer.strip():
+                raise AuthError(
+                    f"send the ID token in {ID_TOKEN_HEADER} (or Authorization: Bearer)"
+                )
+            token = bearer.strip()
         try:
             key = self._key_resolver(token)
             claims = jwt.decode(

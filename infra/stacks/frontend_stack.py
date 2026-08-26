@@ -168,8 +168,11 @@ class FrontendStack(Stack):
         POST and DELETE must pass, and the reply is a server-sent event stream
         that must not be buffered -- hence no compression. The Host header is
         withheld because a Function URL validates it against its own domain;
-        everything else the viewer sends (Authorization, Content-Type, the
+        everything else the viewer sends (Content-Type, ``X-Id-Token``, the
         ``x-amz-content-sha256`` that SigV4-signed POSTs need) goes through.
+        Not Authorization: the OAC signature *replaces* it on the way to
+        the origin, which is why the runner reads the ID token from
+        ``X-Id-Token`` (agent_runner/auth.py).
         The 60 s read timeout is the ceiling, not the expectation: the runner
         heartbeats every 15 s while the model is silent.
         """
