@@ -159,11 +159,12 @@ curl -s -o /dev/null -w '%{http_code}\n' -X POST "$(aws cloudformation describe-
 
 With a Pro account's ID token, the sequence in README ("Calling the deployed API") opens a
 session, streams a turn and confirms a proposal; a minute later the job is DONE like any other.
-A 200 with `index.html` from any `/agent/*` request means the *origin* answered 403/404 and the
-site's SPA error mapping (403/404 → index.html) dressed it up; read `x-cache: Error from cloudfront`
-and the function's log group, not the status code. An empty log group means the Function URL
-refused CloudFront before Lambda ran (both `lambda:InvokeFunctionUrl` and `lambda:InvokeFunction`
-must be granted -- the frontend stack does both).
+If a `/agent/*` request ever comes back as a 200 `index.html` page, a distribution-wide error
+mapping has crept back in: SPA routing is a viewer-request rewrite on the site behaviour only,
+precisely so the runner's 401/403/404 reach the browser as themselves. When in doubt read
+`x-cache: Error from cloudfront` and the function's log group, not the status code. An empty log
+group means the Function URL refused CloudFront before Lambda ran (both `lambda:InvokeFunctionUrl`
+and `lambda:InvokeFunction` must be granted -- the frontend stack does both).
 
 Metrics land in CloudWatch under `Meditation/Agent` (`AgentTurns`, `TurnLatency`, token counts,
 `AgentTurnErrors` by reason) with one line of JSON per turn in the function's log group — ids and

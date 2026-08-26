@@ -121,18 +121,30 @@ def test_the_site_origin_uses_origin_access_control(template):
 # ----------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("code", [403, 404])
-def test_spa_routes_fall_back_to_index(template, code):
-    """Client-side routes have no S3 object; both codes must serve the shell.
-
-    403 is not optional: OAC deliberately withholds ListBucket, so S3 answers a
-    missing key with AccessDenied rather than NotFound.
-    """
+def test_spa_routes_are_rewritten_on_the_viewer_request(template):
+    """Client-side routes have no S3 object. They resolve to the shell by a
+    rewrite on the site behaviour, not by an error mapping: the latter is
+    distribution-wide and would turn the agent origin's 403/404 replies into
+    a 200 HTML page."""
     config = distribution(template, "PWA")
-    responses = {r["ErrorCode"]: r for r in config["CustomErrorResponses"]}
+    [association] = config["DefaultCacheBehavior"]["FunctionAssociations"]
 
-    assert responses[code]["ResponseCode"] == 200
-    assert responses[code]["ResponsePagePath"] == "/index.html"
+    assert association["EventType"] == "viewer-request"
+    template.resource_count_is("AWS::CloudFront::Function", 1)
+    [fn] = template.find_resources("AWS::CloudFront::Function").values()
+    code = fn["Properties"]["FunctionCode"]
+    assert "/index.html" in code and "indexOf('.')" in code
+    assert "CustomErrorResponses" not in config
+
+
+def test_the_agent_behaviour_has_no_rewrite():
+    """The runner's own 401/403/404 must reach the browser untouched."""
+    _, frontend = build_with_agent()
+    config = distribution(assertions.Template.from_stack(frontend), "PWA")
+    [agent] = [b for b in config["CacheBehaviors"] if b["PathPattern"] == "agent/*"]
+
+    assert "FunctionAssociations" not in agent
+    assert "CustomErrorResponses" not in config
 
 
 def test_the_site_serves_index_at_the_root(template):

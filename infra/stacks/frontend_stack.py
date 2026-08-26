@@ -42,10 +42,23 @@ from constructs import Construct
 # itself lives (CLAUDE.md).
 CERTIFICATE_REGION = "us-east-1"
 
-# SPA routing: the bucket has exactly one HTML file, and every client-side route
-# has to resolve to it. S3 answers a missing key with 403 when the caller lacks
-# ListBucket (which OAC deliberately does not grant), so both codes are mapped.
-SPA_ERROR_CODES = (403, 404)
+# SPA routing: the bucket has exactly one HTML file, and every client-side
+# route has to resolve to it. Done on the viewer request, for the site
+# behaviour only: a path with no extension is an app route and is rewritten
+# to /index.html before S3 is asked; a path with one is a file and 404s
+# honestly. The alternative -- mapping 403/404 to index.html -- is
+# distribution-wide, and would (did) dress the agent origin's 403s and 404s
+# up as a 200 page.
+SPA_ROUTER_CODE = """\
+function handler(event) {
+  var request = event.request;
+  var last = request.uri.split('/').pop();
+  if (last.indexOf('.') === -1) {
+    request.uri = '/index.html';
+  }
+  return request;
+}
+"""
 
 
 class FrontendStack(Stack):
@@ -97,20 +110,21 @@ class FrontendStack(Stack):
                 viewer_protocol_policy=cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
                 cache_policy=cloudfront.CachePolicy.CACHING_OPTIMIZED,
                 compress=True,
+                function_associations=[
+                    cloudfront.FunctionAssociation(
+                        function=cloudfront.Function(
+                            self,
+                            "SpaRouter",
+                            code=cloudfront.FunctionCode.from_inline(SPA_ROUTER_CODE),
+                            runtime=cloudfront.FunctionRuntime.JS_2_0,
+                            comment="App routes (no extension) resolve to index.html",
+                        ),
+                        event_type=cloudfront.FunctionEventType.VIEWER_REQUEST,
+                    )
+                ],
             ),
             additional_behaviors=additional_behaviors,
             default_root_object="index.html",
-            error_responses=[
-                cloudfront.ErrorResponse(
-                    http_status=code,
-                    response_http_status=200,
-                    response_page_path="/index.html",
-                    # Short: a genuinely missing asset should not be cached as a
-                    # page for long, and the SPA shell is cheap to re-fetch.
-                    ttl=Duration.seconds(10),
-                )
-                for code in SPA_ERROR_CODES
-            ],
             certificate=certificate,
             domain_names=domain_names,
             comment=f"meditation-{env_name} PWA",
