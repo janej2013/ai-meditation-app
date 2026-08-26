@@ -56,7 +56,7 @@ CONTEXT = $(if $(wildcard $(AUDIO_PUB_KEY)),-c audio_public_key_file="$(abspath 
           $(if $(AGENT_CONCURRENCY),-c agent_reserved_concurrency="$(AGENT_CONCURRENCY)")
 
 .DEFAULT_GOAL := help
-.PHONY: help check lint test synth layers diff deploy upload-bgm fe-check fe-lint fe-test fe-build \
+.PHONY: help check lint test synth layers diff deploy upload-bgm agent-evals fe-check fe-lint fe-test fe-build \
         e2e e2e-ui e2e-install e2e-auth smoke dev dev-agent
 
 help: ## List the targets
@@ -187,6 +187,15 @@ ifndef CONFIRM
 	@exit 1
 endif
 	cd frontend && npx playwright test --project=smoke
+
+agent-evals: ## The companion's eval cases on the real model -- SPENDS MONEY (Bedrock)
+ifndef CONFIRM
+	@echo "Refusing to run: this makes ~60 Bedrock calls against the configured model"
+	@echo "(about a cent on Nova Lite, tens of cents on Claude) using your AWS credentials."
+	@echo "Re-run as:  make agent-evals CONFIRM=1   [AGENT_MODEL_ID=...]"
+	@exit 1
+endif
+	cd backend && $(VENV)/python -m tests.agent.evals.run
 
 # ----------------------------------------------------------------------
 # Development

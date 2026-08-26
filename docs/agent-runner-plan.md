@@ -537,6 +537,22 @@ Pro 定价必须覆盖这一块加 20 次生成的 TTS/LLM 成本 —— 这是�
     `BaseCheckpointSaver`（两者是对比文档里最重的一节）；`BedrockMantleProvider`；自写 Runtime API
     streaming `bootstrap` 取代 LWA；可选的 `agent_runner_fargate/` 长活变体。
 
+### 11a. 实施记录（2026-08-25 → 08-26）
+
+自建路径 A1–A7 全部完成并合并（PR #27）。每步一行：完成日期，与本方案的偏离及原因。
+
+| 里程碑 | 完成 | 与方案的偏离 |
+|---|---|---|
+| A1 | 08-25 | 按方案。`Message` 块字段用 snake_case + `to_converse()` 映射到 wire 形（ruff N815）。 |
+| A2 | 08-25 | 按方案；dev 冒烟真跑一次生成（`agent.smoke`）。 |
+| A3 | 08-25 | **默认模型改为 Nova Lite**（方案写 Claude `au.` profile）：evals 19/20、危机用例全过、每会话约 $0.004；Claude 仍可用 `-c agent_model_id=` 切换。Nova 的 `<thinking>` 泄漏→ provider 里过滤；空回复→一次提示重试 + 固定文案。 |
+| A4 | 08-26 | 按方案（FastAPI + SSE + LWA + JWT + deadline + EMF）。 |
+| **A4b** | 08-26 | **新增里程碑：两段式 finalize**。Nova 在未经同意时直接终结（eval 三次一失），prompt 只能压到"偶尔"；按 §0.5 把决定权移回代码：工具只写 `pending_brief`，`POST …/confirm` 是唯一启动生成的请求。SSE 增 `proposal` 事件与 `done.awaiting_confirmation`。 |
+| A5 | 08-26 | 三处与方案不同，全部来自 dev 部署：① **reserved concurrency 改为 opt-in**（新账户 Lambda 配额 10，任何预留都被拒绝）；② **Function URL 双重授权**：OAC 需要 `lambda:InvokeFunctionUrl` 与 `lambda:InvokeFunction` 两者，CDK 只给前者（aws-cdk#35872）；③ **ID token 改走 `X-Id-Token`**：OAC 的 SigV4 覆盖了 `Authorization`。另：SPA 路由从分发级 error response 改为 viewer-request CloudFront Function，否则 runner 的 401/403 会被伪装成 200 `index.html`。 |
+| A6 | 08-26 | 前端**懒建会话**（首条消息才 `POST /sessions`，看一眼不占月配额）；`done` 增 `turns_left`；`GET /agent/memory` 增 `sessions_this_month`；Claude Design 的十张画板作为规格；`?engine=` 切换未做（等 L2）。审查后补：账户 pill 首次挂载即读、ambient 停止胜过加载竞争。 |
+| A7 | 08-26 | README、`CLAUDE.md`（约束 2 改为 confirm 路由；新增约束 10、11）、`docs/privacy.md`（放 docs，不进 PWA）、`deployment.md` 成本节、本表。 |
+| 未做 | — | `offer_choices`（第二阶段）；`BedrockMantleProvider`；guardrail（`guardrailConfig` 已留位，未配）。 |
+
 ---
 
 ## 12. 明确不做的事
@@ -560,9 +576,10 @@ Pro 定价必须覆盖这一块加 20 次生成的 TTS/LLM 成本 —— 这是�
 
 | 问题 | 决定 | 落到哪里 |
 |---|---|---|
-| Pro 的定义 | 新建 `plan_pro`（订阅，`plan="pro"`，credits 数待定价）；`monthly` 不动 | `api/products.py`；门禁 `plan == "pro"`（§5） |
-| LLM 层 | 先做 Converse + `LLMProvider` 抽象；Mantle 是第二阶段的第二个实现 | §3.1 |
+| Pro 的定义 | 新建 `plan_pro`（订阅，`plan="pro"`，20 credits/月，Stripe 产品与价格待建）；`monthly` 不动 | `api/products.py`；门禁 `plan == "pro"`（§5） |
+| LLM 层 | 先做 Converse + `LLMProvider` 抽象；Mantle 是第二阶段的第二个实现。**默认模型 Nova Lite**（08-25，A3 evals 拍板；§7） | §3.1、§11a |
+| 谁能花钱 | 模型只能提议；`POST …/confirm` 是唯一启动生成的请求（08-26，A4b） | §4、§5、§11a |
 | 常驻成本 | **零**：Lambda Function URL（response streaming）+ CloudFront OAC；不做 ECS / ALB / VPC | §1、§5、§6 |
 | 双引擎 | 自建为默认；LangChain/LangGraph 作第 1、2 层的第二实现，共用工具/prompt/数据模型/harness，契约测试保证同构 | §0.5、§3.4、§11 L1–L3 |
 
-下一步：里程碑 A1 —— agent 包骨架、FakeProvider、`db.py` 新方法与 moto 测试（§11）。
+下一步：L1 —— LangGraph 引擎（§11 第 8 条），以已合并的自建路径为契约测试的参照。

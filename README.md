@@ -11,7 +11,9 @@ Region `ap-southeast-2` (Sydney). See [CLAUDE.md](CLAUDE.md) for the full stack 
 
 All six milestones complete: signup to playback runs end to end — Cognito
 auth, Bedrock scripts, Volcano/Polly narration, Stripe billing, and a React
-PWA that mixes background music in the browser.
+PWA that mixes background music in the browser. On top of that, the companion
+agent (a Pro feature: a conversation that ends in a meditation) is built and
+verified on dev — see *Architecture — the companion agent*.
 
 | Milestone | Scope | Status |
 |---|---|---|
@@ -21,6 +23,19 @@ PWA that mixes background music in the browser.
 | 4 | Volcano TTS provider | done |
 | 5 | `billing_stack` (Stripe) | done |
 | 6 | `frontend_stack` + PWA | done |
+
+The companion agent has its own sequence (`docs/agent-runner-plan.md` §11):
+
+| Milestone | Scope | Status |
+|---|---|---|
+| A1 | engine contracts, native loop, checkpoints, ledger methods | done |
+| A2 | the three tools, `shared/jobs.start_generation()` | done |
+| A3 | Bedrock Converse provider, system prompt, CLI, evals | done |
+| A4 / A4b | harness (FastAPI + SSE on Lambda Web Adapter); two-step finalize | done |
+| A5 | `agent_stack` + the site distribution's `agent/*` behaviour | done |
+| A6 | PWA: `/companion`, memory, Pro entry, `plan_pro` | done |
+| A7 | this documentation, `CLAUDE.md`, privacy note, cost record | done |
+| L1–L3 | LangGraph second engine, second function, comparison note | next |
 
 ## Known gaps
 
@@ -70,6 +85,42 @@ Deliberate deferrals, recorded so they read as decisions rather than oversights.
   Closing it properly means co-locating the bucket and its distribution in one stack, which trades
   the wildcard for a weaker separation of concerns. Worth revisiting if the audio bucket ever holds
   anything a leak would be expensive.
+
+- **`plan_pro` has no Stripe product yet.** `backend/api/products.py` carries the plan with a
+  placeholder price id, so the Pro card on Plans opens a checkout that Stripe will refuse until
+  the product exists and `STRIPE_PRODUCTS` names it (*Architecture — billing*). The gate on the
+  companion (`plan == "pro"`) is real today; a Pro account is made by hand on dev.
+
+- **The agent's reserved concurrency is off until the account's Lambda quota is raised.** Lambda
+  refuses a reservation that leaves fewer than 10 unreserved executions, and a fresh account's
+  entire quota is 10 — so the cost ceiling is the account quota itself for now, and
+  `AGENT_CONCURRENCY=10` turns the explicit ceiling on later (`docs/deployment.md`).
+
+- **One eval case is accepted as failing on Nova Lite.** `no-history-when-memory-exists` asks the
+  model not to read the session history when the memory block already answers the question; Nova
+  Lite reads it anyway about one run in three. It costs a tool round, not correctness, and the
+  cheaper model won on every case that matters (the crisis set is 100%). The evals run by hand and
+  are not in CI, because they spend Bedrock money — `backend/tests/agent/evals/run.py`.
+
+- **Per-session token usage is recorded but not yet used for pricing.** The session header's
+  `usage_*` counters and the `Meditation/Agent` metrics exist so that Pro's price can be set from
+  real numbers once there are some (`docs/deployment.md`, *Cost*); the estimates there are from the
+  plan's assumptions, not from traffic.
+
+- **The LangGraph engine (L1) is not started.** The engine contract, the tool registry and the
+  checkpoint format were shaped for a second implementation; `AGENT_ENGINE=langgraph` is refused
+  at start-up until it exists.
+
+- **A reload on the waiting screen can show the pre-freeze balance in the account pill.** The pill
+  reads the account once on whatever route it opens on (so a reload on `/companion` no longer says
+  "Sign in") and otherwise avoids the waiting screen, where the read races the freeze; the one
+  case that combines the two — reloading `/generating/…` — shows the old number until the player
+  re-reads it. Recorded from the code review rather than fixed: the alternative was a shared
+  account store, which is more machinery than the display is worth.
+
+- **There is no in-app privacy page.** What the product keeps and for how long is written down in
+  `docs/privacy.md`, from the code; whether it becomes a `/privacy` route in the PWA is a product
+  decision still open.
 
 - **The prototype's passwordless sign-in and player captions stay aspirational.** Cognito's
   standard flow needs a password (the signup screen says so honestly), and there is no caption
@@ -575,6 +626,112 @@ The design note is `docs/agent-runner-plan.md`; the short version:
   passing, about a cent per full eval run — `backend/tests/agent/evals/`). Swap in a Claude profile
   with `-c agent_model_id=au.anthropic...`; a profile that could route offshore fails the synth.
 
+### The conversation contract
+
+Every route is under the site domain's `/agent` prefix and wants the Cognito ID token in
+`X-Id-Token` (`agent_runner/auth.py`; a `Bearer` header still works against a local uvicorn).
+POST and DELETE requests must carry `x-amz-content-sha256` of the body (the empty-body digest
+for no body) — CloudFront's origin access control signs the request to the Function URL and
+refuses to without the viewer's payload hash. `frontend/src/api/agent.ts` does both in one place.
+
+| Route | Does | Refuses with |
+|---|---|---|
+| `POST /agent/sessions` | opens a session (201) | 403 `plan_required`, 429 `quota_exhausted`, 503 `account_unavailable` |
+| `POST /agent/sessions/{id}/turns` | one turn, streamed as SSE | 404, 409 `busy_or_closed` / `session_exhausted` |
+| `GET /agent/sessions/{id}` | the transcript plus `pending` (the brief awaiting confirmation) | 404 |
+| `POST /agent/sessions/{id}/confirm` | starts the generation — **the one request that spends a credit** — 200 `{job_id}` | 409 `busy_or_closed` / `nothing_to_confirm` / `job_in_flight`, 402 `no_credit`, 503 `start_failed` |
+| `POST /agent/sessions/{id}/abandon` | closes it, nothing charged (204) | 409 `already_finalized` |
+| `GET` / `DELETE /agent/memory` | what it remembers, with the month's session count / forget everything (204) | — |
+
+A turn's stream (`agent_runner/sse.py`) is `tool {name}` as each tool runs, `proposal
+{duration_minutes}` when the model has put a brief on the session, `delta {text}` as the reply
+streams, then `done {turn, job_id, awaiting_confirmation, turns_left}`; `error {code, retryable}`
+replaces `done` when the model could not answer, and a `: ping` comment every 15 s keeps the
+connection alive through a slow tool. Confirming is deliberately not part of the stream: it is
+its own request, so the tap that spends money is the listener's and never the model's.
+
+**Why re-sending is always safe.** The session header carries `turn` (committed turns) and
+`in_flight` (the invocation running one). A turn *claims* the header (`in_flight` absent →
+set), runs, and *commits* (`turn == expected` → `turn + 1`, checkpoint written, claim released)
+or *releases* on failure; `confirm` takes the same claim but does not advance `turn`. A second
+request while one is running gets 409 `busy_or_closed`; a request after a crash finds a claim
+older than 180 s and takes it over (`AGENT_IN_FLIGHT_TIMEOUT_SECONDS`); a retry of a turn that
+never committed simply runs again from the same checkpoint. `agent_runner/turns.py` and the
+"Companion agent" section of `shared/db.py` are the whole mechanism — four conditional writes.
+
+### What is stored, and for how long
+
+| Item (`PK = USER#<sub>`) | Holds | Lifetime |
+|---|---|---|
+| `AGENT#<session>` | status, `turn`, `in_flight`, engine, `usage_*` token counters, `pending_brief` / `pending_duration_minutes`, `job_id` | 30 days (`AGENT_SESSION_TTL_DAYS`) |
+| `AGENT#<session>#T<nnnn>` | one turn: the listener's words, the assistant content and every tool round in Converse wire form — the transcript, and the only copy of it | 30 days, with its session |
+| `MEMORY` | the insights `save_user_insight` recorded (a short phrase each, with the session that said it) | until the listener clears it (`DELETE /agent/memory`, "Forget everything" on Account) |
+| `AGENTQUOTA#<yyyy-mm>` | the month's session count | 62 days (`AGENT_QUOTA_TTL_DAYS`) |
+
+Constants are in `shared/models.py`; every write is in `shared/db.py`. The brief the listener
+confirms becomes the job's `mood_text`, exactly as a typed brief would (`shared/jobs.py`), so a
+companion meditation is an ordinary JOB item afterwards — a dreamscape like any other.
+
+### Budget and gate
+
+A conversation is free to have, so its length is bounded in code rather than by the ledger
+(`agent/budget.py`): 12 turns a session, at most 4 model round-trips within a turn, `maxTokens`
+4096 (`agent/native/llm/converse.py`). From the ninth turn the user message carries a converge
+hint; on the twelfth the model is not asked but told, through a forced tool choice, to propose.
+A session that runs out with a proposal pending stays open for the confirm; without one it is
+abandoned. Per account: 30 sessions a calendar month (`AGENT_SESSIONS_PER_MONTH`, the
+`AGENTQUOTA` item), and only `plan == "pro"` may open one — the free plan meets the locked entry
+on Home and the Pro screen on `/companion`, both of which lead to Plans. A local runner can admit
+the free test accounts with `AGENT_ALLOWED_PLANS=pro,free` (`agent_runner/settings.py`).
+
+### The listener's words stay the listener's
+
+The transcript and the insights are user content in the same sense as `mood_text` (constraint
+7). They are read back into the prompt of that listener's own sessions and nowhere else: not
+into the state machine's payload (the brief lands on the JOB item, the execution input carries
+ids), not into a log line — the runner logs `session_id`, `turn`, tool names, counts and the
+model's stop reason, and the one line of metrics per turn (`Meditation/Agent`: `AgentTurns`,
+`TurnLatency`, `InputTokens`, `OutputTokens`, `CacheReadTokens`, `ToolErrors`,
+`AgentTurnErrors`, `AgentConfirmations`, dimension `Engine`) is numbers only. The system prompt
+(`agent/prompt.py`) tells the model not to repeat personal details, not to note how the listener
+feels today, and to keep them out of the brief. When a message reads as a crisis the model
+answers with a fixed text — Lifeline 13 11 14, Beyond Blue, 000 — that the PWA recognises and
+sets apart with tappable numbers, and no proposal follows it.
+
+The agent introduces **no new secret**: the function reaches Bedrock, the table and the state
+machine with its execution role, and verifies tokens against the user pool's public JWKS.
+Everything user-facing rides on the site distribution's certificate; the Function URL is IAM-only
+and answers nobody but CloudFront.
+
+### The PWA side
+
+`/companion` is one hook, `frontend/src/companion/useCompanion.ts`: the session is created on the
+first message rather than on arrival (looking costs no monthly session), its id sits in
+`sessionStorage` so a reload resumes from the transcript, a new message withdraws a pending
+proposal (the runner clears it on the next claim, so the card and the server agree), and the
+proposal card's *Start the meditation* is the only path to `confirm` — it starts the ambient
+track inside the tap, as Home's Begin does, and lands on the same generating screen. The SSE
+parser and the payload hash have their own units (`sse.ts`, `sha256.ts`); the Playwright spec
+drives a real streamed turn against a stubbed runner, seeding the token through
+`sessionStorage['drift:e2e-id-token']`, a seam that exists in dev builds only
+(`auth/cognito.ts`).
+
+### Where to read
+
+| File | Look for |
+|---|---|
+| `backend/agent/native/llm/converse.py` | `converse_stream` parsing: fragmented tool-input JSON reassembled per block, `cachePoint` placed per model family, Nova's thinking tags filtered, retries only before the first event |
+| `backend/agent/native/loop.py` | the loop itself: tool rounds, the per-turn iteration cap, the deadline check before each model call, the empty-reply guard |
+| `backend/agent/checkpoint.py` | how a turn becomes a T-item and how the next turn rebuilds the history byte-for-byte |
+| `backend/agent_runner/turns.py` + `shared/db.py` (Companion agent) | the fencing token: claim / commit / release / confirm as conditional writes |
+| `backend/agent/tools/finalize.py` + `agent_runner/turns.py::confirm_session` | two-step spend: the tool writes `pending_brief`, only the confirm route calls `start_generation()` |
+| `backend/agent/prompt.py` + `backend/tests/agent/evals/` | the prompt's boundaries and the cases that hold them |
+| `backend/agent_runner/sse.py` | SSE over Lambda response streaming: the heartbeat, the error event, why `done` is separate from `confirm` |
+| `infra/stacks/agent_stack.py` + `frontend_stack.py` | Function URL in `RESPONSE_STREAM` behind an OAC behaviour; the dual-auth grant CDK omits; SPA routing as a viewer-request function so `/agent/*` errors survive |
+| `frontend/src/companion/useCompanion.ts` | the client state machine, including what a reload and a withdrawn proposal do |
+
+Privacy, from the user's side: `docs/privacy.md`. Running costs: `docs/deployment.md`, *Cost*.
+
 ## Architecture — billing
 
 `infra/stacks/billing_stack.py` owns no Lambda and no HTTP API. It hangs two
@@ -869,6 +1026,26 @@ cd infra && npm run synth -- -c env=prod -c allowed_origins=https://app.example.
 cd infra && npm run diff
 ```
 
+The companion agent adds a few, split by whether they cost money:
+
+```bash
+make dev-agent            # the runner on :8080 against dev's table and state machine -- calls Bedrock for real
+make e2e                  # Playwright against stubbed APIs: no AWS, no cost, no .env.local needed
+make agent-evals CONFIRM=1   # the prompt's eval cases on the real model -- SPENDS MONEY
+cd backend && python -m agent.cli        # talk to it in a terminal (Bedrock cost; confirms with y/N)
+cd backend && python -m agent.smoke      # a scripted conversation that starts a real job (a credit)
+```
+
+`make dev-agent` reads `TABLE_NAME`, `STATE_MACHINE_ARN`, `COGNITO_USER_POOL_ID`,
+`COGNITO_CLIENT_ID` and `AWS_REGION` from the environment and refuses to start without them
+(`agent_runner/settings.py`); `AGENT_MODEL_ID`, `AGENT_ALLOWED_PLANS=pro,free` and
+`AGENT_SESSIONS_PER_MONTH` are the optional knobs. Everything here except `make e2e` talks to
+Bedrock or the dev stack and is **human-run**, like a deploy; `make e2e` works on a clean clone
+because `playwright.config.ts` gives the dev server a fixed `VITE_API_URL` for `page.route()` to
+intercept. The eval table prints one row per case — pass, turns, whether it proposed, tokens
+in/out, cache hit rate, latency, the reasons — and exits non-zero only on the hard cases; paste
+it into any PR that changes the prompt.
+
 `allowed_origins` is required for `env=prod` and synth fails without it — falling back to a
 localhost CORS origin in a real deployment would be worse than a loud error. Dev defaults to
 `http://localhost:5173` (Vite).
@@ -940,6 +1117,8 @@ backend/
   pyproject.toml  installable packages: shared, agent, agent_runner, api, functions.*
   agent/          the companion: contract, tools, prompt, native engine (docs/agent-runner-plan.md)
   agent_runner/   its harness: FastAPI + SSE on Lambda Web Adapter (container)
+                  tests/agent/ (engine, tools, evals/ -- the hand-run cases) and
+                  tests/agent_runner/ (routes, turns, SSE) cover them
   shared/         models.py, db.py (credit ledger), pipeline.py (step
                   contracts), tts/ (provider abstraction)
   api/            FastAPI app + Mangum handler, Dockerfile
@@ -951,6 +1130,14 @@ backend/
   tests/          pytest + moto
 layers/           generated Lambda layers (gitignored)
 assets/bgm/       background music synced to the audio bucket, mixed in-browser
+frontend/
+  src/companion/     /companion: the hook, the thread, the proposal card, SSE parsing
+  src/api/agent.ts   the runner client (X-Id-Token, payload hash, streamed turns)
+  e2e/               Playwright: stubbed by default, smoke on request
+docs/
+  agent-runner-plan.md   the companion's design, with the implementation record
+  privacy.md             what the product keeps, for how long, and how to clear it
+  deployment.md          per-environment runbook, including the agent's cost
 scripts/
   get_token.py       prints a Cognito ID token for curl
   build_layers.sh    builds the shared layer (ffmpeg on request)
