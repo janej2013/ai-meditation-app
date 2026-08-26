@@ -19,10 +19,8 @@ import json
 import logging
 import os
 import random
-import re
 from collections.abc import AsyncIterator, Callable, Iterable, Iterator
 from dataclasses import dataclass, field
-from enum import StrEnum
 from typing import Any
 
 import boto3
@@ -44,20 +42,21 @@ from agent.contracts import (
     ToolUseStart,
     Usage,
 )
+from agent.model_ids import (  # noqa: F401 -- re-exported; the decisions moved out with L1
+    DEFAULT_AGENT_MODEL_ID,
+    MODEL_ID_ENV,
+    ModelFamily,
+    model_family,
+    model_id_from_env,
+)
+from agent.stop_reasons import STOP_REASONS
+from agent.thinking import ThinkingFilter
 from shared.pipeline import BEDROCK_TRANSIENT_CODES, BedrockTransientError
 
 logger = logging.getLogger(__name__)
 
-# Known available on demand in ap-southeast-2 (the pipeline runs on it), so
-# the CLI works before anyone has looked up a Claude profile id.
-DEFAULT_AGENT_MODEL_ID = "amazon.nova-lite-v1:0"
-MODEL_ID_ENV = "AGENT_MODEL_ID"
 GUARDRAIL_ID_ENV = "AGENT_GUARDRAIL_ID"
 GUARDRAIL_VERSION_ENV = "AGENT_GUARDRAIL_VERSION"
-
-# Cross-region profiles that may route outside Australia. Refused outright
-# rather than warned about: residency is a product promise.
-_FORBIDDEN_PROFILE_PREFIXES = ("us.", "eu.", "apac.", "global.", "jp.", "in.")
 
 # Streamed failures arrive as exception events named in camelCase
 # ("throttlingException"); the pipeline's list is the PascalCase API form.
@@ -65,41 +64,17 @@ _FORBIDDEN_PROFILE_PREFIXES = ("us.", "eu.", "apac.", "global.", "jp.", "in.")
 _STREAM_TRANSIENT_CODES = frozenset({*BEDROCK_TRANSIENT_CODES, "ModelStreamErrorException"})
 
 _CACHE_POINT = {"cachePoint": {"type": "default"}}
-
-_STOP_REASONS: dict[str, StopReason] = {
-    "end_turn": "end_turn",
-    "tool_use": "tool_use",
-    "max_tokens": "max_tokens",
-    "stop_sequence": "end_turn",
-    "guardrail_intervened": "refusal",
-    "content_filtered": "refusal",
-}
-
-
-class ModelFamily(StrEnum):
-    CLAUDE = "claude"
-    NOVA = "nova"
+# The table itself lives in agent.stop_reasons, shared with the LangGraph
+# engine; this name is what the tests and older callers know it by.
+_STOP_REASONS: dict[str, StopReason] = STOP_REASONS
+# Likewise the filter: agent.thinking is the one implementation.
+_ThinkingFilter = ThinkingFilter
 
 
 class AgentProviderError(Exception):
     """A model call that will not succeed by retrying: a permanent Bedrock
     error, retries exhausted, or a stream the parser could not make sense
     of. The harness turns it into an error event; the turn is not committed."""
-
-
-def model_family(model_id: str) -> ModelFamily:
-    """Which request dialect a model id needs. The two families differ in
-    where a cache breakpoint may sit."""
-    if model_id.startswith(_FORBIDDEN_PROFILE_PREFIXES):
-        raise ValueError(
-            f"{model_id!r} is a cross-region profile that may leave Australia; "
-            "use an au. profile or a bare in-region model id"
-        )
-    if "anthropic." in model_id:
-        return ModelFamily.CLAUDE
-    if "amazon.nova" in model_id:
-        return ModelFamily.NOVA
-    raise ValueError(f"unsupported model family for {model_id!r}")
 
 
 # ----------------------------------------------------------------------
@@ -277,66 +252,6 @@ class StreamParser:
         return parsed
 
 
-# Nova's tool-use template makes the model narrate its reasoning inside
-# these tags before answering. It is not user-facing text and must not
-# reach the client or the checkpoint; Claude never emits them.
-_THINKING_OPEN = "<thinking>"
-_THINKING_CLOSE = "</thinking>"
-_THINKING_RE = re.compile(r"<thinking>.*?</thinking>\s*", re.DOTALL)
-
-
-class _ThinkingFilter:
-    """Drops ``<thinking>...</thinking>`` from streamed text, safely across
-    delta boundaries: a tag may arrive split over several chunks, so the
-    filter holds back any suffix that could be the start of one."""
-
-    def __init__(self) -> None:
-        self._inside = False
-        self._pending = ""
-        self._emitted_visible = False
-
-    def delta(self, chunk: str) -> str:
-        buf = self._pending + chunk
-        self._pending = ""
-        out: list[str] = []
-        while buf:
-            if self._inside:
-                end = buf.find(_THINKING_CLOSE)
-                if end == -1:
-                    self._pending = _partial_suffix(buf, _THINKING_CLOSE)
-                    break
-                buf = buf[end + len(_THINKING_CLOSE) :]
-                self._inside = False
-                continue
-            start = buf.find(_THINKING_OPEN)
-            if start == -1:
-                self._pending = _partial_suffix(buf, _THINKING_OPEN)
-                out.append(buf[: len(buf) - len(self._pending)])
-                break
-            out.append(buf[:start])
-            buf = buf[start + len(_THINKING_OPEN) :]
-            self._inside = True
-        text = "".join(out)
-        if not self._emitted_visible:
-            # The reply proper starts after the tags; drop the whitespace
-            # that separated them from it.
-            text = text.lstrip()
-            self._emitted_visible = bool(text)
-        return text
-
-    @staticmethod
-    def clean(text: str) -> str:
-        return _THINKING_RE.sub("", text).strip()
-
-
-def _partial_suffix(buf: str, tag: str) -> str:
-    """The longest suffix of ``buf`` that is a proper prefix of ``tag``."""
-    for size in range(min(len(tag) - 1, len(buf)), 0, -1):
-        if tag.startswith(buf[-size:]):
-            return buf[-size:]
-    return ""
-
-
 def parse_stream(events: Iterable[dict[str, Any]]) -> Iterator[LLMEvent]:
     """Whole-stream form of ``StreamParser``, for tests and offline replay."""
     parser = StreamParser()
@@ -422,7 +337,7 @@ class BedrockConverseProvider:
 
     @classmethod
     def from_env(cls) -> BedrockConverseProvider:
-        model_id = os.environ.get(MODEL_ID_ENV) or DEFAULT_AGENT_MODEL_ID
+        model_id = model_id_from_env()
         guardrail_id = os.environ.get(GUARDRAIL_ID_ENV)
         guardrail = (
             (guardrail_id, os.environ.get(GUARDRAIL_VERSION_ENV) or "DRAFT")

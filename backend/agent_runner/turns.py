@@ -120,8 +120,6 @@ def build_engine(
 ) -> AgentEngine:
     """The engine for one request. Cheap: the provider is the only thing
     worth reusing, and it is passed in."""
-    if engine_name != "native":
-        raise NotImplementedError("the langgraph engine arrives with milestone L1")
     context = ToolContext(
         user_id=user_id,
         session_id=session_id,
@@ -129,6 +127,12 @@ def build_engine(
         start_generation=partial(start_generation, store, sfn),
         **({"now": clock} if clock else {}),
     )
+    if engine_name == "langgraph":
+        # Imported here, not at module level: the framework is an optional
+        # dependency, and a native deployment never needs it on the path.
+        from agent.langgraph.engine import LangGraphEngine
+
+        return LangGraphEngine(provider, default_registry(), context)
     return NativeEngine(provider, default_registry(), context)
 
 

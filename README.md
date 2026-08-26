@@ -712,6 +712,25 @@ drives a real streamed turn against a stubbed runner, seeding the token through
 `sessionStorage['drift:e2e-id-token']`, a seam that exists in dev builds only
 (`auth/cognito.ts`).
 
+### Two engines, one contract
+
+The loop exists twice, on purpose (plan §3.4): the hand-built `NativeEngine` (default) and
+`agent/langgraph/` — LangChain messages, a LangGraph `StateGraph` with an `agent` node, a `tools`
+node and two conditional edges, driven through `astream_events`. Everything that is a *decision*
+lives once and both import it: the tools and their schemas, the system prompt and every hint,
+the turn and iteration budgets, the stop-reason map, Nova's thinking filter, the residency rule
+(`agent/model_ids.py`, `agent/stop_reasons.py`, `agent/thinking.py`). Everything that is a
+*mechanism* — how the model is called, how the stream is parsed, how a round of tools is run —
+is written twice. `tests/agent/test_engine_contract.py` runs 24 scripted scenarios through both
+and asserts the `TurnResult` field by field, the events in order, and the requests the model
+saw; the checkpoint written for a turn is the same item whichever engine produced it, so a
+session could switch engines between turns (it does not: `AGENT_ENGINE=native|langgraph` is per
+deployment, and the session header records which). The framework costs 163 MB of image
+(282 → 445 MB) and is an optional extra (`agent-langgraph`) that only the runner image and CI
+install. Two places where the framework's own road was declined because the bytes would have
+differed — `StructuredTool` strips Pydantic titles from the schema, `ToolNode` words its errors
+its own way — are kept on record in the tests for the comparison note (milestone L3).
+
 ### Where to read
 
 | File | Look for |
@@ -719,6 +738,7 @@ drives a real streamed turn against a stubbed runner, seeding the token through
 | `backend/agent/native/llm/converse.py` | `converse_stream` parsing: fragmented tool-input JSON reassembled per block, `cachePoint` placed per model family, Nova's thinking tags filtered, retries only before the first event |
 | `backend/agent/native/loop.py` | the loop itself: tool rounds, the per-turn iteration cap, the deadline check before each model call, the empty-reply guard |
 | `backend/agent/checkpoint.py` | how a turn becomes a T-item and how the next turn rebuilds the history byte-for-byte |
+| `backend/agent/langgraph/graph.py` + `tests/agent/test_engine_contract.py` | the same turn as a graph, and the 24 scenarios that hold both engines to one answer |
 | `backend/agent_runner/turns.py` + `shared/db.py` (Companion agent) | the fencing token: claim / commit / release / confirm as conditional writes |
 | `backend/agent/tools/finalize.py` + `agent_runner/turns.py::confirm_session` | two-step spend: the tool writes `pending_brief`, only the confirm route calls `start_generation()` |
 | `backend/agent/prompt.py` + `backend/tests/agent/evals/` | the prompt's boundaries and the cases that hold them |

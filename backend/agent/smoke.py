@@ -51,8 +51,7 @@ from agent.contracts import (
     TurnResult,
     Usage,
 )
-from agent.local_harness import DryRunStepFunctions, run_conversation
-from agent.native.llm.converse import BedrockConverseProvider
+from agent.local_harness import DryRunStepFunctions, engine_for, run_conversation
 from agent.native.loop import NativeEngine
 from agent.tools.default import default_registry
 from agent.tools.registry import ToolContext
@@ -148,7 +147,19 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="use the real model (AGENT_MODEL_ID) instead of the scripted stand-in",
     )
+    parser.add_argument(
+        "--engine",
+        choices=("native", "langgraph"),
+        default="native",
+        help="which engine runs the turns (langgraph needs --bedrock: the stand-in is a provider)",
+    )
     args = parser.parse_args(argv)
+    if args.engine == "langgraph" and not args.bedrock:
+        print(
+            "--engine langgraph needs --bedrock: the scripted stand-in is native-only",
+            file=sys.stderr,
+        )
+        return 2
 
     for var in ("TABLE_NAME", "STATE_MACHINE_ARN"):
         if not os.environ.get(var):
@@ -166,16 +177,21 @@ def main(argv: list[str] | None = None) -> int:
         store=store,
         start_generation=partial(start_generation, store, sfn),
     )
-    provider: Any = (
-        BedrockConverseProvider.from_env() if args.bedrock else ScriptedProvider(args.duration)
-    )
-    model_id = provider.model_id if args.bedrock else "scripted"
-    engine = NativeEngine(provider, default_registry(), context)
+    engine: Any
+    if args.bedrock:
+        engine, model_id = engine_for(args.engine, context)
+    else:
+        engine, model_id = (
+            NativeEngine(ScriptedProvider(args.duration), default_registry(), context),
+            "scripted",
+        )
 
-    if not store.create_agent_session(args.user_id, session_id, engine="native", model_id=model_id):
+    if not store.create_agent_session(
+        args.user_id, session_id, engine=args.engine, model_id=model_id
+    ):
         print("could not create the session", file=sys.stderr)
         return 1
-    print(f"session {session_id} model {model_id}")
+    print(f"session {session_id} engine {args.engine} model {model_id}")
 
     def report(turn: int, result: TurnResult) -> None:
         job_id = result.finalized.job_id if result.finalized else None
@@ -193,6 +209,7 @@ def main(argv: list[str] | None = None) -> int:
         # what the script drives towards.
         confirm=lambda _minutes: True,
         sfn=sfn,
+        engine_name=args.engine,
     )
     if job_id:
         print(json.dumps({"session_id": session_id, "job_id": job_id}))

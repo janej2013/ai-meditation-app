@@ -32,6 +32,14 @@ agent-runner = [
     "uvicorn>=0.30,<1",
     "PyJWT[crypto]>=2.9,<3",
 ]
+# The second engine (agent/langgraph/, milestone L1). Optional: the native
+# engine is the default and complete without it. Installed into the agent
+# image and into CI's test environment, never into the shared layer.
+agent-langgraph = [
+    "langchain-core>=0.3,<0.4",
+    "langchain-aws>=0.2,<0.3",
+    "langgraph>=0.6,<0.7",
+]
 dev = [
     "pytest>=8.0",
     # tests/agent_runner signs its own ID tokens.
@@ -54,6 +62,7 @@ packages = [
     "agent.tools",
     "agent.native",
     "agent.native.llm",
+    "agent.langgraph",
     "agent_runner",
     "api",
     "api.routers",

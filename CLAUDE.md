@@ -41,7 +41,8 @@ backend/
                     describe_picture (picture machine, pre-job)
                     mix_audio/ is retained but NOT deployed (browser mixes
                     instead); init_user/ is a Cognito trigger, not a task
-  agent/            Companion agent: contract, tools, prompt, native engine (docs/agent-runner-plan.md)
+  agent/            Companion agent: contract, tools, prompt, native engine (docs/agent-runner-plan.md);
+                    langgraph/ is the second engine over the same contract (optional extra `agent-langgraph`)
   agent_runner/     The agent's harness: FastAPI + SSE on Lambda Web Adapter (container)
   shared/           Shared package (Lambda layer): models.py, db.py, tts/
   tests/
@@ -104,7 +105,7 @@ Run lint + tests + synth before declaring any backend/infra task complete.
 Human-only, because they call Bedrock or the dev stack for real: `make dev-agent` (a local
 runner, but against dev's table, state machine and Bedrock), `python -m agent.cli`,
 `python -m agent.smoke` (starts a real job — a credit), `make agent-evals CONFIRM=1`, `make smoke
-CONFIRM=1`. `make e2e` is stubbed and free; Claude may run it.
+CONFIRM=1` — with `--engine langgraph` just the same. `make e2e` is stubbed and free; Claude may run it.
 
 ## Milestones (work in this order; do not skip ahead)
 

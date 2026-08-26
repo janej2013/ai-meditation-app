@@ -29,10 +29,7 @@ from functools import partial
 import boto3
 
 from agent.contracts import AgentEvent, TextDelta, ToolStarted, TurnResult
-from agent.local_harness import DryRunStepFunctions, run_conversation
-from agent.native.llm.converse import BedrockConverseProvider
-from agent.native.loop import NativeEngine
-from agent.tools.default import default_registry
+from agent.local_harness import DryRunStepFunctions, engine_for, run_conversation
 from agent.tools.registry import ToolContext
 from shared.db import EntitlementStore
 from shared.jobs import start_generation
@@ -71,6 +68,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--user-id", required=True, help="Cognito sub of a dev test user")
     parser.add_argument("--model-id", help="overrides AGENT_MODEL_ID")
     parser.add_argument("--dry-run", action="store_true", help="write rows, start no execution")
+    parser.add_argument(
+        "--engine",
+        choices=("native", "langgraph"),
+        default="native",
+        help="which engine runs the turn",
+    )
     args = parser.parse_args(argv)
 
     for var in ("TABLE_NAME", "STATE_MACHINE_ARN"):
@@ -78,11 +81,6 @@ def main(argv: list[str] | None = None) -> int:
             print(f"{var} is not set", file=sys.stderr)
             return 2
 
-    provider = (
-        BedrockConverseProvider(args.model_id)
-        if args.model_id
-        else BedrockConverseProvider.from_env()
-    )
     store = EntitlementStore()
     sfn = DryRunStepFunctions() if args.dry_run else boto3.client("stepfunctions")
     session_id = str(uuid.uuid4())
@@ -92,14 +90,14 @@ def main(argv: list[str] | None = None) -> int:
         store=store,
         start_generation=partial(start_generation, store, sfn),
     )
-    engine = NativeEngine(provider, default_registry(), context)
+    engine, model_id = engine_for(args.engine, context, model_id=args.model_id)
 
     if not store.create_agent_session(
-        args.user_id, session_id, engine="native", model_id=provider.model_id
+        args.user_id, session_id, engine=args.engine, model_id=model_id
     ):
         print("could not create the session", file=sys.stderr)
         return 1
-    print(f"session {session_id} model {provider.model_id} (type {QUIT} to leave)")
+    print(f"session {session_id} engine {args.engine} model {model_id} (type {QUIT} to leave)")
 
     def report(turn: int, result: TurnResult) -> None:
         u = result.usage
@@ -122,6 +120,7 @@ def main(argv: list[str] | None = None) -> int:
         on_turn=report,
         confirm=ask_to_start,
         sfn=sfn,
+        engine_name=args.engine,
     )
     if job_id:
         print(f"\nstarted: job {job_id}")

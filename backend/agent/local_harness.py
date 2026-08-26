@@ -13,6 +13,10 @@ from collections.abc import Callable, Iterable
 from typing import Any
 
 from agent.contracts import AgentEngine, Deadline, Emit, TurnResult
+from agent.native.llm.converse import BedrockConverseProvider
+from agent.native.loop import NativeEngine
+from agent.tools.default import default_registry
+from agent.tools.registry import ToolContext
 from agent_runner.turns import (
     ConfirmRefusedError,
     SessionExhaustedError,
@@ -21,6 +25,7 @@ from agent_runner.turns import (
     execute_turn,
 )
 from shared.db import EntitlementStore
+from shared.models import AgentEngineName
 
 # What a turn may take locally: the Lambda budget (120 s) less a margin,
 # so local behaviour matches what the runner enforces.
@@ -35,6 +40,20 @@ class DryRunStepFunctions:
         return {"executionArn": "dry-run"}
 
 
+def engine_for(
+    engine_name: AgentEngineName, context: ToolContext, *, model_id: str | None = None
+) -> tuple[AgentEngine, str]:
+    """The engine a local driver asked for, and the model id it runs on.
+    ``model_id`` overrides ``AGENT_MODEL_ID`` for a session of debugging."""
+    if engine_name == "langgraph":
+        from agent.langgraph.engine import LangGraphEngine, chat_model_from_env
+
+        model = chat_model_from_env(model_id=model_id)
+        return LangGraphEngine(model, default_registry(), context), model.model_id
+    provider = BedrockConverseProvider(model_id) if model_id else BedrockConverseProvider.from_env()
+    return NativeEngine(provider, default_registry(), context), provider.model_id
+
+
 def run_conversation(
     store: EntitlementStore,
     engine: AgentEngine,
@@ -47,6 +66,7 @@ def run_conversation(
     turn_seconds: float = TURN_SECONDS,
     confirm: Callable[[int], bool] | None = None,
     sfn: Any = None,
+    engine_name: AgentEngineName = "native",
 ) -> str | None:
     """Drive an existing ACTIVE session through ``turns`` until a proposal
     is confirmed or the input runs out. Returns the job id when confirmed.
@@ -63,7 +83,7 @@ def run_conversation(
                 execute_turn(
                     store,
                     engine=engine,
-                    engine_name="native",
+                    engine_name=engine_name,
                     user_id=user_id,
                     session_id=session_id,
                     user_text=user_text,
@@ -85,7 +105,7 @@ def run_conversation(
             try:
                 return asyncio.run(
                     confirm_session(
-                        store, sfn, user_id=user_id, session_id=session_id, engine_name="native"
+                        store, sfn, user_id=user_id, session_id=session_id, engine_name=engine_name
                     )
                 )
             except ConfirmRefusedError as exc:
