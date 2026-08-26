@@ -10,6 +10,10 @@ export default defineConfig({
   // /agent/* to its Function URL); locally, `make dev-agent` serves it on 8080.
   server: {
     proxy: {
+      // Longest prefix first: Vite matches keys in order, and '/agent'
+      // would otherwise swallow '/agent-lg'. `make dev-agent-lg` serves the
+      // LangGraph runner on 8081.
+      '/agent-lg': { target: 'http://localhost:8081', changeOrigin: true },
       '/agent': { target: 'http://localhost:8080', changeOrigin: true },
     },
     // The privacy page's test reads docs/privacy.md (?raw) to hold the page
@@ -83,7 +87,8 @@ export default defineConfig({
           {
             // The companion: a live conversation and a streamed reply. A
             // service worker must never buffer or replay it.
-            urlPattern: ({ url }) => url.pathname.startsWith('/agent/'),
+            urlPattern: ({ url }) =>
+              url.pathname.startsWith('/agent/') || url.pathname.startsWith('/agent-lg/'),
             handler: 'NetworkOnly',
           },
         ],

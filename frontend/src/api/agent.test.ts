@@ -10,6 +10,7 @@ vi.mock('../auth/cognito', () => ({ getIdToken: vi.fn() }))
 import { getIdToken } from '../auth/cognito'
 import { EMPTY_BODY_SHA256 } from '../companion/sha256'
 import {
+  agentBase,
   clearMemory,
   confirmSession,
   createSession,
@@ -71,6 +72,34 @@ describe('agent client', () => {
     expect(headers.get('X-Id-Token')).toBe('id.token.here')
     expect(headers.get('Authorization')).toBeNull()
     expect(headers.get('x-amz-content-sha256')).toBe(EMPTY_BODY_SHA256)
+  })
+
+  it('the LangGraph engine is the other path prefix, nothing else', async () => {
+    fetchMock.mockResolvedValue(
+      jsonResponse(201, {
+        session_id: 's2',
+        turn: 0,
+        engine: 'langgraph',
+        model_id: 'm',
+        insights_count: 0,
+      }),
+    )
+
+    await createSession('langgraph')
+
+    const { url, headers } = lastCall()
+    expect(url).toBe('/agent-lg/sessions')
+    expect(headers.get('X-Id-Token')).toBe('id.token.here')
+    expect(agentBase()).toBe('/agent')
+    expect(agentBase('langgraph')).toBe('/agent-lg')
+  })
+
+  it('memory is the same item for both engines: always the default path', async () => {
+    fetchMock.mockResolvedValue(new Response(null, { status: 204 }))
+
+    await clearMemory()
+
+    expect(lastCall().url).toBe('/agent/memory')
   })
 
   it('GET carries the token and no hash', async () => {

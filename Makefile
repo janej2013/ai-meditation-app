@@ -207,3 +207,6 @@ dev: ## Vite dev server on the port the API's CORS allow-list names
 
 dev-agent: ## The companion runner on :8080 (needs TABLE_NAME, STATE_MACHINE_ARN, COGNITO_*, AWS_REGION)
 	cd backend && $(VENV)/uvicorn agent_runner.main:app --reload --port 8080
+
+dev-agent-lg: ## The LangGraph runner on :8081 (same env; calls Bedrock for real, like dev-agent)
+	cd backend && AGENT_ENGINE=langgraph $(VENV)/uvicorn agent_runner.main:app --reload --port 8081

@@ -18,6 +18,7 @@ import {
   sendTurn,
   type PendingProposal,
   type TurnEvent,
+  type Engine,
 } from '../api/agent'
 import { DEFAULT_BGM_TRACK, bgmUrl, mixer } from '../audio/mixer'
 import { ApiError, NotSignedInError, getAccount } from '../api/client'
@@ -81,14 +82,53 @@ export interface CompanionState {
   busy: boolean
 }
 
-export function useCompanion(onStarted: (jobId: string, durationMinutes: number) => void) {
+/** What sessionStorage holds: the session and the engine it runs on. */
+interface StoredSession {
+  id: string
+  engine: Engine
+}
+
+function readStored(): StoredSession | null {
+  try {
+    const raw = sessionStorage.getItem(STORAGE_KEY)
+    if (!raw) return null
+    // Before L2 the value was the bare id, on the one engine there was.
+    if (!raw.startsWith('{')) return { id: raw, engine: 'native' }
+    const parsed = JSON.parse(raw) as Partial<StoredSession>
+    return parsed.id ? { id: parsed.id, engine: parsed.engine === 'langgraph' ? 'langgraph' : 'native' } : null
+  } catch {
+    return null
+  }
+}
+
+export interface CompanionOptions {
+  engine?: Engine
+}
+
+export function useCompanion(
+  onStarted: (jobId: string, durationMinutes: number) => void,
+  options: CompanionOptions = {},
+) {
+  const engine: Engine = options.engine ?? 'native'
   const [gate, setGate] = useState<Gate>('open')
   const [sessionId, setSessionId] = useState<string | null>(() => {
-    try {
-      return sessionStorage.getItem(STORAGE_KEY)
-    } catch {
+    const stored = readStored()
+    if (!stored) return null
+    if (stored.engine !== engine) {
+      // A session runs on one engine from start to finish: its checkpoints
+      // would replay on the other, but the runner refuses (409
+      // wrong_engine) so the two engines' metrics stay comparable. The
+      // old conversation is let go; the new one starts on the asked-for
+      // engine with the first message.
+      abandonSession(stored.id, stored.engine).catch(() => undefined)
+      try {
+        sessionStorage.removeItem(STORAGE_KEY)
+      } catch {
+        /* storage may be unavailable */
+      }
       return null
     }
+    return stored.id
   })
   const [thread, setThread] = useState<Message[]>([])
   const [draft, setDraft] = useState('')
@@ -114,7 +154,7 @@ export function useCompanion(onStarted: (jobId: string, durationMinutes: number)
   const remember = (id: string | null) => {
     setSessionId(id)
     try {
-      if (id) sessionStorage.setItem(STORAGE_KEY, id)
+      if (id) sessionStorage.setItem(STORAGE_KEY, JSON.stringify({ id, engine }))
       else sessionStorage.removeItem(STORAGE_KEY)
     } catch {
       /* storage may be unavailable; the session simply does not survive a reload */
@@ -143,7 +183,7 @@ export function useCompanion(onStarted: (jobId: string, durationMinutes: number)
   useEffect(() => {
     if (!sessionId) return
     let cancelled = false
-    getSession(sessionId)
+    getSession(sessionId, engine)
       .then((t) => {
         if (cancelled) return
         if (t.status !== 'ACTIVE') {
@@ -181,7 +221,7 @@ export function useCompanion(onStarted: (jobId: string, durationMinutes: number)
   const ensureSession = async (): Promise<string | null> => {
     if (sessionId) return sessionId
     try {
-      const created = await createSession()
+      const created = await createSession(engine)
       remember(created.session_id)
       setInsightsCount(created.insights_count)
       return created.session_id
@@ -226,7 +266,7 @@ export function useCompanion(onStarted: (jobId: string, durationMinutes: number)
       }
     }
     try {
-      await sendTurn(id, text, handle, abort.current.signal)
+      await sendTurn(id, text, handle, abort.current.signal, engine)
     } catch (e) {
       if (e instanceof ApiError && e.detail === 'session_exhausted') setCompError('exhausted')
       else if (e instanceof ApiError && e.detail === 'busy_or_closed') {
@@ -308,7 +348,7 @@ export function useCompanion(onStarted: (jobId: string, durationMinutes: number)
     // starts -- the card, the error card's retry -- behaves the same.
     void mixer.startAmbient(bgmUrl(DEFAULT_BGM_TRACK))
     try {
-      const { job_id } = await confirmSession(sessionId)
+      const { job_id } = await confirmSession(sessionId, engine)
       remember(null)
       onStarted(job_id, proposal.duration_minutes)
     } catch (e) {
@@ -319,11 +359,12 @@ export function useCompanion(onStarted: (jobId: string, durationMinutes: number)
     } finally {
       setStarting(false)
     }
-  }, [sessionId, proposal, starting, onStarted])
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- remember is a plain closure over stable setters
+  }, [sessionId, proposal, starting, onStarted, engine])
 
   const startOver = useCallback(() => {
     abort.current?.abort()
-    if (sessionId) abandonSession(sessionId).catch(() => undefined)
+    if (sessionId) abandonSession(sessionId, engine).catch(() => undefined)
     remember(null)
     setThread([])
     setDraft('')
@@ -339,7 +380,8 @@ export function useCompanion(onStarted: (jobId: string, durationMinutes: number)
     setCrisis(false)
     setStarting(false)
     setBusy(false)
-  }, [sessionId])
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- remember is a plain closure over stable setters
+  }, [sessionId, engine])
 
   const state: CompanionState = {
     gate,

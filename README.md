@@ -725,7 +725,11 @@ is written twice. `tests/agent/test_engine_contract.py` runs 24 scripted scenari
 and asserts the `TurnResult` field by field, the events in order, and the requests the model
 saw; the checkpoint written for a turn is the same item whichever engine produced it, so a
 session could switch engines between turns (it does not: `AGENT_ENGINE=native|langgraph` is per
-deployment, and the session header records which). The framework costs 163 MB of image
+deployment, and the session header records which). On dev both run side by side: two functions
+off one image, `agent/*` and `agent-lg/*` on the site distribution, and `/companion?engine=langgraph`
+picks the second — a session stays on the engine that opened it (409 `wrong_engine` otherwise),
+and a CloudWatch dashboard keeps the two engines' latency, tokens and errors side by side. The
+framework costs 163 MB of image
 (282 → 445 MB) and is an optional extra (`agent-langgraph`) that only the runner image and CI
 install. Two places where the framework's own road was declined because the bytes would have
 differed — `StructuredTool` strips Pydantic titles from the schema, `ToolNode` words its errors

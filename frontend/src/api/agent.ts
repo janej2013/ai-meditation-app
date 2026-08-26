@@ -18,8 +18,16 @@ import { readSse, type SseEvent } from '../companion/sse'
 import { sha256Hex } from '../companion/sha256'
 import { ApiError, NotSignedInError } from './client'
 
-function baseUrl(): string {
-  return import.meta.env.VITE_AGENT_BASE ?? ''
+/**
+ * Which engine answers: the two run as separate functions behind
+ * `/agent/*` (native, the default) and `/agent-lg/*` (LangGraph). The path
+ * is the only thing the client changes; the contract is the same.
+ */
+export type Engine = 'native' | 'langgraph'
+
+export function agentBase(engine: Engine = 'native'): string {
+  const host: string = import.meta.env.VITE_AGENT_BASE ?? ''
+  return `${host}${engine === 'langgraph' ? '/agent-lg' : '/agent'}`
 }
 
 export interface SessionCreated {
@@ -91,7 +99,7 @@ async function request<T>(
     h.set('x-amz-content-sha256', await sha256Hex(text))
     if (text) h.set('Content-Type', 'application/json')
   }
-  const response = await fetch(`${baseUrl()}${path}`, {
+  const response = await fetch(path, {
     method,
     headers: h,
     body: text || undefined,
@@ -109,31 +117,41 @@ async function detailOf(response: Response): Promise<string> {
   }
 }
 
-export function createSession(): Promise<SessionCreated> {
-  return request<SessionCreated>('POST', '/agent/sessions')
+export function createSession(engine: Engine = 'native'): Promise<SessionCreated> {
+  return request<SessionCreated>('POST', `${agentBase(engine)}/sessions`)
 }
 
-export function getSession(sessionId: string): Promise<Transcript> {
-  return request<Transcript>('GET', `/agent/sessions/${encodeURIComponent(sessionId)}`)
-}
-
-export function abandonSession(sessionId: string): Promise<void> {
-  return request<void>('POST', `/agent/sessions/${encodeURIComponent(sessionId)}/abandon`)
-}
-
-export function confirmSession(sessionId: string): Promise<{ job_id: string }> {
-  return request<{ job_id: string }>(
-    'POST',
-    `/agent/sessions/${encodeURIComponent(sessionId)}/confirm`,
+export function getSession(sessionId: string, engine: Engine = 'native'): Promise<Transcript> {
+  return request<Transcript>(
+    'GET',
+    `${agentBase(engine)}/sessions/${encodeURIComponent(sessionId)}`,
   )
 }
 
+export function abandonSession(sessionId: string, engine: Engine = 'native'): Promise<void> {
+  return request<void>(
+    'POST',
+    `${agentBase(engine)}/sessions/${encodeURIComponent(sessionId)}/abandon`,
+  )
+}
+
+export function confirmSession(
+  sessionId: string,
+  engine: Engine = 'native',
+): Promise<{ job_id: string }> {
+  return request<{ job_id: string }>(
+    'POST',
+    `${agentBase(engine)}/sessions/${encodeURIComponent(sessionId)}/confirm`,
+  )
+}
+
+// Memory is one item on the table, whoever wrote it: always the default path.
 export function getMemory(): Promise<Memory> {
-  return request<Memory>('GET', '/agent/memory')
+  return request<Memory>('GET', `${agentBase()}/memory`)
 }
 
 export function clearMemory(): Promise<void> {
-  return request<void>('DELETE', '/agent/memory')
+  return request<void>('DELETE', `${agentBase()}/memory`)
 }
 
 /**
@@ -146,6 +164,7 @@ export async function sendTurn(
   text: string,
   onEvent: (event: TurnEvent) => void,
   signal?: AbortSignal,
+  engine: Engine = 'native',
 ): Promise<void> {
   const body = JSON.stringify({ text })
   const h = await headers({
@@ -153,7 +172,7 @@ export async function sendTurn(
     Accept: 'text/event-stream',
   })
   h.set('x-amz-content-sha256', await sha256Hex(body))
-  const response = await fetch(`${baseUrl()}/agent/sessions/${encodeURIComponent(sessionId)}/turns`, {
+  const response = await fetch(`${agentBase(engine)}/sessions/${encodeURIComponent(sessionId)}/turns`, {
     method: 'POST',
     headers: h,
     body,

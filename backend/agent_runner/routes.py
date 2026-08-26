@@ -29,11 +29,14 @@ from agent_runner.turns import (
     run_claimed,
 )
 from shared.db import AgentTurnBusyError
-from shared.models import AgentSessionStatus, AgentTurn
+from shared.models import AgentSession, AgentSessionStatus, AgentTurn
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/agent", tags=["agent"])
+# Mounted twice by main.py; the prefix names the CloudFront behaviour, not
+# the engine (see main.create_app).
+ROUTE_PREFIXES = ("/agent", "/agent-lg")
+router = APIRouter(tags=["agent"])
 
 MAX_TURN_TEXT_CHARS = 1000
 
@@ -146,8 +149,7 @@ async def post_turn(
     session_id: str, payload: TurnRequest, request: Request, user: CurrentUserDep, deps: DepsDep
 ) -> StreamingResponse:
     store, settings = deps.store, deps.settings
-    if store.get_agent_session(user.sub, session_id) is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="session_not_found")
+    _owned_by_this_engine(store.get_agent_session(user.sub, session_id), settings.engine)
 
     # Claimed before the stream opens, so "busy" is still an HTTP status the
     # client can branch on; only what happens during the turn is an SSE error.
@@ -214,6 +216,19 @@ def get_session(session_id: str, user: CurrentUserDep, deps: DepsDep) -> Transcr
     )
 
 
+def _owned_by_this_engine(session: AgentSession | None, engine: str) -> AgentSession:
+    """404 for no session; 409 ``wrong_engine`` for one the other engine
+    opened. A session runs on one engine from start to finish (the claim in
+    shared/db.py refuses the other engine too, but that failure reads as
+    "busy"; this names it, before anything is claimed or written). Reads
+    are not gated: the transcript is the same item whoever wrote it."""
+    if session is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="session_not_found")
+    if session.engine != engine:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="wrong_engine")
+    return session
+
+
 _CONFIRM_STATUS = {
     "no_credit": status.HTTP_402_PAYMENT_REQUIRED,
     "job_in_flight": status.HTTP_409_CONFLICT,
@@ -226,8 +241,7 @@ async def confirm(session_id: str, user: CurrentUserDep, deps: DepsDep) -> Confi
     """The listener starts the proposed meditation. The only request that
     can move a credit, and it moves it through the same path as
     POST /generate (constraint 2)."""
-    if deps.store.get_agent_session(user.sub, session_id) is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="session_not_found")
+    _owned_by_this_engine(deps.store.get_agent_session(user.sub, session_id), deps.settings.engine)
     try:
         job_id = await confirm_session(
             deps.store,
@@ -249,9 +263,9 @@ async def confirm(session_id: str, user: CurrentUserDep, deps: DepsDep) -> Confi
 
 @router.post("/sessions/{session_id}/abandon", status_code=status.HTTP_204_NO_CONTENT)
 def abandon_session(session_id: str, user: CurrentUserDep, deps: DepsDep) -> Response:
-    session = deps.store.get_agent_session(user.sub, session_id)
-    if session is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="session_not_found")
+    session = _owned_by_this_engine(
+        deps.store.get_agent_session(user.sub, session_id), deps.settings.engine
+    )
     if session.status is AgentSessionStatus.FINALIZED:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="already_finalized")
     deps.store.mark_agent_session(user.sub, session_id, AgentSessionStatus.ABANDONED)
