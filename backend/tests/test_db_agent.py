@@ -469,3 +469,12 @@ def test_confirm_requires_a_claim_and_a_proposal(store):
     session = store.get_agent_session(USER_ID, SESSION)
     assert session is not None
     assert session.status is AgentSessionStatus.ACTIVE and session.in_flight == NOW
+
+
+def test_session_count_reads_the_months_counter(store):
+    assert store.get_agent_session_count(USER_ID, "2026-08") == 0
+    store.reserve_agent_session(USER_ID, "2026-08", cap=5)
+    store.reserve_agent_session(USER_ID, "2026-08", cap=5)
+
+    assert store.get_agent_session_count(USER_ID, "2026-08") == 2
+    assert store.get_agent_session_count(USER_ID, "2026-09") == 0

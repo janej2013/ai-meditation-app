@@ -100,8 +100,24 @@ function currentSession(): Promise<CognitoUserSession | null> {
  * Null means "not signed in" and the caller should route to the sign-in flow.
  */
 export async function getIdToken(): Promise<string | null> {
+  const seeded = e2eToken()
+  if (seeded !== null) return seeded
   const session = await currentSession()
   return session ? session.getIdToken().getJwtToken() : null
+}
+
+/**
+ * A browser test's stand-in for a session. Dev builds only: the stubbed
+ * Playwright project has no user pool, and every screen past the home page
+ * needs a token to render at all. Never consulted in a production build.
+ */
+export function e2eToken(): string | null {
+  if (!import.meta.env.DEV) return null
+  try {
+    return sessionStorage.getItem('drift:e2e-id-token')
+  } catch {
+    return null
+  }
 }
 
 /** The signed-in email, from the ID token's claims (no network call). */

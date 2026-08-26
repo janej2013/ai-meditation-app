@@ -65,6 +65,10 @@ export default function HomePage() {
   const [duration, setDuration] = useState(10)
 
   const [signedIn, setSignedIn] = useState(false)
+  // The companion entry's two forms: open for a Pro plan, locked otherwise.
+  // Unknown (not signed in, request failed) reads as locked -- the locked
+  // card leads to Plans, which is the right place either way.
+  const [plan, setPlan] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   // The picture path's state: the upload id once S3 has it, the reading once
@@ -84,7 +88,12 @@ export default function HomePage() {
     // Only whether to gate Begin behind sign-in; the balance itself lives in
     // the shell's AccountPill, which every screen shares.
     void (async () => {
-      if (await isSignedIn()) setSignedIn(true)
+      if (await isSignedIn()) {
+        setSignedIn(true)
+        getAccount()
+          .then((a) => setPlan(a.plan))
+          .catch(() => setPlan(null))
+      }
     })()
   }, [])
 
@@ -333,11 +342,47 @@ export default function HomePage() {
             a picture
           </button>
         </div>
+        {/* The companion's entry ([Home · Companion entry]): the card for a
+            Pro plan, dimmed with a lock otherwise -- never hidden, so the
+            feature is discoverable. */}
+        <div style={{ marginTop: 34, display: 'flex' }}>
+          <button
+            className={plan === 'pro' ? 'companion-entry' : 'companion-entry locked'}
+            onClick={() => navigate(plan === 'pro' ? '/companion' : '/plans?plan=plan_pro')}
+          >
+            <span className="companion-entry-row">
+              <span className="companion-entry-title">
+                {plan !== 'pro' && (
+                  <svg
+                    width="11"
+                    height="11"
+                    viewBox="0 0 12 12"
+                    fill="none"
+                    aria-hidden
+                    style={{ flex: 'none', display: 'block', color: 'oklch(0.80 0.045 285)' }}
+                  >
+                    <rect x="2.2" y="5.2" width="7.6" height="5.6" rx="1.4" fill="currentColor" />
+                    <path
+                      d="M4.1 5.2V3.9a1.9 1.9 0 0 1 3.8 0v1.3"
+                      stroke="currentColor"
+                      strokeWidth="1.15"
+                      strokeLinecap="round"
+                    />
+                  </svg>
+                )}
+                Talk it through
+              </span>
+              <span className="pro-tag">PRO</span>
+            </span>
+            <span className="companion-entry-sub">A companion that remembers what helps you.</span>
+            {plan !== 'pro' && <span className="companion-entry-lock">Part of Pro</span>}
+          </button>
+        </div>
         {/* The collection's entry line: absent (not a spinner) until the
             count is known, then fades in with it. */}
         <div
           style={{
-            marginTop: 44,
+            marginTop: 20,
             display: 'flex',
             transition: 'opacity .8s ease',
             opacity: dreamCount === null ? 0 : 1,

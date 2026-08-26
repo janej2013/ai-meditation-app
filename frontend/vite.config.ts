@@ -6,6 +6,13 @@ import { configDefaults } from 'vitest/config'
 
 // https://vite.dev/config/
 export default defineConfig({
+  // The companion runner is same-origin in production (CloudFront routes
+  // /agent/* to its Function URL); locally, `make dev-agent` serves it on 8080.
+  server: {
+    proxy: {
+      '/agent': { target: 'http://localhost:8080', changeOrigin: true },
+    },
+  },
   // amazon-cognito-identity-js is written for Node and dereferences `global`,
   // which no browser defines -- the module throws on import, before any of our
   // code runs. esbuild replaces the bare identifier, so this covers the dev
@@ -67,6 +74,12 @@ export default defineConfig({
               url.pathname.startsWith('/account') ||
               url.pathname.startsWith('/generate') ||
               url.pathname.startsWith('/billing/'),
+            handler: 'NetworkOnly',
+          },
+          {
+            // The companion: a live conversation and a streamed reply. A
+            // service worker must never buffer or replay it.
+            urlPattern: ({ url }) => url.pathname.startsWith('/agent/'),
             handler: 'NetworkOnly',
           },
         ],

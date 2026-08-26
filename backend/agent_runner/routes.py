@@ -94,6 +94,11 @@ class InsightOut(BaseModel):
 
 class MemoryOut(BaseModel):
     insights: list[InsightOut]
+    # The month's usage rides along: the account page shows both on one
+    # screen and the quota is the only other agent-specific number a user
+    # has any reason to see.
+    sessions_this_month: int
+    sessions_per_month: int
 
 
 # ----------------------------------------------------------------------
@@ -261,8 +266,11 @@ def abandon_session(session_id: str, user: CurrentUserDep, deps: DepsDep) -> Res
 @router.get("/memory", response_model=MemoryOut)
 def get_memory(user: CurrentUserDep, deps: DepsDep) -> MemoryOut:
     memory = deps.store.get_memory(user.sub)
+    month = deps.clock().strftime("%Y-%m")
     return MemoryOut(
-        insights=[InsightOut(text=i.text, created_at=i.created_at) for i in memory.insights]
+        insights=[InsightOut(text=i.text, created_at=i.created_at) for i in memory.insights],
+        sessions_this_month=deps.store.get_agent_session_count(user.sub, month),
+        sessions_per_month=deps.settings.sessions_per_month,
     )
 
 

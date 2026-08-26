@@ -48,6 +48,7 @@ function renderHome() {
           <Route path="/plans" element={<div>PLANS SCREEN</div>} />
           <Route path="/signup" element={<div>SIGNUP SCREEN</div>} />
           <Route path="/generating/:jobId" element={<div>GENERATING SCREEN</div>} />
+          <Route path="/companion" element={<div>COMPANION SCREEN</div>} />
         </Routes>
       </SceneProvider>
     </MemoryRouter>,
@@ -238,5 +239,37 @@ describe('HomePage', () => {
     await user.click(screen.getByRole('button', { name: 'Begin drifting' }))
 
     await waitFor(() => expect(screen.getByText('SIGNUP SCREEN')).toBeInTheDocument())
+  })
+
+  it('shows the companion entry locked for a free plan, leading to Pro', async () => {
+    renderHome()
+
+    const entry = await screen.findByRole('button', { name: /Talk it through/ })
+    await waitFor(() => expect(entry).toHaveTextContent('Part of Pro'))
+    expect(entry).toHaveClass('locked')
+    fireEvent.click(entry)
+
+    expect(await screen.findByText('PLANS SCREEN')).toBeInTheDocument()
+  })
+
+  it('opens the companion for a Pro plan', async () => {
+    vi.mocked(getAccount).mockResolvedValue({ available: 12, frozen: 0, plan: 'pro' })
+    renderHome()
+
+    const entry = await screen.findByRole('button', { name: /Talk it through/ })
+    await waitFor(() => expect(entry).not.toHaveClass('locked'))
+    expect(entry).not.toHaveTextContent('Part of Pro')
+    fireEvent.click(entry)
+
+    expect(await screen.findByText('COMPANION SCREEN')).toBeInTheDocument()
+  })
+
+  it('keeps the entry locked when signed out', async () => {
+    vi.mocked(isSignedIn).mockResolvedValue(false)
+    renderHome()
+
+    const entry = await screen.findByRole('button', { name: /Talk it through/ })
+    expect(entry).toHaveClass('locked')
+    expect(getAccount).not.toHaveBeenCalled()
   })
 })

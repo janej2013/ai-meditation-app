@@ -9,7 +9,23 @@ def test_memory_starts_empty(api):
     response = api.request("GET", "/agent/memory")
 
     assert response.status_code == 200
-    assert response.json() == {"insights": []}
+    assert response.json() == {
+        "insights": [],
+        "sessions_this_month": 0,
+        "sessions_per_month": 30,
+    }
+
+
+def test_memory_reports_the_months_sessions(api, store, dynamodb_client):
+    from .conftest import create_session, seed_pro_user
+
+    seed_pro_user(dynamodb_client)
+    create_session(api)
+    create_session(api)
+
+    body = api.request("GET", "/agent/memory").json()
+
+    assert body["sessions_this_month"] == 2 and body["sessions_per_month"] == 30
 
 
 def test_memory_lists_insights_in_order(api, store):
@@ -31,4 +47,4 @@ def test_clear_memory_is_idempotent(api, store):
 
     assert api.request("DELETE", "/agent/memory").status_code == 204
     assert api.request("DELETE", "/agent/memory").status_code == 204
-    assert api.request("GET", "/agent/memory").json() == {"insights": []}
+    assert api.request("GET", "/agent/memory").json()["insights"] == []

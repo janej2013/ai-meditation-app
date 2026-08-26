@@ -35,7 +35,7 @@ def test_text_turn_streams_deltas_then_done(api, store, provider, dynamodb_clien
     assert sse_events(body) == [
         ("delta", {"text": "hel"}),
         ("delta", {"text": "lo"}),
-        ("done", {"turn": 1, "job_id": None, "awaiting_confirmation": False}),
+        ("done", {"turn": 1, "job_id": None, "awaiting_confirmation": False, "turns_left": 11}),
     ]
     session = store.get_agent_session(USER_ID, session_id)
     assert session is not None
@@ -123,7 +123,7 @@ def test_provider_failure_releases_the_claim_and_is_retryable(
     _, body = turn(api, session_id)
     assert sse_events(body)[-1] == (
         "done",
-        {"turn": 1, "job_id": None, "awaiting_confirmation": False},
+        {"turn": 1, "job_id": None, "awaiting_confirmation": False, "turns_left": 11},
     )
 
 
@@ -150,7 +150,7 @@ def test_heartbeat_while_the_model_is_silent(api, deps, provider, dynamodb_clien
     assert ": ping" in body
     assert sse_events(body)[-1] == (
         "done",
-        {"turn": 1, "job_id": None, "awaiting_confirmation": False},
+        {"turn": 1, "job_id": None, "awaiting_confirmation": False, "turns_left": 11},
     )
 
 
@@ -242,7 +242,7 @@ def test_a_proposal_streams_and_starts_nothing(api, store, provider, sfn, dynamo
         ("tool", {"name": FINALIZE_TOOL_NAME}),
         ("proposal", {"duration_minutes": 5}),
         ("delta", {"text": "Start it whenever you like."}),
-        ("done", {"turn": 1, "job_id": None, "awaiting_confirmation": True}),
+        ("done", {"turn": 1, "job_id": None, "awaiting_confirmation": True, "turns_left": 11}),
     ]
     sfn.start_execution.assert_not_called()
     transcript = api.request("GET", f"/agent/sessions/{session_id}").json()
@@ -260,7 +260,7 @@ def test_a_new_message_withdraws_the_proposal(api, provider, dynamodb_client):
 
     assert sse_events(body)[-1] == (
         "done",
-        {"turn": 2, "job_id": None, "awaiting_confirmation": False},
+        {"turn": 2, "job_id": None, "awaiting_confirmation": False, "turns_left": 10},
     )
     assert api.request("GET", f"/agent/sessions/{session_id}").json()["pending"] is None
     assert api.request("POST", f"/agent/sessions/{session_id}/confirm").status_code == 409

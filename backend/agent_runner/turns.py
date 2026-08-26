@@ -76,6 +76,12 @@ class TurnOutcome:
         # pending brief exists after this turn iff this turn proposed one.
         return self.result.proposal is not None
 
+    @property
+    def turns_left(self) -> int:
+        """How many more messages the session accepts; the PWA shows it
+        from the ninth turn on."""
+        return max(MAX_TURNS - self.turn, 0)
+
 
 async def claim_turn(
     store: EntitlementStore, *, user_id: str, session_id: str, engine_name: AgentEngineName

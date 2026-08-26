@@ -1139,6 +1139,17 @@ class EntitlementStore:
             return False
         return True
 
+    def get_agent_session_count(self, user_id: str, month: str) -> int:
+        """Sessions opened this month, for the account page. Zero when the
+        counter does not exist yet. (GetItem.)"""
+        response = self.client.get_item(
+            TableName=self.table_name,
+            Key=_marshal({"PK": user_pk(user_id), "SK": agent_quota_sk(month)}),
+            ConsistentRead=True,
+        )
+        item = response.get("Item")
+        return int(_unmarshal(item).get("sessions", 0)) if item else 0
+
     def create_agent_session(
         self, user_id: str, session_id: str, *, engine: AgentEngineName, model_id: str
     ) -> bool:

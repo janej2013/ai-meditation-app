@@ -594,7 +594,7 @@ The client names a **product key** (`pack_10`), never a price id. The catalogue
 in `backend/api/products.py` resolves the key to a Stripe price, so a client
 cannot name an arbitrary price and buy something the catalogue does not offer.
 Price ids are not secrets, so they live in code and can be overridden with the
-`STRIPE_PRODUCTS` env var once the real Stripe products exist.
+`STRIPE_PRODUCTS` env var once the real Stripe products exist. The catalogue also carries `plan_pro` (`plan="pro"`), the subscription the companion agent is gated on; its price id is a placeholder until that product exists too.
 
 ### The webhook is anonymous; the signature is the authentication
 

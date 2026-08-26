@@ -82,6 +82,7 @@ async def stream_turn(run_turn: RunTurn, *, heartbeat_seconds: float) -> AsyncIt
                             "turn": item.outcome.turn,
                             "job_id": item.outcome.job_id,
                             "awaiting_confirmation": item.outcome.awaiting_confirmation,
+                            "turns_left": item.outcome.turns_left,
                         },
                     )
                 else:
