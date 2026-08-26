@@ -33,7 +33,9 @@ def _utc_now() -> datetime:
 class Deps:
     settings: Settings
     store: EntitlementStore
-    provider: Any  # LLMProvider with a ``model_id`` attribute
+    # The model, in the engine's own terms: an ``LLMProvider`` for native,
+    # a LangChain chat model for langgraph. Both carry ``model_id``.
+    provider: Any
     sfn: Any
     verifier: TokenVerifier
     clock: Callable[[], datetime] = field(default=_utc_now)
@@ -49,11 +51,19 @@ def get_deps() -> Deps:
         _deps = Deps(
             settings=settings,
             store=EntitlementStore(table_name=settings.table_name),
-            provider=BedrockConverseProvider.from_env(),
+            provider=_model_for(settings),
             sfn=boto3.client("stepfunctions", region_name=settings.aws_region),
             verifier=TokenVerifier.for_cognito(settings),
         )
     return _deps
+
+
+def _model_for(settings: Settings) -> Any:
+    if settings.engine == "langgraph":
+        from agent.langgraph.engine import chat_model_from_env  # optional dependency
+
+        return chat_model_from_env(region=settings.aws_region)
+    return BedrockConverseProvider.from_env()
 
 
 DepsDep = Annotated[Deps, Depends(get_deps)]

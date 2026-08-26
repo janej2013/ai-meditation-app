@@ -22,9 +22,10 @@ SHARED_AND_NATIVE = sorted(
 # and cli.py are the harness inlined until A4 (they claim, run and commit
 # turns, as agent_runner will).
 LOCAL_DRIVERS = ("checkpoint.py", "local_harness.py", "smoke.py", "cli.py")
+LANGGRAPH_FILES = sorted(AGENT_DIR.glob("langgraph/**/*.py"))
 ENGINE_FILES = [
     path
-    for path in SHARED_AND_NATIVE
+    for path in [*SHARED_AND_NATIVE, *LANGGRAPH_FILES]
     if path.name not in LOCAL_DRIVERS and "tools" not in path.parts
 ]
 
@@ -42,6 +43,17 @@ def imported_modules(path: Path) -> set[str]:
 
 def test_agent_package_has_files():
     assert any(p.name == "loop.py" for p in SHARED_AND_NATIVE)
+    assert any(p.name == "graph.py" for p in LANGGRAPH_FILES)
+
+
+def test_langgraph_is_the_only_place_frameworks_are_imported():
+    """The framework engine is optional: nothing else may need it."""
+    outside = [p for p in AGENT_DIR.glob("**/*.py") if "langgraph" not in p.parts]
+    for path in outside:
+        offending = {n for n in imported_modules(path) if n.split(".")[0] in FRAMEWORKS}
+        assert not offending, f"{path.relative_to(AGENT_DIR)} imports {sorted(offending)}"
+    inside = {n for p in LANGGRAPH_FILES for n in imported_modules(p)}
+    assert any(n.split(".")[0] in FRAMEWORKS for n in inside)
 
 
 @pytest.mark.parametrize("path", SHARED_AND_NATIVE, ids=lambda p: str(p.relative_to(AGENT_DIR)))

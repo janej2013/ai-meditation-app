@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
+import pytest
 from pydantic import BaseModel
 
 from agent.checkpoint import TurnCheckpoint, rebuild_messages
@@ -179,3 +180,45 @@ def test_a_stored_empty_reply_is_replayed_as_the_fallback_line():
     assert [m.role for m in history] == ["user", "assistant", "user", "assistant"]
     assert history[1] == Message.assistant([TextBlock(text=EMPTY_REPLY_TEXT)])
     assert history[3] == Message.assistant([TextBlock(text=EMPTY_REPLY_TEXT)])
+
+
+def test_langgraph_turn_checkpoints_to_the_same_item_as_native(store):
+    """The harness stores whichever engine ran without knowing which: the
+    T-item and the history rebuilt from it must be the same for both."""
+    pytest.importorskip("langgraph")
+    from agent.contracts import TextDelta
+    from agent.langgraph.engine import LangGraphEngine
+
+    from .fake_chat_model import ScriptedChatModel
+
+    calls = [("noop", {"note": "a", "score": 0.5}, "tu-1")]
+    native = FakeProvider([tool_reply(*calls, text="checking"), text_reply("all set")])
+    # The LangChain fake streams every character, as a real model would.
+    scripted = ScriptedChatModel(
+        script=[
+            [TextDelta("checking"), *tool_reply(*calls, text="checking")],
+            text_reply("all set"),
+        ]
+    )
+    inp = TurnInput(history=[], user_text="hello", turn=0)
+    native_result = run(engine(native).run_turn(inp, deadline=Deadline.never(), emit=silent))
+    tools = ToolRegistry(
+        [
+            ToolSpec("noop", "noop", NoopIn, noop),
+            ToolSpec("finalize_meditation_brief", "end", FinishIn, finish, terminal=True),
+        ]
+    )
+    langgraph_engine = LangGraphEngine(
+        scripted, tools, ToolContext(user_id=USER_ID, session_id=SESSION), system_prompt="S"
+    )
+    langgraph_result = run(langgraph_engine.run_turn(inp, deadline=Deadline.never(), emit=silent))
+
+    assert langgraph_result == native_result
+    stored = [
+        TurnCheckpoint.from_result(
+            session_id=SESSION, turn=0, user_text="hello", result=r, created_at=NOW
+        )
+        for r in (native_result, langgraph_result)
+    ]
+    assert stored[0] == stored[1]
+    assert rebuild_messages([stored[0]]) == rebuild_messages([stored[1]])

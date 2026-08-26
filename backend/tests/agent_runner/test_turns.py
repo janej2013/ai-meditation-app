@@ -7,6 +7,7 @@ import asyncio
 from dataclasses import replace
 
 import httpx
+import pytest
 
 from agent.budget import FINALIZE_TOOL_NAME, MAX_TURNS
 from agent.native.llm.converse import AgentProviderError
@@ -365,3 +366,38 @@ def test_abandon_with_a_pending_proposal(api, store, provider, sfn, dynamodb_cli
     assert api.request("POST", f"/agent/sessions/{session_id}/abandon").status_code == 204
     assert api.request("POST", f"/agent/sessions/{session_id}/confirm").status_code == 409
     sfn.start_execution.assert_not_called()
+
+
+# ----------------------------------------------------------------------
+# The second engine, through the same harness
+# ----------------------------------------------------------------------
+
+
+def test_langgraph_engine_streams_the_same_events(api, deps, store, dynamodb_client):
+    """``AGENT_ENGINE=langgraph`` swaps the engine and nothing else: the
+    session records it, the claim carries it, the SSE stream is the one
+    the PWA already reads."""
+    pytest.importorskip("langgraph")
+    from dataclasses import replace
+
+    from ..agent.fake_chat_model import ScriptedChatModel
+
+    seed_pro_user(dynamodb_client)
+    deps.settings = replace(deps.settings, engine="langgraph")
+    model = ScriptedChatModel()
+    model.queue(tool_reply(("get_session_history", {}, "tu-1")), text_reply("hello", " there"))
+    deps.provider = model
+
+    session_id = create_session(api)
+    _, body = turn(api, session_id, "hi")
+
+    events = sse_events(body)
+    assert [name for name, _ in events] == ["tool", "delta", "delta", "done"]
+    assert events[0][1] == {"name": "get_session_history"}
+    assert events[-1][1]["turn"] == 1 and events[-1][1]["awaiting_confirmation"] is False
+    session = store.get_agent_session(USER_ID, session_id)
+    assert session is not None and session.engine == "langgraph"
+    turns = store.list_turns(USER_ID, session_id)
+    assert [t["toolUse"]["name"] for t in turns[0].tool_calls[0]["assistant_content"]] == [
+        "get_session_history"
+    ]

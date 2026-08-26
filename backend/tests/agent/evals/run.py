@@ -1,6 +1,7 @@
 """Run the eval cases against the real model.
 
-    python -m tests.agent.evals.run [--model-id ID] [--only NAME] [--json OUT]
+    python -m tests.agent.evals.run [--engine native|langgraph] [--model-id ID]
+                                    [--only NAME] [--json OUT]
 
 Costs Bedrock calls (roughly 60 model calls for the full set). Run by
 hand; paste the table into the PR that changes the prompt.
@@ -17,11 +18,20 @@ import asyncio
 import json
 import sys
 import time
+from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
 
 from agent.budget import FINALIZE_TOOL_NAME
 from agent.checkpoint import TurnCheckpoint, rebuild_messages
-from agent.contracts import AgentEvent, Deadline, Emit, TextDelta, ToolStarted, TurnInput
+from agent.contracts import (
+    AgentEngine,
+    AgentEvent,
+    Deadline,
+    Emit,
+    TextDelta,
+    ToolStarted,
+    TurnInput,
+)
 from agent.native.llm.converse import BedrockConverseProvider
 from agent.native.loop import NativeEngine
 from agent.prompt import render_memory_block
@@ -48,7 +58,22 @@ class Outcome:
     replies: list[str] = field(default_factory=list)
 
 
-def run_case(case: Case, provider: BedrockConverseProvider) -> Outcome:
+MakeEngine = Callable[[ToolContext], AgentEngine]
+
+
+def engine_factory(engine_name: str, model_id: str | None) -> tuple[MakeEngine, str]:
+    """One model, reused across cases; an engine per turn, as production
+    builds one per request."""
+    if engine_name == "langgraph":
+        from agent.langgraph.engine import LangGraphEngine, chat_model_from_env
+
+        model = chat_model_from_env(model_id=model_id)
+        return (lambda ctx: LangGraphEngine(model, default_registry(), ctx)), model.model_id
+    provider = BedrockConverseProvider(model_id) if model_id else BedrockConverseProvider.from_env()
+    return (lambda ctx: NativeEngine(provider, default_registry(), ctx)), provider.model_id
+
+
+def run_case(case: Case, make_engine: MakeEngine) -> Outcome:
     store = EvalStore(available=case.available, insights=case.insights)
     context = ToolContext(user_id="eval", session_id=f"eval-{case.name}", store=store)
     turns: list[AgentTurn] = []
@@ -61,7 +86,7 @@ def run_case(case: Case, provider: BedrockConverseProvider) -> Outcome:
     for turn, user_text in enumerate(case.turns):
         text: list[str] = []
         emit = _collect_into(text, tools)
-        engine = NativeEngine(provider, default_registry(), context)
+        engine = make_engine(context)
         memory = render_memory_block([i.text for i in store.get_memory("eval").insights])
         started = time.monotonic()
         result = asyncio.run(
@@ -167,23 +192,22 @@ def main(argv: list[str] | None = None) -> int:
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
     parser.add_argument("--model-id", help="overrides AGENT_MODEL_ID")
+    parser.add_argument(
+        "--engine", choices=("native", "langgraph"), default="native", help="the engine under test"
+    )
     parser.add_argument("--only", help="run one case by name")
     parser.add_argument("--json", help="write full outcomes (including replies) to this file")
     args = parser.parse_args(argv)
 
-    provider = (
-        BedrockConverseProvider(args.model_id)
-        if args.model_id
-        else BedrockConverseProvider.from_env()
-    )
+    make_engine, model_id = engine_factory(args.engine, args.model_id)
     cases = [c for c in CASES if not args.only or c.name == args.only]
     if not cases:
         print(f"no case named {args.only!r}", file=sys.stderr)
         return 2
 
-    outcomes = [run_case(case, provider) for case in cases]
+    outcomes = [run_case(case, make_engine) for case in cases]
 
-    print(f"model {provider.model_id}")
+    print(f"engine {args.engine} model {model_id}")
     print(_row("case", "pass", "turns", "fin", "tokens in/out", "cache%", "ms", "reasons"))
     for o in outcomes:
         # Bedrock's inputTokens excludes what was served from cache.

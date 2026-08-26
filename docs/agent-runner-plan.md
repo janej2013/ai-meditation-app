@@ -321,12 +321,12 @@ prompt 层的策略（引导资源、不展开）才是对的粒度。价格 $0.
 | 概念 | 自建 `native/` | 框架 `langgraph/` | 对比时看什么 |
 |---|---|---|---|
 | 模型调用 | `BedrockConverseProvider.stream_turn()`：手写请求、手解析 `contentBlockDelta` | `ChatBedrockConverse(model_id, …)` + `.bind_tools(tools, tool_choice=…)`；流式由 `astream` 给出 `AIMessageChunk` | 框架替你合并了分片 toolUse JSON；代价是 `cachePoint` / `guardrailConfig` 要经 `additional_model_request_fields` 之类的旁路传，能否精确落位要验证 |
-| 工具定义 | `ToolSpec` → `toolSpec.inputSchema.json`（Pydantic `model_json_schema()`） | `ToolSpec.to_langchain_tool()` → `StructuredTool.from_function(args_schema=Model)`；上下文用闭包绑定 | 同一份 Pydantic 模型两处复用，schema 必须逐字节一致（契约测试断言） |
-| loop | `for _ in range(MAX_TOOL_ITERATIONS)` 显式循环 | `StateGraph(MessagesState)`：`agent` 节点 → `tools_condition` → `ToolNode(tools)` → 回到 `agent` | 显式循环 vs 图；图的 `recursion_limit` 与我们的迭代上限如何对应（`2 × 4 + 1`） |
+| 工具定义 | `ToolSpec` → `toolSpec.inputSchema.json`（Pydantic `model_json_schema()`） | **实现时改为**把同一份 `toolSpec` dict 交给 `bind_tools`（langchain-aws 透传）；`StructuredTool.from_function(args_schema=Model)` 会经 `convert_to_openai_tool` 剥掉 `title`，字节不等（`test_langgraph_messages` 留证） | 同一份 Pydantic 模型两处复用，schema 必须逐字节一致（契约测试断言） |
+| loop | `for _ in range(MAX_TOOL_ITERATIONS)` 显式循环 | `StateGraph`（messages + `iterations` / `hint` / `wrap_up`）：`agent` 节点 → 条件边 → 自写 `tools` 节点（调 `ToolRegistry.execute`，不用 `ToolNode`：它的校验与错误文案会让 transcript 分叉）→ 回到 `agent` | 显式循环 vs 图；`recursion_limit = 2 × 4 + 2`（LangGraph 把写入初始状态算一步，`test_langgraph_graph` 两侧钉死） |
 | 并行工具 | `asyncio.gather` 后一条 user 消息回传全部 toolResult | `ToolNode` 默认并行执行同一条 AIMessage 里的多个 tool_calls | 行为一致；观察 ToolMessage 的顺序 |
 | 收敛 / 强制终结 | `budget.converge_policy(turn)` → 拼提示 / `toolChoice: {tool: …}` | 同一个 `converge_policy`；实现为 `agent` 节点里按轮号换 `tool_choice`，第 12 轮 `bind_tools(..., tool_choice="finalize_meditation_brief")` | 「决定」共用、机制不同 —— 这正是切分原则的体现 |
 | deadline | 每次 LLM 往返前检查 | 条件边 `should_continue` 里检查，超时则路由到 `END` | 图的可视化（`get_graph().draw_mermaid()`）在这里第一次真正有用 |
-| 流式事件 | provider 事件流直接 `emit` | `graph.astream_events(version="v2")`：`on_chat_model_stream` → `delta`，`on_tool_start` → `tool` | 事件粒度与延迟；LangGraph 的事件里含大量无关节点事件，要过滤 |
+| 流式事件 | provider 事件流直接 `emit` | `graph.astream_events(version="v2")`：`on_chat_model_stream` → `delta`（文本）与 `tool`（`tool_call_chunks` 带 name 的那一片，与 native 的 `ToolUseStart` 同时机）；`proposal` 由 tools 节点 `adispatch_custom_event` 发出，走同一条队列所以保序 | 事件粒度与延迟；LangGraph 的事件里含大量无关节点事件，要过滤 |
 | checkpoint | T-item 就是恢复状态 | 第一版 `MemorySaver`（调用内），跨调用恢复靠 harness 从 T-item 重建；第二阶段自写 `BaseCheckpointSaver`（`saver.py`，存 `AGENT#<sid>#LG#<checkpoint_id>`） | 两种粒度：按轮（我们）vs 按超步（LangGraph）；item 大小、写放大、能否支持 `interrupt()` |
 | human-in-the-loop | `offer_choices` = 客户端工具，结果作为 toolResult 回传（第二阶段） | `interrupt()` + `Command(resume=…)`，需要持久 saver（第二阶段） | 这是 LangGraph 最有卖点的能力，也是我们自建版本最能说明「为什么不需要框架」的地方 |
 | 错误分类 / 重试 | `raise_for_bedrock_error` + provider 自己退避 | `ChatBedrockConverse` 走 boto3 默认重试；节点级 `RetryPolicy` 可加 | 谁在重试、重试几次、是否可观测 |
@@ -551,7 +551,8 @@ Pro 定价必须覆盖这一块加 20 次生成的 TTS/LLM 成本 —— 这是�
 | A5 | 08-26 | 三处与方案不同，全部来自 dev 部署：① **reserved concurrency 改为 opt-in**（新账户 Lambda 配额 10，任何预留都被拒绝）；② **Function URL 双重授权**：OAC 需要 `lambda:InvokeFunctionUrl` 与 `lambda:InvokeFunction` 两者，CDK 只给前者（aws-cdk#35872）；③ **ID token 改走 `X-Id-Token`**：OAC 的 SigV4 覆盖了 `Authorization`。另：SPA 路由从分发级 error response 改为 viewer-request CloudFront Function，否则 runner 的 401/403 会被伪装成 200 `index.html`。 |
 | A6 | 08-26 | 前端**懒建会话**（首条消息才 `POST /sessions`，看一眼不占月配额）；`done` 增 `turns_left`；`GET /agent/memory` 增 `sessions_this_month`；Claude Design 的十张画板作为规格；`?engine=` 切换未做（等 L2）。审查后补：账户 pill 首次挂载即读、ambient 停止胜过加载竞争。 |
 | A7 | 08-26 | README、`CLAUDE.md`（约束 2 改为 confirm 路由；新增约束 10、11）、`docs/privacy.md`（放 docs，不进 PWA）、`deployment.md` 成本节、本表。 |
-| 未做 | — | `offer_choices`（第二阶段）；`BedrockMantleProvider`；guardrail（`guardrailConfig` 已留位，未配）。 |
+| **L1** | 08-26 | `agent/langgraph/`（`messages` / `tools` / `graph` / `engine`）+ `agent-langgraph` extra（langchain-core 0.3.86、langchain-aws 0.2.35、langgraph 0.6.11）；契约测试 24 个场景 × 2 引擎逐字段相等；镜像 282 → 445 MB。与 §3.4 表的偏离：① **工具绑定不走 `StructuredTool`**——`convert_to_openai_tool` 会剥掉 Pydantic 的 `title`，请求字节与 native 不等；改为把 registry 的 Converse `toolSpec` dict 直接交给 `bind_tools`（langchain-aws 原样透传），`StructuredTool` 的差异留在测试里作 L3 素材；② **不用 `ToolNode`**——它自己做 schema 校验、自己措辞错误文案、未知工具另有文案，transcript 会在重试最要紧的路径上分叉；图里的 `tools` 节点直接调 `ToolRegistry.execute`；③ `ToolStarted` 从模型流的 `tool_call_chunks` 发出（与 native 的 `ToolUseStart` 同时机），`ProposalReady` 用 `adispatch_custom_event` 走同一条事件队列以保序；④ `recursion_limit = 2×4+2`：LangGraph 把写入初始状态也算一步；⑤ 空回复 nudge 是图的第二次调用（`iterations` 预置为上限 → wrap-up 模式），不是图内节点。「决定」抽到中立模块：`agent/model_ids.py`、`agent/stop_reasons.py`、`agent/thinking.py`。dev 验证：`agent.cli --engine langgraph --dry-run` 走通 history → 提议 → 确认；evals 双引擎各 **18/21**（同一个 soft 失败；硬失败各不相同，属模型方差，表贴在 PR #30）。第一次真跑抓到一个 fake 没覆盖的形状：流式 `tool_use` 块的 `input` 是 JSON 字符串（已修，fake 改为镜像 adapter 的分片）。 |
+| 未做 | — | `offer_choices`（第二阶段）；`BedrockMantleProvider`；guardrail（`guardrailConfig` 已留位，未配）；L2（第二个函数与 `/agent-lg/*`）、L3（对比文档）。 |
 
 ---
 

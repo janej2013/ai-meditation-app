@@ -43,7 +43,7 @@ jobs:
           node-version: '22' # matches .prototools
           cache: npm
           cache-dependency-path: infra/package-lock.json
-      - run: pip install -e "backend[dev,api]" ruff -r infra/requirements.txt
+      - run: pip install -e "backend[dev,api,agent-langgraph]" ruff -r infra/requirements.txt
       - run: npm ci
         working-directory: infra
       # VENV points make at setup-python's bin instead of ~/.venvs/meditation.
@@ -119,7 +119,7 @@ jobs:
           cache-dependency-path: |
             infra/package-lock.json
             frontend/package-lock.json
-      - run: pip install -e "backend[dev,api]" ruff -r infra/requirements.txt
+      - run: pip install -e "backend[dev,api,agent-langgraph]" ruff -r infra/requirements.txt
       - run: npm ci
         working-directory: infra
 
