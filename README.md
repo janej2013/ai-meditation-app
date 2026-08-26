@@ -560,8 +560,9 @@ The design note is `docs/agent-runner-plan.md`; the short version:
 - **Same origin, no CORS, no secret.** The site distribution fronts the Function URL as an
   `agent/*` behaviour with origin access control, so the PWA calls `/agent/...` on its own domain
   and the URL answers nobody else. CDK places the `lambda:InvokeFunctionUrl` permission in the
-  frontend stack — the reference runs one way, which is why this needs none of the wildcard the
-  audio bucket needs (Known gaps). The function verifies the Cognito ID token itself
+  frontend stack (and the stack adds the `lambda:InvokeFunction` half that newer Function URLs also
+  check, which CDK still omits — aws/aws-cdk#35872) — the reference runs one way, which is why
+  this needs none of the wildcard the audio bucket needs (Known gaps). The function verifies the Cognito ID token itself
   (`agent_runner/auth.py`, same claim rules as `api/deps.py`) and reaches Bedrock and the table
   with its execution role.
 - **The model proposes; the listener pays.** `finalize_meditation_brief` only places a pending

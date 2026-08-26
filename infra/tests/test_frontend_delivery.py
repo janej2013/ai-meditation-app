@@ -374,14 +374,19 @@ def test_agent_origin_is_signed_by_origin_access_control(agent_template):
 
 
 def test_only_this_distribution_may_invoke_the_url(agent_template):
-    """The permission lives here, in the distribution's own stack -- the
-    reason this wiring has no cycle and needs no wildcard."""
-    agent_template.has_resource_properties(
-        "AWS::Lambda::Permission",
-        {"Action": "lambda:InvokeFunctionUrl", "Principal": "cloudfront.amazonaws.com"},
-    )
-    [permission] = agent_template.find_resources("AWS::Lambda::Permission").values()
-    assert "distribution/" in str(permission["Properties"]["SourceArn"])
+    """Both halves of dual auth (URLs created since October 2025 check
+    InvokeFunctionUrl *and* InvokeFunction), scoped to this distribution,
+    living here in its own stack -- the reason this wiring has no cycle and
+    needs no wildcard."""
+    permissions = agent_template.find_resources("AWS::Lambda::Permission").values()
+
+    assert {p["Properties"]["Action"] for p in permissions} == {
+        "lambda:InvokeFunctionUrl",
+        "lambda:InvokeFunction",
+    }
+    for permission in permissions:
+        assert permission["Properties"]["Principal"] == "cloudfront.amazonaws.com"
+        assert "distribution/" in str(permission["Properties"]["SourceArn"])
 
 
 def test_without_the_agent_nothing_of_it_exists(template):

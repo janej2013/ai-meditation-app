@@ -28,7 +28,7 @@ still synthesises and deploys, using the CloudFront default domains -- so
 ``cdk synth`` never depends on a real hosted zone.
 """
 
-from aws_cdk import Annotations, CfnOutput, Duration, RemovalPolicy, Stack
+from aws_cdk import Annotations, Aws, CfnOutput, Duration, RemovalPolicy, Stack
 from aws_cdk import aws_certificatemanager as acm
 from aws_cdk import aws_cloudfront as cloudfront
 from aws_cdk import aws_cloudfront_origins as origins
@@ -116,6 +116,9 @@ class FrontendStack(Stack):
             comment=f"meditation-{env_name} PWA",
         )
 
+        if agent_function_url is not None:
+            self._grant_dual_auth_invoke(agent_function_url)
+
         self.audio_distribution, self.audio_key_group, self.audio_key_pair_id = (
             self._build_audio_distribution(
                 env_name=env_name,
@@ -184,6 +187,29 @@ class FrontendStack(Stack):
             origin_request_policy=cloudfront.OriginRequestPolicy.ALL_VIEWER_EXCEPT_HOST_HEADER,
             viewer_protocol_policy=cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
             compress=False,
+        )
+
+    def _grant_dual_auth_invoke(self, function_url: lambda_.IFunctionUrl) -> None:
+        """The second half of the permission CDK's OAC origin grants.
+
+        Function URLs created since October 2025 check *two* actions on the
+        caller: ``lambda:InvokeFunctionUrl`` and ``lambda:InvokeFunction``.
+        ``FunctionUrlOrigin.with_origin_access_control`` still adds only the
+        first (aws/aws-cdk#35872), and the result is a 403 from the URL
+        before the function ever runs -- an empty log group and, through
+        this distribution's SPA error mapping, a 200 with index.html. Same
+        principal, same distribution-scoped condition, same stack.
+        """
+        lambda_.CfnPermission(
+            self,
+            "AgentInvokeFunctionForOac",
+            action="lambda:InvokeFunction",
+            function_name=function_url.function_arn,
+            principal="cloudfront.amazonaws.com",
+            source_arn=(
+                f"arn:{Aws.PARTITION}:cloudfront::{Aws.ACCOUNT_ID}:distribution/"
+                f"{self.site_distribution.distribution_id}"
+            ),
         )
 
     # ------------------------------------------------------------------
