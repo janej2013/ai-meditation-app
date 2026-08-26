@@ -17,6 +17,7 @@ is also what langchain-aws does on the way to Bedrock.
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from langchain_core.messages import (
@@ -164,11 +165,19 @@ def from_langchain(messages: list[BaseMessage]) -> list[Message]:
 
 
 def content_blocks(message: AIMessage) -> list[ContentBlock]:
-    """The assistant's blocks in the order the model produced them. Tool
-    calls that only appear in ``tool_calls`` (a plain-string content) are
-    appended after the text."""
+    """The assistant's blocks in the order the model produced them.
+
+    A streamed reply's ``tool_use`` content block carries its ``input`` as
+    the raw JSON string the fragments added up to; the parsed arguments
+    live in ``tool_calls``, so those win, keyed by id. A block with no
+    parsed call and unparseable JSON gets ``{}`` -- the native parser's
+    rule, so the registry answers with a field-level error rather than
+    the turn failing. Tool calls that only appear in ``tool_calls`` (a
+    plain-string content) are appended after the text.
+    """
     blocks: list[ContentBlock] = []
     seen_tool_ids: set[str] = set()
+    parsed_args = {call["id"]: call["args"] for call in message.tool_calls if call.get("id")}
     if isinstance(message.content, str):
         if message.content:
             blocks.append(TextBlock(text=message.content))
@@ -186,7 +195,9 @@ def content_blocks(message: AIMessage) -> list[ContentBlock]:
                 seen_tool_ids.add(raw["id"])
                 blocks.append(
                     ToolUseBlock(
-                        tool_use_id=raw["id"], name=raw["name"], input=raw.get("input") or {}
+                        tool_use_id=raw["id"],
+                        name=raw["name"],
+                        input=parsed_args.get(raw["id"], _tool_input(raw.get("input"))),
                     )
                 )
             # Anything else (reasoning, images) is not part of this transcript.
@@ -196,6 +207,18 @@ def content_blocks(message: AIMessage) -> list[ContentBlock]:
                 ToolUseBlock(tool_use_id=call["id"], name=call["name"], input=call["args"])
             )
     return blocks
+
+
+def _tool_input(raw: Any) -> dict[str, Any]:
+    if isinstance(raw, dict):
+        return raw
+    if isinstance(raw, str) and raw.strip():
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError:
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+    return {}
 
 
 def stop_reason_of(message: AIMessage) -> StopReason:

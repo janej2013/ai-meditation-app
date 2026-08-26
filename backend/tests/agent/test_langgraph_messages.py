@@ -141,6 +141,28 @@ def test_assistant_blocks_keep_their_order_and_fill_in_from_tool_calls():
     ]
 
 
+def test_streamed_tool_use_blocks_take_their_input_from_tool_calls():
+    """The shape a streamed reply has after the chunks are summed: the
+    content block's input is the raw JSON string, tool_calls has the dict.
+    Seen on dev with Nova Lite (`{"limit":5}` as a str) before this test."""
+    message = AIMessage(
+        content=[
+            {"type": "text", "text": "looking", "index": 0},
+            {"type": "tool_use", "id": "tu-1", "name": "noop", "input": '{"limit":5}', "index": 1},
+            {"type": "tool_use", "id": "tu-2", "name": "noop", "input": "{not json", "index": 2},
+        ],
+        tool_calls=[{"name": "noop", "args": {"limit": 5}, "id": "tu-1", "type": "tool_call"}],
+    )
+
+    assert content_blocks(message) == [
+        TextBlock(text="looking"),
+        ToolUseBlock(tool_use_id="tu-1", name="noop", input={"limit": 5}),
+        # No parsed call and no parseable JSON: an empty input, for the
+        # registry to answer with a field-level error.
+        ToolUseBlock(tool_use_id="tu-2", name="noop", input={}),
+    ]
+
+
 def test_usage_reads_cache_counters():
     message = AIMessage(
         content="",

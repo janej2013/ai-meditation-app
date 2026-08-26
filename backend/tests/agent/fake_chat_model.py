@@ -159,8 +159,19 @@ class ScriptedChatModel(BaseChatModel):
             elif isinstance(event, ToolUseStart):
                 index = len(started) + 1
                 started[event.tool_use_id] = index
+                # As langchain-aws streams a contentBlockStart: the block in
+                # content with its input as a (so far empty) string, and the
+                # matching tool_call_chunk.
                 yield AIMessageChunk(
-                    content=[],
+                    content=[
+                        {
+                            "type": "tool_use",
+                            "name": event.name,
+                            "id": event.tool_use_id,
+                            "input": "",
+                            "index": index,
+                        }
+                    ],
                     tool_call_chunks=[
                         {"name": event.name, "args": "", "id": event.tool_use_id, "index": index}
                     ],
@@ -172,6 +183,7 @@ class ScriptedChatModel(BaseChatModel):
                     f"(final {text!r} vs streamed {''.join(streamed)!r})"
                 )
                 tool_chunks = []
+                tool_content = []
                 for block in event.content:
                     if isinstance(block, ToolUseBlock):
                         index = started.get(block.tool_use_id, len(started) + 1)
@@ -180,6 +192,20 @@ class ScriptedChatModel(BaseChatModel):
                         # chunks, as langchain-aws relies on.
                         announced = block.tool_use_id in started
                         started.setdefault(block.tool_use_id, index)
+                        # The input's JSON arrives as string fragments in the
+                        # content block too (a delta chunk, minus name/id).
+                        tool_content.append(
+                            {
+                                "type": "tool_use",
+                                "input": json.dumps(block.input),
+                                "index": index,
+                                **(
+                                    {}
+                                    if announced
+                                    else {"name": block.name, "id": block.tool_use_id}
+                                ),
+                            }
+                        )
                         tool_chunks.append(
                             {
                                 "name": None if announced else block.name,
@@ -190,7 +216,7 @@ class ScriptedChatModel(BaseChatModel):
                         )
                 usage = event.usage
                 yield AIMessageChunk(
-                    content=[],
+                    content=tool_content,
                     tool_call_chunks=tool_chunks,
                     response_metadata={"stopReason": _WIRE_STOP[event.stop_reason]},
                     usage_metadata=UsageMetadata(
