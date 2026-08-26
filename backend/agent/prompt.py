@@ -32,6 +32,14 @@ NO_MORE_TOOLS_HINT = (
     "(Guidance: do not call any more tools. Reply to the listener directly with what you have.)"
 )
 
+# Sent when a model call produced nothing the listener could see -- Nova
+# occasionally answers entirely inside thinking tags, which the provider
+# strips. One nudge, then a fixed line: an empty bubble is never shown.
+EMPTY_REPLY_HINT = (
+    "(Guidance: your last reply contained no visible text. Write your reply to "
+    "the listener now, in plain sentences, without any thinking tags.)"
+)
+
 # What the listener sees when the model declined to answer. Fixed text, never
 # retried: a refusal is a signal, not a transient error.
 REFUSAL_TEXT = (

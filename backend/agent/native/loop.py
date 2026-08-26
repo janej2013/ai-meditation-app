@@ -38,7 +38,13 @@ from agent.contracts import (
     Usage,
 )
 from agent.native.llm.base import LLMProvider
-from agent.prompt import NO_MORE_TOOLS_HINT, REFUSAL_TEXT, SYSTEM_PROMPT, user_message_text
+from agent.prompt import (
+    EMPTY_REPLY_HINT,
+    NO_MORE_TOOLS_HINT,
+    REFUSAL_TEXT,
+    SYSTEM_PROMPT,
+    user_message_text,
+)
 from agent.tools.registry import ToolContext, ToolRegistry
 
 logger = logging.getLogger(__name__)
@@ -138,6 +144,31 @@ class NativeEngine:
                 return self._refused(rounds, tool_log, usage, inp.turn, iterations)
 
         assert final is not None  # the loop body ran at least once
+        if finalized is None and not _has_visible_text(final.content):
+            # Nothing the listener could read: one nudge, then a fixed line.
+            # Not counted as an iteration -- it cannot start a tool round.
+            if not deadline.exhausted():
+                if final.content:
+                    # Keep the exchange valid: what came back, then the nudge
+                    # as a new user message. An empty assistant message is
+                    # not something Converse accepts, hence the branch.
+                    messages.append(Message.assistant(final.content))
+                    messages.append(Message.user_text(EMPTY_REPLY_HINT))
+                else:
+                    messages[-1] = messages[-1].with_text_appended(EMPTY_REPLY_HINT)
+                final = _without_tool_uses(
+                    await self._call(system, messages, tool_specs, "auto", emit)
+                )
+                usage = usage + final.usage
+                if final.stop_reason == "refusal":
+                    return self._refused(rounds, tool_log, usage, inp.turn, iterations)
+            if not _has_visible_text(final.content):
+                logger.info("empty reply replaced with the fallback turn=%d", inp.turn)
+                final = Final(
+                    content=[TextBlock(text=_FALLBACK_TEXT)],
+                    stop_reason="end_turn",
+                    usage=final.usage,
+                )
         # A turn that ended on its terminal tool is complete, whatever the
         # model's last stop reason was.
         stop_reason = "end_turn" if finalized is not None else final.stop_reason
@@ -195,6 +226,10 @@ class NativeEngine:
             usage=usage,
             stop_reason="refusal",
         )
+
+
+def _has_visible_text(content: list[ContentBlock]) -> bool:
+    return any(isinstance(b, TextBlock) and b.text.strip() for b in content)
 
 
 def _without_tool_uses(final: Final) -> Final:

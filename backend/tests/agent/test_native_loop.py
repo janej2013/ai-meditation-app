@@ -355,3 +355,64 @@ def test_stream_without_final_is_a_protocol_error():
 
     with pytest.raises(ProviderProtocolError):
         run_turn(provider)
+
+
+# ----------------------------------------------------------------------
+# Empty replies
+# ----------------------------------------------------------------------
+
+
+def empty_reply(content=None):
+    from agent.contracts import Final, Usage
+
+    return [Final(content=content or [], stop_reason="end_turn", usage=Usage())]
+
+
+def test_empty_reply_is_nudged_once():
+    from agent.prompt import EMPTY_REPLY_HINT
+
+    provider = FakeProvider([empty_reply(), text_reply("here you go")])
+
+    result, events = run_turn(provider)
+
+    assert result.content == [TextBlock(text="here you go")]
+    assert events == [TextDelta("here you go")]
+    assert len(provider.calls) == 2
+    assert provider.calls[1].last_user_text.endswith(EMPTY_REPLY_HINT)
+    assert provider.calls[1].tool_choice == "auto"
+
+
+def test_blank_text_counts_as_empty_and_keeps_the_exchange_valid():
+    from agent.prompt import EMPTY_REPLY_HINT
+
+    provider = FakeProvider([empty_reply([TextBlock(text="  \n")]), text_reply("ok")])
+
+    result, _ = run_turn(provider)
+
+    assert result.content == [TextBlock(text="ok")]
+    second = provider.calls[1].messages
+    assert second[-2] == Message.assistant([TextBlock(text="  \n")])
+    assert second[-1] == Message.user_text(EMPTY_REPLY_HINT)
+
+
+def test_persistently_empty_reply_becomes_the_fallback_line():
+    from agent.native.loop import _FALLBACK_TEXT
+
+    provider = FakeProvider([empty_reply(), empty_reply(), text_reply("never")])
+
+    result, _ = run_turn(provider)
+
+    assert result.content == [TextBlock(text=_FALLBACK_TEXT)]
+    assert result.stop_reason == "end_turn"
+    assert provider.remaining == 1  # no third call
+
+
+def test_empty_reply_after_the_deadline_falls_back_without_a_retry():
+    from agent.native.loop import _FALLBACK_TEXT
+
+    provider = FakeProvider([empty_reply(), text_reply("never")])
+
+    result, _ = run_turn(provider, deadline=Deadline.after(0))
+
+    assert result.content == [TextBlock(text=_FALLBACK_TEXT)]
+    assert len(provider.calls) == 1
