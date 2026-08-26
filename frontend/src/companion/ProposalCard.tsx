@@ -9,6 +9,7 @@ interface Props {
   proposal: Proposal
   credits: number | null
   briefOpen: boolean
+  changing: boolean
   starting: boolean
   onOpenBrief: () => void
   onCloseBrief: () => void
@@ -20,6 +21,7 @@ export default function ProposalCard({
   proposal,
   credits,
   briefOpen,
+  changing,
   starting,
   onOpenBrief,
   onCloseBrief,
@@ -54,9 +56,15 @@ export default function ProposalCard({
         <button className="btn-primary proposal-start" onClick={onStart} disabled={starting}>
           {starting ? 'Starting…' : 'Start the meditation'}
         </button>
-        <button className="btn-ghost proposal-change" onClick={onChange} disabled={starting}>
-          Change something
-        </button>
+        {changing ? (
+          <div className="proposal-hint" role="status">
+            Tell me what you'd like different, and I'll put another one together.
+          </div>
+        ) : (
+          <button className="btn-ghost proposal-change" onClick={onChange} disabled={starting}>
+            Change something
+          </button>
+        )}
       </div>
     </div>
   )

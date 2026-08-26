@@ -69,6 +69,7 @@ export interface CompanionState {
   streamText: string
   proposal: Proposal | null
   briefOpen: boolean
+  changing: boolean
   turn: number
   turnsLeft: number
   compError: CompanionError
@@ -95,6 +96,9 @@ export function useCompanion(onStarted: (jobId: string) => void) {
   const [streamText, setStreamText] = useState('')
   const [proposal, setProposal] = useState<Proposal | null>(null)
   const [briefOpen, setBriefOpen] = useState(false)
+  // "Change something" was tapped: the card stays (Start is still there)
+  // but says it is listening, until the next message replaces the proposal.
+  const [changing, setChanging] = useState(false)
   const [turn, setTurn] = useState(0)
   const [turnsLeft, setTurnsLeft] = useState(MAX_TURNS)
   const [compError, setCompError] = useState<CompanionError>(null)
@@ -272,6 +276,7 @@ export function useCompanion(onStarted: (jobId: string) => void) {
     setDraft('')
     setProposal(null)
     setBriefOpen(false)
+    setChanging(false)
     setCrisis(false)
     setCompError(null)
     await respond(id, text)
@@ -315,6 +320,7 @@ export function useCompanion(onStarted: (jobId: string) => void) {
     setStreamText('')
     setProposal(null)
     setBriefOpen(false)
+    setChanging(false)
     setTurn(0)
     setTurnsLeft(MAX_TURNS)
     setCompError(null)
@@ -332,6 +338,7 @@ export function useCompanion(onStarted: (jobId: string) => void) {
     streamText,
     proposal,
     briefOpen,
+    changing,
     turn,
     turnsLeft,
     compError,
@@ -348,6 +355,7 @@ export function useCompanion(onStarted: (jobId: string) => void) {
     sendAgain,
     start,
     startOver,
+    beginChange: () => setChanging(true),
     openBrief: () => setBriefOpen(true),
     closeBrief: () => setBriefOpen(false),
     dismissError: () => setCompError(null),

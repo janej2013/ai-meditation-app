@@ -543,6 +543,21 @@ input::placeholder {
 .proposal-change:hover {
   color: oklch(0.925 0.014 275);
 }
+.proposal-hint {
+  min-height: 44px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 12px;
+  text-align: center;
+  font: 400 13px/1.5 var(--font-sans);
+  color: oklch(0.76 0.018 275);
+}
+.companion-field:focus-visible {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft-24);
+}
 
 .companion-input {
   flex: none;

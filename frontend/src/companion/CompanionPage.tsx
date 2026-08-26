@@ -114,13 +114,17 @@ export default function CompanionPage() {
             proposal={state.proposal}
             credits={state.credits}
             briefOpen={state.briefOpen}
+            changing={state.changing}
             starting={state.starting}
             onOpenBrief={companion.openBrief}
             onCloseBrief={companion.closeBrief}
             onStart={() => void companion.start()}
             onChange={() => {
               companion.dismissError()
-              inputRef.current?.focus()
+              companion.beginChange()
+              const field = inputRef.current
+              field?.focus()
+              field?.scrollIntoView({ block: 'nearest' })
             }}
           />
         )}

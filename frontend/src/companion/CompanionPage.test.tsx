@@ -203,6 +203,9 @@ describe('CompanionPage', () => {
 
     fireEvent.click(screen.getByText('Change something'))
     expect(screen.getByText('5 min')).toBeInTheDocument()
+    expect(screen.getByText('Start the meditation')).toBeInTheDocument()
+    expect(screen.getByText(/Tell me what you'd like different/)).toBeInTheDocument()
+    expect(screen.queryByText('Change something')).not.toBeInTheDocument()
     expect(screen.getByLabelText('Message')).toHaveFocus()
 
     scriptTurn([delta('What would you change?'), done(2, false)])
@@ -210,6 +213,7 @@ describe('CompanionPage', () => {
 
     await screen.findByText('What would you change?')
     expect(screen.queryByText('5 min')).not.toBeInTheDocument()
+    expect(screen.queryByText(/Tell me what you'd like different/)).not.toBeInTheDocument()
   })
 
   it('[errors] model_unavailable offers Send again, which resends the same text', async () => {
