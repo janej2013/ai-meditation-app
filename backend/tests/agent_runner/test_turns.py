@@ -401,3 +401,43 @@ def test_langgraph_engine_streams_the_same_events(api, deps, store, dynamodb_cli
     assert [t["toolUse"]["name"] for t in turns[0].tool_calls[0]["assistant_content"]] == [
         "get_session_history"
     ]
+
+
+# ----------------------------------------------------------------------
+# Two prefixes, one engine per function
+# ----------------------------------------------------------------------
+
+
+def test_the_routes_answer_under_both_prefixes(api, dynamodb_client):
+    """agent/* and agent-lg/* are CloudFront's routing keys; the runner
+    serves the same routes under both."""
+    seed_pro_user(dynamodb_client)
+
+    first = api.request("POST", "/agent/sessions")
+    second = api.request("POST", "/agent-lg/sessions")
+
+    assert first.status_code == 201 and second.status_code == 201
+    assert api.request("GET", f"/agent-lg/sessions/{first.json()['session_id']}").status_code == 200
+
+
+def test_a_session_from_the_other_engine_is_refused_before_anything_is_written(
+    api, deps, store, dynamodb_client
+):
+    """A native session sent to the LangGraph function (or the reverse) is
+    409 wrong_engine on every writing route, and still readable."""
+    from dataclasses import replace
+
+    seed_pro_user(dynamodb_client)
+    session_id = create_session(api)  # engine: native (the settings fixture)
+    deps.settings = replace(deps.settings, engine="langgraph")
+
+    turn_response = api.request("POST", f"/agent/sessions/{session_id}/turns", json={"text": "hi"})
+    confirm_response = api.request("POST", f"/agent/sessions/{session_id}/confirm")
+    abandon_response = api.request("POST", f"/agent/sessions/{session_id}/abandon")
+
+    for response in (turn_response, confirm_response, abandon_response):
+        assert response.status_code == 409 and response.json()["detail"] == "wrong_engine"
+    assert api.request("GET", f"/agent/sessions/{session_id}").status_code == 200
+    session = store.get_agent_session(USER_ID, session_id)
+    assert session is not None and session.status is AgentSessionStatus.ACTIVE
+    assert session.in_flight is None

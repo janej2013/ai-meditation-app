@@ -335,7 +335,7 @@ prompt 层的策略（引导资源、不展开）才是对的粒度。价格 $0.
 任何文件 import `langchain*` / `langgraph*` 即失败；反向不限。依赖放在 `pyproject.toml` 的
 `agent-langgraph` extra（`langchain-core`、`langchain-aws`、`langgraph`），只装进 agent 镜像，不进 shared layer。
 
-**部署形态**：同一镜像起两个 Lambda（`AgentFunction` env `native`，`AgentFunctionLangGraph` env `langgraph`），
+**部署形态**（L2 已实现）：同一镜像起两个 Lambda（`AgentFunction` env `native`，`AgentFunctionLangGraph` env `langgraph`），
 站点分发两条 behavior `/agent/*` 与 `/agent-lg/*`；零常驻，所以两个函数的空闲成本仍是 0。
 会话头记录 `engine`，一个会话从头到尾用同一个引擎；T-item 与 EMF 指标都带 `Engine` 维度，
 **对比数据（轮延迟、token、缓存命中、工具错误）从上线第一天起自动积累**。PWA 默认 `native`，
@@ -552,7 +552,8 @@ Pro 定价必须覆盖这一块加 20 次生成的 TTS/LLM 成本 —— 这是�
 | A6 | 08-26 | 前端**懒建会话**（首条消息才 `POST /sessions`，看一眼不占月配额）；`done` 增 `turns_left`；`GET /agent/memory` 增 `sessions_this_month`；Claude Design 的十张画板作为规格；`?engine=` 切换未做（等 L2）。审查后补：账户 pill 首次挂载即读、ambient 停止胜过加载竞争。 |
 | A7 | 08-26 | README、`CLAUDE.md`（约束 2 改为 confirm 路由；新增约束 10、11）、`docs/privacy.md`（放 docs，不进 PWA）、`deployment.md` 成本节、本表。 |
 | **L1** | 08-26 | `agent/langgraph/`（`messages` / `tools` / `graph` / `engine`）+ `agent-langgraph` extra（langchain-core 0.3.86、langchain-aws 0.2.35、langgraph 0.6.11）；契约测试 24 个场景 × 2 引擎逐字段相等；镜像 282 → 445 MB。与 §3.4 表的偏离：① **工具绑定不走 `StructuredTool`**——`convert_to_openai_tool` 会剥掉 Pydantic 的 `title`，请求字节与 native 不等；改为把 registry 的 Converse `toolSpec` dict 直接交给 `bind_tools`（langchain-aws 原样透传），`StructuredTool` 的差异留在测试里作 L3 素材；② **不用 `ToolNode`**——它自己做 schema 校验、自己措辞错误文案、未知工具另有文案，transcript 会在重试最要紧的路径上分叉；图里的 `tools` 节点直接调 `ToolRegistry.execute`；③ `ToolStarted` 从模型流的 `tool_call_chunks` 发出（与 native 的 `ToolUseStart` 同时机），`ProposalReady` 用 `adispatch_custom_event` 走同一条事件队列以保序；④ `recursion_limit = 2×4+2`：LangGraph 把写入初始状态也算一步；⑤ 空回复 nudge 是图的第二次调用（`iterations` 预置为上限 → wrap-up 模式），不是图内节点。「决定」抽到中立模块：`agent/model_ids.py`、`agent/stop_reasons.py`、`agent/thinking.py`。dev 验证：`agent.cli --engine langgraph --dry-run` 走通 history → 提议 → 确认；evals 双引擎各 **18/21**（同一个 soft 失败；硬失败各不相同，属模型方差，表贴在 PR #30）。第一次真跑抓到一个 fake 没覆盖的形状：流式 `tool_use` 块的 `input` 是 JSON 字符串（已修，fake 改为镜像 adapter 的分片）。 |
-| 未做 | — | `offer_choices`（第二阶段）；`BedrockMantleProvider`；guardrail（`guardrailConfig` 已留位，未配）；L2（第二个函数与 `/agent-lg/*`）、L3（对比文档）。 |
+| **L2** | 08-26 | `AgentFunctionLangGraph`（同一镜像 asset，只推一次）+ `agent-lg/*` behavior（与 `agent/*` 共用一个 OAC，各自的双重授权 permission）+ runner 在 `/agent` 与 `/agent-lg` 两个前缀下挂同一套路由 + 409 `wrong_engine` 守门（写路由在 claim 前比对会话头 `engine`；`db.claim_turn` 的条件本来就含 engine，但那会读作 busy）+ PWA `?engine=langgraph`（`sessionStorage` 存 `{id, engine}`，换引擎先 abandon）+ CloudWatch dashboard `Meditation-<env>-Agent`。偏离：reserved concurrency **对半**而非各设一份（同一配额）；两个函数**总是**部署（空闲为零，不设开关）。 |
+| 未做 | — | `offer_choices`（第二阶段）；`BedrockMantleProvider`；guardrail（`guardrailConfig` 已留位，未配）；L3（对比文档）。 |
 
 ---
 

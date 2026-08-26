@@ -21,7 +21,11 @@ if shutil.which("node") is None:  # pragma: no cover - environment guard
 from aws_cdk import assertions
 from conftest import ACCOUNT, AU_PROFILE, REGION, build_agent_stack
 
-from stacks.agent_stack import RECOMMENDED_RESERVED_CONCURRENCY
+from stacks.agent_stack import (
+    DASHBOARD_METRICS,
+    RECOMMENDED_RESERVED_CONCURRENCY,
+    split_concurrency,
+)
 from stacks.bedrock import bedrock_invoke_resources
 
 REQUIRED_ENV = {
@@ -45,9 +49,18 @@ def template(stack) -> assertions.Template:
     return assertions.Template.from_stack(stack)
 
 
+def functions(template: assertions.Template) -> dict[str, dict]:
+    """Both functions' properties, keyed by engine."""
+    found = {}
+    for fn in template.find_resources("AWS::Lambda::Function").values():
+        found[fn["Properties"]["Environment"]["Variables"]["AGENT_ENGINE"]] = fn["Properties"]
+    return found
+
+
 def function_properties(template: assertions.Template) -> dict:
-    [fn] = template.find_resources("AWS::Lambda::Function").values()
-    return fn["Properties"]
+    """The native function's, where a test means the one that has always
+    been there."""
+    return functions(template)["native"]
 
 
 def statements(template: assertions.Template) -> list[dict]:
@@ -67,12 +80,41 @@ def actions(statement: dict) -> set[str]:
 # ----------------------------------------------------------------------
 
 
-def test_one_container_function_with_one_streaming_url(template):
-    template.resource_count_is("AWS::Lambda::Function", 1)
-    template.resource_count_is("AWS::Lambda::Url", 1)
-    template.has_resource_properties(
-        "AWS::Lambda::Url", {"AuthType": "AWS_IAM", "InvokeMode": "RESPONSE_STREAM"}
+def test_two_container_functions_each_with_a_streaming_url(template):
+    template.resource_count_is("AWS::Lambda::Function", 2)
+    template.resource_count_is("AWS::Lambda::Url", 2)
+    for url in template.find_resources("AWS::Lambda::Url").values():
+        assert url["Properties"]["AuthType"] == "AWS_IAM"
+        assert url["Properties"]["InvokeMode"] == "RESPONSE_STREAM"
+    assert set(functions(template)) == {"native", "langgraph"}
+
+
+def test_the_native_function_keeps_its_logical_id(template):
+    """Renaming it would replace the deployed function and its URL."""
+    ids = list(template.find_resources("AWS::Lambda::Function"))
+    assert any(
+        i.startswith("AgentFunction") and not i.startswith("AgentFunctionLangGraph") for i in ids
     )
+    assert any(i.startswith("AgentFunctionLangGraph") for i in ids)
+
+
+def test_both_functions_share_one_image(template):
+    """Same build context, same asset hash: one image, pushed once."""
+    [native, langgraph] = [
+        functions(template)[e]["Code"]["ImageUri"] for e in ("native", "langgraph")
+    ]
+    assert native == langgraph
+
+
+def test_the_functions_differ_only_in_their_engine(template):
+    native, langgraph = functions(template)["native"], functions(template)["langgraph"]
+    for key in ("MemorySize", "Timeout", "Architectures", "PackageType"):
+        assert native[key] == langgraph[key]
+    native_env = dict(native["Environment"]["Variables"])
+    langgraph_env = dict(langgraph["Environment"]["Variables"])
+    assert native_env.pop("AGENT_ENGINE") == "native"
+    assert langgraph_env.pop("AGENT_ENGINE") == "langgraph"
+    assert native_env == langgraph_env
 
 
 def test_function_shape(template):
@@ -93,7 +135,22 @@ def test_reserved_concurrency_is_opt_in():
     capped = assertions.Template.from_stack(
         build_agent_stack(reserved_concurrency=RECOMMENDED_RESERVED_CONCURRENCY)
     )
-    assert function_properties(capped)["ReservedConcurrentExecutions"] == 10
+    # One quota, two functions: half each.
+    assert functions(capped)["native"]["ReservedConcurrentExecutions"] == 5
+    assert functions(capped)["langgraph"]["ReservedConcurrentExecutions"] == 5
+
+
+def test_a_reservation_is_split_exactly_with_the_remainder_to_native():
+    assert split_concurrency(None) == (None, None)
+    assert split_concurrency(10) == (5, 5)
+    assert split_concurrency(3) == (2, 1)
+    assert split_concurrency(2) == (1, 1)
+
+
+@pytest.mark.parametrize("total", [0, 1])
+def test_a_reservation_too_small_for_two_engines_fails_the_synth(total):
+    with pytest.raises(ValueError, match="one per engine"):
+        build_agent_stack(reserved_concurrency=total)
 
 
 def test_environment_is_exactly_what_the_runner_reads(template):
@@ -110,7 +167,22 @@ def test_environment_is_exactly_what_the_runner_reads(template):
 
 
 def test_log_retention_is_bounded(template):
-    template.has_resource_properties("AWS::Logs::LogGroup", {"RetentionInDays": 30})
+    template.resource_count_is("AWS::Logs::LogGroup", 2)
+    for group in template.find_resources("AWS::Logs::LogGroup").values():
+        assert group["Properties"]["RetentionInDays"] == 30
+
+
+def test_the_dashboard_compares_the_engines(template):
+    """Every metric on it carries the Engine dimension, for both engines."""
+    template.resource_count_is("AWS::CloudWatch::Dashboard", 1)
+    [dashboard] = template.find_resources("AWS::CloudWatch::Dashboard").values()
+    assert dashboard["Properties"]["DashboardName"] == "Meditation-dev-Agent"
+    body = str(dashboard["Properties"]["DashboardBody"])
+    for name in DASHBOARD_METRICS:
+        assert name in body
+    for engine in ("native", "langgraph"):
+        assert body.count(f'"Engine","{engine}"') >= len(DASHBOARD_METRICS)
+    assert "Meditation/Agent" in body
 
 
 # ----------------------------------------------------------------------
@@ -119,9 +191,11 @@ def test_log_retention_is_bounded(template):
 
 
 def test_table_grant_is_the_api_grant_plus_delete(template):
-    [table_statement] = [
+    table_statements = [
         s for s in statements(template) if any(a.startswith("dynamodb:") for a in actions(s))
     ]
+    assert len(table_statements) == 2  # one per function, identical
+    [table_statement] = table_statements[:1]
 
     assert actions(table_statement) == {
         "dynamodb:GetItem",
@@ -132,18 +206,25 @@ def test_table_grant_is_the_api_grant_plus_delete(template):
     }
 
 
+def one_per_function(matches: list[dict]) -> dict:
+    """The two functions get identical grants; return the one statement
+    they share, having checked there is exactly one each."""
+    assert len(matches) == 2 and matches[0] == matches[1]
+    return matches[0]
+
+
 def test_may_start_the_generation_machine_and_nothing_else_there(template):
-    [sfn_statement] = [
-        s for s in statements(template) if any(a.startswith("states:") for a in actions(s))
-    ]
+    sfn_statement = one_per_function(
+        [s for s in statements(template) if any(a.startswith("states:") for a in actions(s))]
+    )
 
     assert actions(sfn_statement) == {"states:StartExecution"}
 
 
 def test_bedrock_grant_covers_streaming(template):
-    [bedrock] = [
-        s for s in statements(template) if any(a.startswith("bedrock:") for a in actions(s))
-    ]
+    bedrock = one_per_function(
+        [s for s in statements(template) if any(a.startswith("bedrock:") for a in actions(s))]
+    )
 
     assert actions(bedrock) == {"bedrock:InvokeModel", "bedrock:InvokeModelWithResponseStream"}
     resources = (
@@ -201,9 +282,9 @@ def test_au_profile_grants_the_profile_and_both_australian_regions():
     stack = build_agent_stack(model_id=AU_PROFILE)
     template = assertions.Template.from_stack(stack)
 
-    [bedrock] = [
-        s for s in statements(template) if any(a.startswith("bedrock:") for a in actions(s))
-    ]
+    bedrock = one_per_function(
+        [s for s in statements(template) if any(a.startswith("bedrock:") for a in actions(s))]
+    )
     assert bedrock["Resource"] == bedrock_invoke_resources(
         REGION, ACCOUNT, AU_PROFILE, allow_offshore=False
     )

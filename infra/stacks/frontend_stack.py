@@ -15,7 +15,8 @@ optional. Two behaviours, deliberately different:
   turn into a round trip to the API for every switch. These carry no user
   content, so there is nothing to protect.
 
-**The companion agent** rides on the site distribution as an ``agent/*``
+**The companion agent** rides on the site distribution as ``agent/*`` (and
+its LangGraph twin as ``agent-lg/*``), one
 behaviour over the agent Lambda's Function URL. Same origin as the PWA, so
 no CORS; origin access control so the URL answers only to this distribution.
 The dependency runs one way (Frontend imports the URL): CDK creates the
@@ -75,6 +76,7 @@ class FrontendStack(Stack):
         domain_name: str | None = None,
         hosted_zone_id: str | None = None,
         agent_function_url: lambda_.IFunctionUrl | None = None,
+        agent_langgraph_function_url: lambda_.IFunctionUrl | None = None,
         **kwargs,
     ) -> None:
         super().__init__(scope, construct_id, **kwargs)
@@ -85,8 +87,20 @@ class FrontendStack(Stack):
         # None keeps the stack deployable without the agent stack (and keeps
         # the existing tests' constructor calls valid).
         additional_behaviors: dict[str, cloudfront.BehaviorOptions] = {}
-        if agent_function_url is not None:
-            additional_behaviors["agent/*"] = self._agent_behavior(agent_function_url)
+        agent_urls = {
+            "agent/*": agent_function_url,
+            "agent-lg/*": agent_langgraph_function_url,
+        }
+        if any(agent_urls.values()):
+            # One OAC for both agent origins: it is the distribution's
+            # identity towards Lambda, not a per-origin thing, and keeping
+            # the construct id means the deployed OAC is not replaced.
+            oac = cloudfront.FunctionUrlOriginAccessControl(
+                self, "AgentOac", signing=cloudfront.Signing.SIGV4_ALWAYS
+            )
+            for pattern, url in agent_urls.items():
+                if url is not None:
+                    additional_behaviors[pattern] = self._agent_behavior(url, oac)
 
         self.site_bucket = s3.Bucket(
             self,
@@ -131,7 +145,11 @@ class FrontendStack(Stack):
         )
 
         if agent_function_url is not None:
-            self._grant_dual_auth_invoke(agent_function_url)
+            self._grant_dual_auth_invoke(agent_function_url, "AgentInvokeFunctionForOac")
+        if agent_langgraph_function_url is not None:
+            self._grant_dual_auth_invoke(
+                agent_langgraph_function_url, "AgentLangGraphInvokeFunctionForOac"
+            )
 
         self.audio_distribution, self.audio_key_group, self.audio_key_pair_id = (
             self._build_audio_distribution(
@@ -175,8 +193,14 @@ class FrontendStack(Stack):
     # The companion agent
     # ------------------------------------------------------------------
 
-    def _agent_behavior(self, function_url: lambda_.IFunctionUrl) -> cloudfront.BehaviorOptions:
-        """``/agent/*`` -> the agent Lambda's Function URL, signed by CloudFront.
+    def _agent_behavior(
+        self,
+        function_url: lambda_.IFunctionUrl,
+        oac: cloudfront.FunctionUrlOriginAccessControl,
+    ) -> cloudfront.BehaviorOptions:
+        """``/agent/*`` (and ``/agent-lg/*``) -> an agent Lambda's Function URL,
+        signed by CloudFront. The path is only the routing key: which engine
+        answers is the function's own AGENT_ENGINE.
 
         Every request is a live turn of conversation: nothing is cacheable,
         POST and DELETE must pass, and the reply is a server-sent event stream
@@ -192,9 +216,7 @@ class FrontendStack(Stack):
         """
         origin = origins.FunctionUrlOrigin.with_origin_access_control(
             function_url,
-            origin_access_control=cloudfront.FunctionUrlOriginAccessControl(
-                self, "AgentOac", signing=cloudfront.Signing.SIGV4_ALWAYS
-            ),
+            origin_access_control=oac,
             read_timeout=Duration.seconds(60),
         )
         return cloudfront.BehaviorOptions(
@@ -206,7 +228,9 @@ class FrontendStack(Stack):
             compress=False,
         )
 
-    def _grant_dual_auth_invoke(self, function_url: lambda_.IFunctionUrl) -> None:
+    def _grant_dual_auth_invoke(
+        self, function_url: lambda_.IFunctionUrl, construct_id: str
+    ) -> None:
         """The second half of the permission CDK's OAC origin grants.
 
         Function URLs created since October 2025 check *two* actions on the
@@ -219,7 +243,7 @@ class FrontendStack(Stack):
         """
         lambda_.CfnPermission(
             self,
-            "AgentInvokeFunctionForOac",
+            construct_id,
             action="lambda:InvokeFunction",
             function_name=function_url.function_arn,
             principal="cloudfront.amazonaws.com",

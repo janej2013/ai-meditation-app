@@ -48,9 +48,9 @@ function GeneratingProbe() {
   return <div>GENERATING SCREEN {state?.duration ?? 'no duration'}</div>
 }
 
-function renderPage() {
+function renderPage(path = '/companion') {
   return render(
-    <MemoryRouter initialEntries={['/companion']}>
+    <MemoryRouter initialEntries={[path]}>
       <Routes>
         <Route path="/companion" element={<CompanionPage />} />
         <Route path="/generating/:jobId" element={<GeneratingProbe />} />
@@ -162,7 +162,13 @@ describe('CompanionPage', () => {
     await act(async () => release())
     expect(await screen.findByText('That gap between tired and asleep.')).toBeInTheDocument()
     expect(screen.queryByText('Looking back at your earlier sessions…')).not.toBeInTheDocument()
-    expect(sendTurn).toHaveBeenCalledWith('s1', 'tired but wired', expect.any(Function), expect.anything())
+    expect(sendTurn).toHaveBeenCalledWith(
+      's1',
+      'tired but wired',
+      expect.any(Function),
+      expect.anything(),
+      'native',
+    )
   })
 
   it('[proposal] fills the card from the pending brief and starts on confirm', async () => {
@@ -197,7 +203,7 @@ describe('CompanionPage', () => {
       fireEvent.click(screen.getByText('Start the meditation'))
     })
 
-    expect(confirmSession).toHaveBeenCalledWith('s1')
+    expect(confirmSession).toHaveBeenCalledWith('s1', 'native')
     expect(await screen.findByText('GENERATING SCREEN 10')).toBeInTheDocument()
     expect(mixer.startAmbient).toHaveBeenCalledWith('https://audio.test/bgm.mp3')
     expect(mixer.stopAmbient).not.toHaveBeenCalled()
@@ -258,7 +264,7 @@ describe('CompanionPage', () => {
     await act(async () => {
       fireEvent.click(screen.getByText('Start over'))
     })
-    expect(abandonSession).toHaveBeenCalledWith('s1')
+    expect(abandonSession).toHaveBeenCalledWith('s1', 'native')
     expect(screen.getByText(/Tell me how tonight feels/)).toBeInTheDocument()
   })
 
@@ -381,6 +387,60 @@ describe('CompanionPage', () => {
     expect(screen.getByText('earlier')).toBeInTheDocument()
     expect(screen.getByText('8 min')).toBeInTheDocument()
     expect(createSession).not.toHaveBeenCalled()
+  })
+
+  it('[engine] ?engine=langgraph opens the session on the other path', async () => {
+    scriptTurn([delta('From the graph.'), done(1)])
+    renderPage('/companion?engine=langgraph')
+
+    expect(document.querySelector('.companion')?.getAttribute('data-engine')).toBe('langgraph')
+    await say('hello')
+
+    expect(createSession).toHaveBeenCalledWith('langgraph')
+    expect(await screen.findByText('From the graph.')).toBeInTheDocument()
+    expect(sendTurn).toHaveBeenCalledWith('s1', 'hello', expect.any(Function), expect.anything(), 'langgraph')
+    expect(JSON.parse(sessionStorage.getItem('drift:companion-session') ?? '{}')).toEqual({
+      id: 's1',
+      engine: 'langgraph',
+    })
+  })
+
+  it('[engine] a reload resumes on the engine the session was opened on', async () => {
+    sessionStorage.setItem('drift:companion-session', JSON.stringify({ id: 's1', engine: 'langgraph' }))
+    renderPage('/companion?engine=langgraph')
+
+    await waitFor(() => expect(getSession).toHaveBeenCalledWith('s1', 'langgraph'))
+    expect(createSession).not.toHaveBeenCalled()
+  })
+
+  it('[engine] a stored session on the other engine is let go, not resumed', async () => {
+    sessionStorage.setItem('drift:companion-session', JSON.stringify({ id: 'old', engine: 'langgraph' }))
+    scriptTurn([delta('Fresh start.'), done(1)])
+    renderPage('/companion')
+
+    expect(abandonSession).toHaveBeenCalledWith('old', 'langgraph')
+    expect(getSession).not.toHaveBeenCalled()
+    expect(sessionStorage.getItem('drift:companion-session')).toBeNull()
+    await say('hello')
+    expect(createSession).toHaveBeenCalledWith('native')
+  })
+
+  it('[engine] wrong_engine offers Start over rather than a retry that cannot land', async () => {
+    scriptTurn([], { reject: new ApiError(409, 'wrong_engine') })
+    renderPage()
+
+    await say('hello')
+
+    expect(await screen.findByText(/We've talked for a while/)).toBeInTheDocument()
+    expect(screen.getByText('Start over')).toBeInTheDocument()
+    expect(screen.queryByText('Send again')).not.toBeInTheDocument()
+  })
+
+  it('[engine] the pre-L2 storage format still resumes, as native', async () => {
+    sessionStorage.setItem('drift:companion-session', 's1')
+    renderPage()
+
+    await waitFor(() => expect(getSession).toHaveBeenCalledWith('s1', 'native'))
   })
 
   it('a closed stored session is forgotten', async () => {

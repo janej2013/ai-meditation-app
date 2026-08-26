@@ -111,9 +111,16 @@ prod (`DURATION_MINUTES_OVERRIDE`), so a dev end-to-end run costs cents.
 
 ## The companion agent (`Meditation-<env>-Agent`)
 
+Two functions off one image — `AgentFunction` (the hand-built engine, `AGENT_ENGINE=native`)
+and `AgentFunctionLangGraph` (`AGENT_ENGINE=langgraph`) — each behind its own IAM-only Function
+URL, fronted by the site distribution as `agent/*` and `agent-lg/*`. Both are zero-cost while
+idle, so both are always deployed; the PWA uses the native one unless opened as
+`/companion?engine=langgraph`. A session is pinned to the engine that opened it: sent to the
+other function it is refused with 409 `wrong_engine`.
+
 Deployed with everything else by `make deploy ENV=<env>`; on its own, deploy the agent stack
-**and** the frontend stack, because the site distribution's `agent/*` behaviour and the invoke
-permission live in the latter:
+**and** the frontend stack, because the site distribution's two behaviours and the invoke
+permissions live in the latter:
 
 ```bash
 make deploy ENV=dev STACKS="Meditation-dev-Agent Meditation-dev-Frontend"
@@ -132,8 +139,10 @@ make deploy ENV=dev STACKS=Meditation-dev-Agent AGENT_MODEL=au.anthropic.claude-
 `us.`, `eu.`, `apac.` and `global.` profiles are refused at synth: the conversation stays in
 Australia.
 
-**Concurrency ceiling.** The function's reserved concurrency (the agent's cost ceiling) is off
-by default: Lambda refuses a reservation that would leave the account under 10 unreserved
+**Concurrency ceiling.** The functions' reserved concurrency (the agent's cost ceiling) is off
+by default; when set, the number is split between the two functions (the native engine gets
+the larger half of an odd total; fewer than 2 fails the synth), because it is one account quota
+either way. It is off by default: Lambda refuses a reservation that would leave the account under 10 unreserved
 executions, and a new account's whole concurrency quota is 10 -- which already caps the function
 at 10. Once the quota has been raised (Service Quotas → Lambda → *Concurrent executions*), turn
 the ceiling on:
@@ -155,7 +164,18 @@ curl -s -o /dev/null -w '%{http_code}\n' -X POST "$(aws cloudformation describe-
   --stack-name Meditation-dev-Agent --query "Stacks[0].Outputs[?OutputKey=='AgentFunctionUrl'].OutputValue" \
   --output text)agent/sessions"
 # 403: the Function URL itself is IAM-only; nobody but CloudFront gets past it
+
+# The same two checks for the LangGraph function: agent-lg/* through the site (401), and
+# the AgentLangGraphFunctionUrl output directly (403).
+curl -s -o /dev/null -w '%{http_code}\n' -X POST "$SITE/agent-lg/sessions" \
+  -H "x-amz-content-sha256: e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
 ```
+
+**Both engines, end to end.** With a Pro account, open `/companion` and `/companion?engine=langgraph`
+in turn and take each to a proposal (confirm one, Start over on the other — a conversation
+costs nothing). CloudWatch → Dashboards → `Meditation-<env>-Agent` then shows a point on each
+engine's `TurnLatency` line, with tokens and cache reads beside them; that dashboard (the
+account's first, so free) is where the comparison note's charts come from.
 
 With a Pro account's ID token, the sequence in README ("Calling the deployed API") opens a
 session, streams a turn and confirms a proposal; a minute later the job is DONE like any other.

@@ -8,7 +8,8 @@
  * runner can produce has a place here; none of them is a dialog.
  */
 import { useEffect, useRef } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { useNavigate, useSearchParams } from 'react-router-dom'
+import type { Engine } from '../api/agent'
 import type { GeneratingHandoff } from '../pages/GeneratingPage'
 import InlineError from './InlineError'
 import PlanRequired from './PlanRequired'
@@ -17,11 +18,24 @@ import Thread from './Thread'
 import { SHOW_TURNS_LEFT_AT, useCompanion } from './useCompanion'
 
 export default function CompanionPage() {
+  const [params] = useSearchParams()
+  // `?engine=langgraph` picks the second engine (plan §8): the only place
+  // the PWA knows there are two. Nothing on screen changes. Keyed on the
+  // engine so a query-only navigation remounts the screen and its hook
+  // rather than carrying a session across engines.
+  const engine: Engine = params.get('engine') === 'langgraph' ? 'langgraph' : 'native'
+  return <CompanionScreen key={engine} engine={engine} />
+}
+
+function CompanionScreen({ engine }: { engine: Engine }) {
   const navigate = useNavigate()
-  const companion = useCompanion((jobId, duration) => {
-    const handoff: GeneratingHandoff = { duration, pic: false }
-    navigate(`/generating/${jobId}`, { state: handoff })
-  })
+  const companion = useCompanion(
+    (jobId, duration) => {
+      const handoff: GeneratingHandoff = { duration, pic: false }
+      navigate(`/generating/${jobId}`, { state: handoff })
+    },
+    { engine },
+  )
   const { state } = companion
   const inputRef = useRef<HTMLInputElement>(null)
   const threadRef = useRef<HTMLDivElement>(null)
@@ -45,7 +59,7 @@ export default function CompanionPage() {
   const placeholder = state.proposal ? 'or tell me what to change…' : 'tired but wired…'
 
   return (
-    <div className="companion" aria-busy={state.starting}>
+    <div className="companion" data-engine={engine} aria-busy={state.starting}>
       <div className="companion-head">
         <div className="companion-head-left">
           <button className="btn-back-arrow" aria-label="Back" onClick={() => navigate('/')}>

@@ -198,6 +198,7 @@ def main() -> None:
         domain_name=domain_name,
         hosted_zone_id=app.node.try_get_context("hosted_zone_id"),
         agent_function_url=agent.function_url,
+        agent_langgraph_function_url=agent.langgraph_function_url,
         env=env,
         cross_region_references=True,
         description="CloudFront delivery for the PWA and for generated audio.",

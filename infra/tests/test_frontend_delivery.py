@@ -137,11 +137,12 @@ def test_spa_routes_are_rewritten_on_the_viewer_request(template):
     assert "CustomErrorResponses" not in config
 
 
-def test_the_agent_behaviour_has_no_rewrite():
-    """The runner's own 401/403/404 must reach the browser untouched."""
+@pytest.mark.parametrize("pattern", ["agent/*", "agent-lg/*"])
+def test_the_agent_behaviours_have_no_rewrite(pattern):
+    """The runners' own 401/403/404 must reach the browser untouched."""
     _, frontend = build_with_agent()
     config = distribution(assertions.Template.from_stack(frontend), "PWA")
-    [agent] = [b for b in config["CacheBehaviors"] if b["PathPattern"] == "agent/*"]
+    [agent] = [b for b in config["CacheBehaviors"] if b["PathPattern"] == pattern]
 
     assert "FunctionAssociations" not in agent
     assert "CustomErrorResponses" not in config
@@ -340,10 +341,14 @@ def build_with_agent() -> tuple[cdk.Stack, FrontendStack]:
         env_name="dev",
         audio_bucket=data.audio_bucket,
         agent_function_url=agent.function_url,
+        agent_langgraph_function_url=agent.langgraph_function_url,
         env=env,
         cross_region_references=True,
     )
     return agent, frontend
+
+
+AGENT_PATTERNS = ("agent/*", "agent-lg/*")
 
 
 @pytest.fixture(scope="module")
@@ -352,9 +357,10 @@ def agent_template() -> assertions.Template:
     return assertions.Template.from_stack(frontend)
 
 
-def test_agent_behavior_streams_uncached_over_every_method(agent_template):
+@pytest.mark.parametrize("pattern", AGENT_PATTERNS)
+def test_agent_behavior_streams_uncached_over_every_method(agent_template, pattern):
     config = distribution(agent_template, "PWA")
-    [agent] = [b for b in config["CacheBehaviors"] if b["PathPattern"] == "agent/*"]
+    [agent] = [b for b in config["CacheBehaviors"] if b["PathPattern"] == pattern]
 
     assert agent["CachePolicyId"] == CACHING_DISABLED_ID
     assert {"POST", "DELETE", "GET"} <= set(agent["AllowedMethods"])
@@ -365,9 +371,10 @@ def test_agent_behavior_streams_uncached_over_every_method(agent_template):
     assert "OriginRequestPolicyId" in agent
 
 
-def test_agent_origin_is_signed_by_origin_access_control(agent_template):
+@pytest.mark.parametrize("pattern", AGENT_PATTERNS)
+def test_agent_origin_is_signed_by_origin_access_control(agent_template, pattern):
     config = distribution(agent_template, "PWA")
-    [agent] = [b for b in config["CacheBehaviors"] if b["PathPattern"] == "agent/*"]
+    [agent] = [b for b in config["CacheBehaviors"] if b["PathPattern"] == pattern]
     [origin] = [o for o in config["Origins"] if o["Id"] == agent["TargetOriginId"]]
 
     assert origin["OriginAccessControlId"]
@@ -390,21 +397,42 @@ def test_only_this_distribution_may_invoke_the_url(agent_template):
     InvokeFunctionUrl *and* InvokeFunction), scoped to this distribution,
     living here in its own stack -- the reason this wiring has no cycle and
     needs no wildcard."""
-    permissions = agent_template.find_resources("AWS::Lambda::Permission").values()
+    permissions = list(agent_template.find_resources("AWS::Lambda::Permission").values())
 
-    assert {p["Properties"]["Action"] for p in permissions} == {
-        "lambda:InvokeFunctionUrl",
-        "lambda:InvokeFunction",
-    }
+    # Two actions for each of the two functions.
+    assert len(permissions) == 4
+    by_function: dict[str, set[str]] = {}
     for permission in permissions:
-        assert permission["Properties"]["Principal"] == "cloudfront.amazonaws.com"
-        assert "distribution/" in str(permission["Properties"]["SourceArn"])
+        props = permission["Properties"]
+        assert props["Principal"] == "cloudfront.amazonaws.com"
+        assert "distribution/" in str(props["SourceArn"])
+        by_function.setdefault(str(props["FunctionName"]), set()).add(props["Action"])
+    assert len(by_function) == 2
+    for granted in by_function.values():
+        assert granted == {"lambda:InvokeFunctionUrl", "lambda:InvokeFunction"}
+
+
+def test_the_two_agent_behaviours_point_at_different_origins_through_one_oac(agent_template):
+    config = distribution(agent_template, "PWA")
+    behaviours = {b["PathPattern"]: b for b in config["CacheBehaviors"]}
+    origin_ids = {behaviours[p]["TargetOriginId"] for p in AGENT_PATTERNS}
+    assert len(origin_ids) == 2
+    origins_by_id = {o["Id"]: o for o in config["Origins"]}
+    oacs = {str(origins_by_id[i]["OriginAccessControlId"]) for i in origin_ids}
+    assert len(oacs) == 1
+    lambda_oacs = [
+        oac
+        for oac in agent_template.find_resources("AWS::CloudFront::OriginAccessControl").values()
+        if oac["Properties"]["OriginAccessControlConfig"]["OriginAccessControlOriginType"]
+        == "lambda"
+    ]
+    assert len(lambda_oacs) == 1
 
 
 def test_without_the_agent_nothing_of_it_exists(template):
     config = distribution(template, "PWA")
 
-    assert not any(b["PathPattern"] == "agent/*" for b in config.get("CacheBehaviors", []))
+    assert not any(b["PathPattern"] in AGENT_PATTERNS for b in config.get("CacheBehaviors", []))
     template.resource_count_is("AWS::Lambda::Permission", 0)
     assert not [
         oac

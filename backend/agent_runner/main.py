@@ -11,14 +11,20 @@ from fastapi import FastAPI, Request
 
 from agent_runner import deps as deps_module
 from agent_runner.metrics import configure_logging
-from agent_runner.routes import router
+from agent_runner.routes import ROUTE_PREFIXES, router
 
 logger = logging.getLogger(__name__)
 
 
 def create_app() -> FastAPI:
     app = FastAPI(title="meditation companion", docs_url=None, redoc_url=None)
-    app.include_router(router)
+    # The same routes under both prefixes. The path is CloudFront's routing
+    # key -- agent/* to the native function, agent-lg/* to the LangGraph one
+    # (frontend_stack) -- and which engine answers is this function's
+    # AGENT_ENGINE, never the path; a session pinned to the other engine is
+    # refused with 409 wrong_engine (routes.py).
+    for prefix in ROUTE_PREFIXES:
+        app.include_router(router, prefix=prefix)
 
     @app.get("/health")
     def health() -> dict[str, str]:

@@ -97,6 +97,43 @@ test('a turn streams, proposes, and confirm starts the meditation', async ({ pag
   expect(captured.some((c) => c.url.endsWith('/confirm') && c.method === 'POST')).toBe(true)
 })
 
+test('?engine=langgraph talks to the other behaviour', async ({ page }) => {
+  const seen: string[] = []
+  await page.addInitScript(() => {
+    sessionStorage.setItem('drift:e2e-id-token', 'e2e.id.token')
+  })
+  await page.route('**/account', (route) =>
+    route.fulfill({ json: { available: 95, frozen: 0, plan: 'pro' } }),
+  )
+  await page.route('**/agent/memory', (route) =>
+    route.fulfill({ json: { insights: [], sessions_this_month: 0, sessions_per_month: 30 } }),
+  )
+  await page.route('**/agent-lg/**', (route) => {
+    const req = route.request()
+    seen.push(`${req.method()} ${new URL(req.url()).pathname}`)
+    if (req.url().endsWith('/agent-lg/sessions'))
+      return route.fulfill({
+        status: 201,
+        json: { session_id: 'lg1', turn: 0, engine: 'langgraph', model_id: 'm', insights_count: 0 },
+      })
+    return route.fulfill({
+      status: 200,
+      contentType: 'text/event-stream',
+      body:
+        'event: delta\ndata: {"text":"From the graph."}\n\n' +
+        'event: done\ndata: {"turn":1,"job_id":null,"awaiting_confirmation":false,"turns_left":11}\n\n',
+    })
+  })
+
+  await page.goto('/companion?engine=langgraph')
+  await page.getByLabel('Message').fill('hello')
+  await page.getByLabel('Send').click()
+
+  await expect(page.getByText('From the graph.')).toBeVisible()
+  expect(seen).toEqual(['POST /agent-lg/sessions', 'POST /agent-lg/sessions/lg1/turns'])
+  await expect(page.locator('.companion')).toHaveAttribute('data-engine', 'langgraph')
+})
+
 test('a free account is shown the Pro screen', async ({ page }) => {
   await page.addInitScript(() => {
     sessionStorage.setItem('drift:e2e-id-token', 'e2e.id.token')
