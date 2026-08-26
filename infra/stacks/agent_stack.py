@@ -43,7 +43,13 @@ DEFAULT_AGENT_MODEL_ID = "amazon.nova-lite-v1:0"
 # turns run at once, each at most AGENT_TIMEOUT on AGENT_MEMORY_MB. The
 # worst case is a few cents a minute; a Function URL reached by someone who
 # should not have it cannot spend more than that.
-AGENT_RESERVED_CONCURRENCY = 10
+#
+# Opt-in (`-c agent_reserved_concurrency=10`) rather than on by default:
+# Lambda refuses a reservation that would leave the account under 10
+# unreserved executions, and a fresh account's whole quota *is* 10 -- which
+# already caps this function at the same number. Set it once the account's
+# concurrency quota has been raised (docs/deployment.md).
+RECOMMENDED_RESERVED_CONCURRENCY = 10
 # A turn's budget. The runner stops asking the model for tools ten seconds
 # before this (agent_runner/lambda_context.py) so a turn ends committed.
 AGENT_TIMEOUT = Duration.seconds(120)
@@ -64,6 +70,7 @@ class AgentStack(Stack):
         user_pool: cognito.IUserPool,
         user_pool_client: cognito.IUserPoolClient,
         agent_model_id: str = DEFAULT_AGENT_MODEL_ID,
+        reserved_concurrency: int | None = None,
         log_level: str = "INFO",
         **kwargs,
     ) -> None:
@@ -85,7 +92,7 @@ class AgentStack(Stack):
             architecture=lambda_.Architecture.X86_64,
             memory_size=AGENT_MEMORY_MB,
             timeout=AGENT_TIMEOUT,
-            reserved_concurrent_executions=AGENT_RESERVED_CONCURRENCY,
+            reserved_concurrent_executions=reserved_concurrency,
             # An explicit log group with bounded retention, like every other
             # function in this app (see test_cost_hygiene).
             log_group=logs.LogGroup(

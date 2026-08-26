@@ -117,7 +117,11 @@ def picture_states(pipeline_stack) -> Any:
     return state_machine_definition(pipeline_stack, name_contains="picture")["States"]
 
 
-def build_agent_stack(model_id: str = "amazon.nova-lite-v1:0", app: Any = None) -> Any:
+def build_agent_stack(
+    model_id: str = "amazon.nova-lite-v1:0",
+    app: Any = None,
+    reserved_concurrency: int | None = None,
+) -> Any:
     """An AgentStack with throwaway upstream resources: a table, a one-state
     machine, a user pool and its client. Pass ``app`` to share one with a
     frontend stack that must reference the function URL."""
@@ -155,5 +159,6 @@ def build_agent_stack(model_id: str = "amazon.nova-lite-v1:0", app: Any = None) 
         user_pool=pool,
         user_pool_client=client,
         agent_model_id=model_id,
+        reserved_concurrency=reserved_concurrency,
         env=env,
     )

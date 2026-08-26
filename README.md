@@ -554,8 +554,9 @@ The design note is `docs/agent-runner-plan.md`; the short version:
   Lambda, behind a Function URL in `RESPONSE_STREAM` mode with the Lambda Web Adapter streaming
   the reply as server-sent events. Every turn rebuilds the conversation from the checkpoints on
   the table (`AGENT#<session>#T<n>` items), so resuming is not a recovery path — it is every path.
-  No VPC, no load balancer, no provisioned concurrency; reserved concurrency of 10 is the cost
-  ceiling (`infra/stacks/agent_stack.py`).
+  No VPC, no load balancer, no provisioned concurrency; the cost ceiling is the function's
+  reserved concurrency (`AGENT_CONCURRENCY=10` once the account's Lambda quota allows it -- a
+  fresh account's quota of 10 caps it already; `infra/stacks/agent_stack.py`).
 - **Same origin, no CORS, no secret.** The site distribution fronts the Function URL as an
   `agent/*` behaviour with origin access control, so the PWA calls `/agent/...` on its own domain
   and the URL answers nobody else. CDK places the `lambda:InvokeFunctionUrl` permission in the

@@ -21,7 +21,7 @@ if shutil.which("node") is None:  # pragma: no cover - environment guard
 from aws_cdk import assertions
 from conftest import ACCOUNT, AU_PROFILE, REGION, build_agent_stack
 
-from stacks.agent_stack import AGENT_RESERVED_CONCURRENCY
+from stacks.agent_stack import RECOMMENDED_RESERVED_CONCURRENCY
 from stacks.bedrock import bedrock_invoke_resources
 
 REQUIRED_ENV = {
@@ -81,8 +81,19 @@ def test_function_shape(template):
     assert props["PackageType"] == "Image"
     assert props["MemorySize"] == 512
     assert props["Timeout"] == 120
-    assert props["ReservedConcurrentExecutions"] == AGENT_RESERVED_CONCURRENCY
     assert props["Architectures"] == ["x86_64"]
+
+
+def test_reserved_concurrency_is_opt_in():
+    """A fresh account's quota of 10 refuses any reservation (and already
+    caps the function at 10); the ceiling is set once the quota is raised."""
+    default = assertions.Template.from_stack(build_agent_stack())
+    assert "ReservedConcurrentExecutions" not in function_properties(default)
+
+    capped = assertions.Template.from_stack(
+        build_agent_stack(reserved_concurrency=RECOMMENDED_RESERVED_CONCURRENCY)
+    )
+    assert function_properties(capped)["ReservedConcurrentExecutions"] == 10
 
 
 def test_environment_is_exactly_what_the_runner_reads(template):

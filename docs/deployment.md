@@ -132,6 +132,16 @@ make deploy ENV=dev STACKS=Meditation-dev-Agent AGENT_MODEL=au.anthropic.claude-
 `us.`, `eu.`, `apac.` and `global.` profiles are refused at synth: the conversation stays in
 Australia.
 
+**Concurrency ceiling.** The function's reserved concurrency (the agent's cost ceiling) is off
+by default: Lambda refuses a reservation that would leave the account under 10 unreserved
+executions, and a new account's whole concurrency quota is 10 -- which already caps the function
+at 10. Once the quota has been raised (Service Quotas → Lambda → *Concurrent executions*), turn
+the ceiling on:
+
+```bash
+make deploy ENV=dev STACKS=Meditation-dev-Agent AGENT_CONCURRENCY=10
+```
+
 ### Verifying
 
 ```bash

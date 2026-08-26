@@ -71,6 +71,10 @@ def resolve_audio_public_key(app: cdk.App) -> str | None:
     return None
 
 
+def _optional_int(value: object) -> int | None:
+    return int(value) if value not in (None, "") else None
+
+
 def resolve_allowed_origins(app: cdk.App, env_name: str, domain_name: str | None) -> list[str]:
     """CORS origins from context, with a dev-only default.
 
@@ -171,6 +175,9 @@ def main() -> None:
         # job (conversation with tools) and a different default (Nova Lite,
         # decided on the evals). An offshore profile is refused at synth.
         agent_model_id=app.node.try_get_context("agent_model_id") or DEFAULT_AGENT_MODEL_ID,
+        # Only after the account's Lambda concurrency quota is above the
+        # default 10; see agent_stack.RECOMMENDED_RESERVED_CONCURRENCY.
+        reserved_concurrency=_optional_int(app.node.try_get_context("agent_reserved_concurrency")),
         env=env,
         description="The companion agent: FastAPI + SSE on Lambda Web Adapter, Function URL.",
     )
