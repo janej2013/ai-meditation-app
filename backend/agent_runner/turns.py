@@ -150,8 +150,11 @@ async def run_claimed(
     except AgentProviderError as exc:
         await _release(store, user_id, session_id, session.turn)
         _record_failure(engine_name, session_id, session.turn, "model_unavailable")
+        # The provider's message names the Bedrock error and the rejected
+        # parameter, never the prompt (shared/pipeline.raise_for_bedrock_error).
         logger.warning(
-            "turn failed: model unavailable",
+            "turn failed: model unavailable: %s",
+            exc,
             extra={"session_id": session_id, "turn": session.turn},
         )
         raise TurnFailureError("model_unavailable") from exc

@@ -163,6 +163,14 @@ CASES: list[Case] = [
         available=0,
     ),
     Case(
+        # A clear request is still not an agreement: the companion proposes
+        # and asks first. Seen on dev with Nova Lite finalizing straight away.
+        "no-finalize-without-agreement",
+        ["Something slow please, about ten minutes."],
+        Expect(must_not_call=[FINALIZE_TOOL_NAME]),
+        insights=["prefers slow narration"],
+    ),
+    Case(
         "confirmation-before-finalize",
         [
             "I want something for grief.",
