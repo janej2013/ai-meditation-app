@@ -108,3 +108,64 @@ purchase and its webhook landing as an entitlement update.
 
 Dev's cost guards, for reference: generation is capped at 1 minute outside
 prod (`DURATION_MINUTES_OVERRIDE`), so a dev end-to-end run costs cents.
+
+## The companion agent (`Meditation-<env>-Agent`)
+
+Deployed with everything else by `make deploy ENV=<env>`; on its own, deploy the agent stack
+**and** the frontend stack, because the site distribution's `agent/*` behaviour and the invoke
+permission live in the latter:
+
+```bash
+make deploy ENV=dev STACKS="Meditation-dev-Agent Meditation-dev-Frontend"
+```
+
+The first deploy pushes the runner image (~280 MB, `backend/agent_runner/Dockerfile`) to the CDK
+bootstrap ECR repository and takes a few minutes; later ones push layers only. Nothing in the
+stack runs while idle, so a deployed agent costs nothing until someone talks to it.
+
+Model override for a session of debugging, same shape as `BEDROCK_MODEL`:
+
+```bash
+make deploy ENV=dev STACKS=Meditation-dev-Agent AGENT_MODEL=au.anthropic.claude-haiku-4-5-20251001-v1:0
+```
+
+`us.`, `eu.`, `apac.` and `global.` profiles are refused at synth: the conversation stays in
+Australia.
+
+**Concurrency ceiling.** The function's reserved concurrency (the agent's cost ceiling) is off
+by default: Lambda refuses a reservation that would leave the account under 10 unreserved
+executions, and a new account's whole concurrency quota is 10 -- which already caps the function
+at 10. Once the quota has been raised (Service Quotas → Lambda → *Concurrent executions*), turn
+the ceiling on:
+
+```bash
+make deploy ENV=dev STACKS=Meditation-dev-Agent AGENT_CONCURRENCY=10
+```
+
+### Verifying
+
+```bash
+SITE=https://<SiteUrl>        # Frontend stack output
+curl -s -o /dev/null -w '%{http_code}\n' -X POST "$SITE/agent/sessions" \
+  -H "x-amz-content-sha256: e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+# 401: the behaviour reaches the function, which wants an ID token (in X-Id-Token -- the OAC
+#      signature overwrites Authorization, so a bearer token sent that way never arrives)
+
+curl -s -o /dev/null -w '%{http_code}\n' -X POST "$(aws cloudformation describe-stacks \
+  --stack-name Meditation-dev-Agent --query "Stacks[0].Outputs[?OutputKey=='AgentFunctionUrl'].OutputValue" \
+  --output text)agent/sessions"
+# 403: the Function URL itself is IAM-only; nobody but CloudFront gets past it
+```
+
+With a Pro account's ID token, the sequence in README ("Calling the deployed API") opens a
+session, streams a turn and confirms a proposal; a minute later the job is DONE like any other.
+If a `/agent/*` request ever comes back as a 200 `index.html` page, a distribution-wide error
+mapping has crept back in: SPA routing is a viewer-request rewrite on the site behaviour only,
+precisely so the runner's 401/403/404 reach the browser as themselves. When in doubt read
+`x-cache: Error from cloudfront` and the function's log group, not the status code. An empty log
+group means the Function URL refused CloudFront before Lambda ran (both `lambda:InvokeFunctionUrl`
+and `lambda:InvokeFunction` must be granted -- the frontend stack does both).
+
+Metrics land in CloudWatch under `Meditation/Agent` (`AgentTurns`, `TurnLatency`, token counts,
+`AgentTurnErrors` by reason) with one line of JSON per turn in the function's log group — ids and
+counts only, never a word of the conversation.

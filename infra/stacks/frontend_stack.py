@@ -15,15 +15,24 @@ optional. Two behaviours, deliberately different:
   turn into a round trip to the API for every switch. These carry no user
   content, so there is nothing to protect.
 
+**The companion agent** rides on the site distribution as an ``agent/*``
+behaviour over the agent Lambda's Function URL. Same origin as the PWA, so
+no CORS; origin access control so the URL answers only to this distribution.
+The dependency runs one way (Frontend imports the URL): CDK creates the
+``lambda:InvokeFunctionUrl`` permission *in this stack*, so unlike the audio
+bucket (README, Known gaps) nothing has to reference the distribution from
+the agent stack and no account-wide wildcard is needed.
+
 Domain configuration is optional. With no ``domain_name`` in context the stack
 still synthesises and deploys, using the CloudFront default domains -- so
 ``cdk synth`` never depends on a real hosted zone.
 """
 
-from aws_cdk import Annotations, CfnOutput, Duration, RemovalPolicy, Stack
+from aws_cdk import Annotations, Aws, CfnOutput, Duration, RemovalPolicy, Stack
 from aws_cdk import aws_certificatemanager as acm
 from aws_cdk import aws_cloudfront as cloudfront
 from aws_cdk import aws_cloudfront_origins as origins
+from aws_cdk import aws_lambda as lambda_
 from aws_cdk import aws_route53 as route53
 from aws_cdk import aws_route53_targets as targets
 from aws_cdk import aws_s3 as s3
@@ -33,10 +42,23 @@ from constructs import Construct
 # itself lives (CLAUDE.md).
 CERTIFICATE_REGION = "us-east-1"
 
-# SPA routing: the bucket has exactly one HTML file, and every client-side route
-# has to resolve to it. S3 answers a missing key with 403 when the caller lacks
-# ListBucket (which OAC deliberately does not grant), so both codes are mapped.
-SPA_ERROR_CODES = (403, 404)
+# SPA routing: the bucket has exactly one HTML file, and every client-side
+# route has to resolve to it. Done on the viewer request, for the site
+# behaviour only: a path with no extension is an app route and is rewritten
+# to /index.html before S3 is asked; a path with one is a file and 404s
+# honestly. The alternative -- mapping 403/404 to index.html -- is
+# distribution-wide, and would (did) dress the agent origin's 403s and 404s
+# up as a 200 page.
+SPA_ROUTER_CODE = """\
+function handler(event) {
+  var request = event.request;
+  var last = request.uri.split('/').pop();
+  if (last.indexOf('.') === -1) {
+    request.uri = '/index.html';
+  }
+  return request;
+}
+"""
 
 
 class FrontendStack(Stack):
@@ -52,12 +74,19 @@ class FrontendStack(Stack):
         audio_public_key_pem: str | None = None,
         domain_name: str | None = None,
         hosted_zone_id: str | None = None,
+        agent_function_url: lambda_.IFunctionUrl | None = None,
         **kwargs,
     ) -> None:
         super().__init__(scope, construct_id, **kwargs)
 
         is_prod = env_name == "prod"
         removal_policy = RemovalPolicy.RETAIN if is_prod else RemovalPolicy.DESTROY
+
+        # None keeps the stack deployable without the agent stack (and keeps
+        # the existing tests' constructor calls valid).
+        additional_behaviors: dict[str, cloudfront.BehaviorOptions] = {}
+        if agent_function_url is not None:
+            additional_behaviors["agent/*"] = self._agent_behavior(agent_function_url)
 
         self.site_bucket = s3.Bucket(
             self,
@@ -81,23 +110,28 @@ class FrontendStack(Stack):
                 viewer_protocol_policy=cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
                 cache_policy=cloudfront.CachePolicy.CACHING_OPTIMIZED,
                 compress=True,
+                function_associations=[
+                    cloudfront.FunctionAssociation(
+                        function=cloudfront.Function(
+                            self,
+                            "SpaRouter",
+                            code=cloudfront.FunctionCode.from_inline(SPA_ROUTER_CODE),
+                            runtime=cloudfront.FunctionRuntime.JS_2_0,
+                            comment="App routes (no extension) resolve to index.html",
+                        ),
+                        event_type=cloudfront.FunctionEventType.VIEWER_REQUEST,
+                    )
+                ],
             ),
+            additional_behaviors=additional_behaviors,
             default_root_object="index.html",
-            error_responses=[
-                cloudfront.ErrorResponse(
-                    http_status=code,
-                    response_http_status=200,
-                    response_page_path="/index.html",
-                    # Short: a genuinely missing asset should not be cached as a
-                    # page for long, and the SPA shell is cheap to re-fetch.
-                    ttl=Duration.seconds(10),
-                )
-                for code in SPA_ERROR_CODES
-            ],
             certificate=certificate,
             domain_names=domain_names,
             comment=f"meditation-{env_name} PWA",
         )
+
+        if agent_function_url is not None:
+            self._grant_dual_auth_invoke(agent_function_url)
 
         self.audio_distribution, self.audio_key_group, self.audio_key_pair_id = (
             self._build_audio_distribution(
@@ -135,6 +169,64 @@ class FrontendStack(Stack):
             "AudioDomainName",
             value=self.audio_distribution.distribution_domain_name,
             description="CloudFront domain: jobs/* and pictures/* signed, assets/* public.",
+        )
+
+    # ------------------------------------------------------------------
+    # The companion agent
+    # ------------------------------------------------------------------
+
+    def _agent_behavior(self, function_url: lambda_.IFunctionUrl) -> cloudfront.BehaviorOptions:
+        """``/agent/*`` -> the agent Lambda's Function URL, signed by CloudFront.
+
+        Every request is a live turn of conversation: nothing is cacheable,
+        POST and DELETE must pass, and the reply is a server-sent event stream
+        that must not be buffered -- hence no compression. The Host header is
+        withheld because a Function URL validates it against its own domain;
+        everything else the viewer sends (Content-Type, ``X-Id-Token``, the
+        ``x-amz-content-sha256`` that SigV4-signed POSTs need) goes through.
+        Not Authorization: the OAC signature *replaces* it on the way to
+        the origin, which is why the runner reads the ID token from
+        ``X-Id-Token`` (agent_runner/auth.py).
+        The 60 s read timeout is the ceiling, not the expectation: the runner
+        heartbeats every 15 s while the model is silent.
+        """
+        origin = origins.FunctionUrlOrigin.with_origin_access_control(
+            function_url,
+            origin_access_control=cloudfront.FunctionUrlOriginAccessControl(
+                self, "AgentOac", signing=cloudfront.Signing.SIGV4_ALWAYS
+            ),
+            read_timeout=Duration.seconds(60),
+        )
+        return cloudfront.BehaviorOptions(
+            origin=origin,
+            allowed_methods=cloudfront.AllowedMethods.ALLOW_ALL,
+            cache_policy=cloudfront.CachePolicy.CACHING_DISABLED,
+            origin_request_policy=cloudfront.OriginRequestPolicy.ALL_VIEWER_EXCEPT_HOST_HEADER,
+            viewer_protocol_policy=cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
+            compress=False,
+        )
+
+    def _grant_dual_auth_invoke(self, function_url: lambda_.IFunctionUrl) -> None:
+        """The second half of the permission CDK's OAC origin grants.
+
+        Function URLs created since October 2025 check *two* actions on the
+        caller: ``lambda:InvokeFunctionUrl`` and ``lambda:InvokeFunction``.
+        ``FunctionUrlOrigin.with_origin_access_control`` still adds only the
+        first (aws/aws-cdk#35872), and the result is a 403 from the URL
+        before the function ever runs -- an empty log group and, through
+        this distribution's SPA error mapping, a 200 with index.html. Same
+        principal, same distribution-scoped condition, same stack.
+        """
+        lambda_.CfnPermission(
+            self,
+            "AgentInvokeFunctionForOac",
+            action="lambda:InvokeFunction",
+            function_name=function_url.function_arn,
+            principal="cloudfront.amazonaws.com",
+            source_arn=(
+                f"arn:{Aws.PARTITION}:cloudfront::{Aws.ACCOUNT_ID}:distribution/"
+                f"{self.site_distribution.distribution_id}"
+            ),
         )
 
     # ------------------------------------------------------------------

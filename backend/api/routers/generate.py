@@ -2,24 +2,26 @@
 
 Constraint 2: this Lambda only validates the JWT, writes the job row and starts
 the state machine. Bedrock, TTS and ffmpeg all run inside Step Functions.
+
+The checks and the start itself live in ``shared.jobs`` -- the companion
+agent's terminal tool starts a generation through the same function -- so
+this module only maps outcomes to HTTP.
 """
 
 from __future__ import annotations
 
-import json
 import logging
-import os
 import uuid
 from typing import Any
 from uuid import UUID
 
 import boto3
-from botocore.exceptions import ClientError
 from fastapi import APIRouter, HTTPException, status
 from pydantic import BaseModel, Field, model_validator
 
 from api import cloudfront_signer
-from api.deps import CurrentUserDep, StoreDep, require_credit
+from api.deps import CurrentUserDep, StoreDep
+from shared.jobs import Gate, GateOutcome, GenerationStartError, generation_gate, start_generation
 from shared.models import JobStatus, PictureDescription, PictureStatus, picture_key
 from shared.pipeline import MAX_DURATION_MINUTES, MIN_DURATION_MINUTES
 
@@ -77,8 +79,7 @@ class JobResponse(BaseModel):
     status_code=status.HTTP_202_ACCEPTED,
 )
 def generate(payload: GenerateRequest, user: CurrentUserDep, store: StoreDep) -> GenerateResponse:
-    entitlement = require_credit(store, user.sub)
-    _reject_if_job_in_flight(entitlement.frozen)
+    _raise_unless_open(generation_gate(store, user.sub))
 
     key: str | None = None
     description: PictureDescription | None = None
@@ -102,40 +103,27 @@ def generate(payload: GenerateRequest, user: CurrentUserDep, store: StoreDep) ->
         description = PictureDescription(keywords=picture.keywords, summary=picture.summary)
 
     job_id = str(uuid.uuid4())
-    if not store.create_job(
-        user.sub, job_id, payload.mood, payload.duration_minutes, key, description
-    ):
-        # A uuid4 collision is not a thing; this means a retry replayed.
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="That job already exists.")
-
     try:
-        _get_sfn().start_execution(
-            stateMachineArn=os.environ["STATE_MACHINE_ARN"],
-            name=job_id,
-            input=json.dumps(
-                {
-                    "user_id": user.sub,
-                    "job_id": job_id,
-                    "duration_minutes": payload.duration_minutes,
-                }
-            ),
+        started = start_generation(
+            store,
+            _get_sfn(),
+            user_id=user.sub,
+            job_id=job_id,
+            duration_minutes=payload.duration_minutes,
+            mood_text=payload.mood,
+            picture_key=key,
+            description=description,
+            source="picture" if key else "words",
         )
-    except ClientError:
-        # The job row exists but nothing will ever process it. No credit was
-        # frozen, so nothing leaks -- surface a retryable error.
-        logger.exception("failed to start execution job_id=%s", job_id)
+    except GenerationStartError:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Could not start generation. Please retry.",
         ) from None
+    if not started:
+        # A uuid4 collision is not a thing; this means a retry replayed.
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="That job already exists.")
 
-    # Never the mood text (constraint 7).
-    logger.info(
-        "generation started job_id=%s duration=%d picture=%s",
-        job_id,
-        payload.duration_minutes,
-        key is not None,
-    )
     return GenerateResponse(job_id=job_id, status=JobStatus.PENDING)
 
 
@@ -168,19 +156,15 @@ def get_job(job_id: str, user: CurrentUserDep, store: StoreDep) -> JobResponse:
     )
 
 
-def _reject_if_job_in_flight(frozen: int) -> None:
-    """One generation at a time, keeping abuse and cost bounded.
-
-    ``frozen >= 1`` is the invariant the credit ledger already maintains for an
-    in-flight job, so this needs no extra query and no GSI.
-
-    It is not a hard lock: a job sits in PENDING for the moment between the row
-    being written and freeze_credit running, so two requests landing inside
-    that window both pass. The ledger bounds the damage -- the second freeze
-    fails its `available >= 1` condition and that execution ends in
-    InsufficientCredits without producing anything.
-    """
-    if frozen >= 1:
+def _raise_unless_open(gate: Gate) -> None:
+    """The gate's outcomes as HTTP. The reasoning behind each outcome is
+    documented on ``shared.jobs.generation_gate``; this only picks codes."""
+    if gate.outcome is GateOutcome.NO_CREDIT:
+        raise HTTPException(
+            status_code=status.HTTP_402_PAYMENT_REQUIRED,
+            detail="No generations remaining. Add credits to continue.",
+        )
+    if gate.outcome is GateOutcome.JOB_IN_FLIGHT:
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             detail="A generation is already in progress. Wait for it to finish.",

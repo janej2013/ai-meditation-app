@@ -538,6 +538,43 @@ only the profile fails at runtime with an opaque `AccessDenied`. A bare model id
 needs only the model ARN in the deploy region. `_bedrock_resources` in
 `pipeline_stack.py` derives both cases from the id's geo prefix.
 
+## Architecture — the companion agent
+
+A Pro feature and a portfolio piece in one: a conversational companion that works out what
+meditation the listener needs, then hands a brief to the same pipeline `POST /generate` starts.
+The design note is `docs/agent-runner-plan.md`; the short version:
+
+- **Three self-built layers.** Layer 1 calls Bedrock Converse directly (`converse_stream`, tool
+  use, prompt-cache breakpoints, streamed tool-input reassembly) in `backend/agent/native/llm/`;
+  layer 2 is the loop, tool registry, turn budget and per-turn checkpoint in `backend/agent/`;
+  layer 3 is the harness in `backend/agent_runner/` — identity, transport, the claim/commit/release
+  fencing token around each turn, metrics. No agent framework and no managed agent service on
+  purpose: the loop *is* the exercise.
+- **One invocation per turn, zero idle cost.** The harness is a FastAPI app in a container on
+  Lambda, behind a Function URL in `RESPONSE_STREAM` mode with the Lambda Web Adapter streaming
+  the reply as server-sent events. Every turn rebuilds the conversation from the checkpoints on
+  the table (`AGENT#<session>#T<n>` items), so resuming is not a recovery path — it is every path.
+  No VPC, no load balancer, no provisioned concurrency; the cost ceiling is the function's
+  reserved concurrency (`AGENT_CONCURRENCY=10` once the account's Lambda quota allows it -- a
+  fresh account's quota of 10 caps it already; `infra/stacks/agent_stack.py`).
+- **Same origin, no CORS, no secret.** The site distribution fronts the Function URL as an
+  `agent/*` behaviour with origin access control, so the PWA calls `/agent/...` on its own domain
+  and the URL answers nobody else. CDK places the `lambda:InvokeFunctionUrl` permission in the
+  frontend stack (and the stack adds the `lambda:InvokeFunction` half that newer Function URLs also
+  check, which CDK still omits — aws/aws-cdk#35872) — the reference runs one way, which is why
+  this needs none of the wildcard the audio bucket needs (Known gaps). The function verifies the Cognito ID token itself
+  (`agent_runner/auth.py`, same claim rules as `api/deps.py`; the token travels in `X-Id-Token`
+  because the OAC signature overwrites `Authorization`) and reaches Bedrock and the table with its
+  execution role.
+- **The model proposes; the listener pays.** `finalize_meditation_brief` only places a pending
+  brief on the session. `POST /agent/sessions/{id}/confirm` is the one request that can move a
+  credit — through `shared/jobs.start_generation()`, the same function the API uses, with the
+  credit still frozen only inside the state machine (constraint 2). Whatever a model makes of
+  "only after they agree", no turn can spend anything.
+- **Model.** Nova Lite in Sydney by default, decided on the A3 evals (19/20, every crisis case
+  passing, about a cent per full eval run — `backend/tests/agent/evals/`). Swap in a Claude profile
+  with `-c agent_model_id=au.anthropic...`; a profile that could route offshore fails the synth.
+
 ## Architecture — billing
 
 `infra/stacks/billing_stack.py` owns no Lambda and no HTTP API. It hangs two
@@ -557,7 +594,7 @@ The client names a **product key** (`pack_10`), never a price id. The catalogue
 in `backend/api/products.py` resolves the key to a Stripe price, so a client
 cannot name an arbitrary price and buy something the catalogue does not offer.
 Price ids are not secrets, so they live in code and can be overridden with the
-`STRIPE_PRODUCTS` env var once the real Stripe products exist.
+`STRIPE_PRODUCTS` env var once the real Stripe products exist. The catalogue also carries `plan_pro` (`plan="pro"`), the subscription the companion agent is gated on; its price id is a placeholder until that product exists too.
 
 ### The webhook is anonymous; the signature is the authentication
 
@@ -858,6 +895,29 @@ curl -s -H "Authorization: Bearer $TOKEN" "$API_URL/jobs/$JOB" | jq
 # once status is DONE, audio_url holds a 15-minute presigned link
 ```
 
+The companion agent lives on the *site* domain, not the API's (see the agent section). The
+account needs `plan == "pro"`. Two things differ from the API: the ID token goes in `X-Id-Token`
+(CloudFront's origin access control overwrites `Authorization` with its own signature), and POSTs
+must carry the payload hash:
+
+```bash
+SITE=$(python -c "import json;d=json.load(open('cdk-outputs.json'));\
+print(next(v['SiteUrl'] for v in d.values() if 'SiteUrl' in v))")
+EMPTY_SHA=$(printf '' | sha256sum | cut -d' ' -f1)
+
+SID=$(curl -s -X POST "$SITE/agent/sessions" -H "X-Id-Token: $TOKEN" \
+  -H "x-amz-content-sha256: $EMPTY_SHA" | jq -r .session_id)
+
+BODY='{"text":"Something slow to wind down tonight, about ten minutes."}'
+curl -N -X POST "$SITE/agent/sessions/$SID/turns" -H "X-Id-Token: $TOKEN" \
+  -H 'Content-Type: application/json' -H "x-amz-content-sha256: $(printf '%s' "$BODY" | sha256sum | cut -d' ' -f1)" \
+  -d "$BODY"
+# event: tool / proposal / delta ... / done {"awaiting_confirmation": true}
+
+curl -s -X POST "$SITE/agent/sessions/$SID/confirm" -H "X-Id-Token: $TOKEN" \
+  -H "x-amz-content-sha256: $EMPTY_SHA" | jq        # {"job_id": ...} -- this is the step that spends a credit
+```
+
 `get_token.py` reads the password from `COGNITO_PASSWORD` or an interactive prompt — deliberately
 never from argv, which would land it in shell history and the process list.
 
@@ -873,11 +933,13 @@ otherwise CDK fails with `No module named 'aws_cdk'`.
 pyproject.toml    ruff + pytest config for the whole repo
 infra/            CDK app, one stack per concern
   app.py          entry point; env selected via -c env=dev|prod
-  stacks/         data_stack.py, auth_stack.py, api_stack.py,
+  stacks/         data_stack.py, auth_stack.py, api_stack.py, agent_stack.py,
                   pipeline_stack.py, billing_stack.py, frontend_stack.py
   tests/          CDK assertions; skipped when node is absent
 backend/
-  pyproject.toml  installable packages: shared, api, functions.*
+  pyproject.toml  installable packages: shared, agent, agent_runner, api, functions.*
+  agent/          the companion: contract, tools, prompt, native engine (docs/agent-runner-plan.md)
+  agent_runner/   its harness: FastAPI + SSE on Lambda Web Adapter (container)
   shared/         models.py, db.py (credit ledger), pipeline.py (step
                   contracts), tts/ (provider abstraction)
   api/            FastAPI app + Mangum handler, Dockerfile

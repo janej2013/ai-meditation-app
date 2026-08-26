@@ -78,3 +78,17 @@ def test_init_user_log_retention_is_bounded() -> None:
 
     # An explicit group with a cap, not the implicit never-expiring one.
     template.has_resource_properties("AWS::Logs::LogGroup", {"RetentionInDays": 30})
+
+
+def test_the_agent_stack_has_no_always_on_resources() -> None:
+    """Zero idle cost is a decision (docs/agent-runner-plan.md §13): no
+    provisioned concurrency, no NAT, no VPC for the companion agent."""
+    from conftest import build_agent_stack
+
+    template = assertions.Template.from_stack(build_agent_stack())
+
+    template.resource_count_is("AWS::EC2::NatGateway", 0)
+    template.resource_count_is("AWS::EC2::VPC", 0)
+    template.resource_count_is("AWS::Lambda::Alias", 0)
+    assert "ProvisionedConcurrencyConfig" not in str(template.to_json())
+    template.has_resource_properties("AWS::Logs::LogGroup", {"RetentionInDays": 30})

@@ -42,14 +42,22 @@ AUDIO_PUB_KEY ?= cf-signing.pub.pem
 # Deliberately persisted nowhere: CI deploys without it, so ANY merge to main
 # reverts dev to the default (Nova Lite). Debug configuration cannot linger.
 BEDROCK_MODEL ?=
+# Same idea for the companion agent's model (default Nova Lite); offshore
+# profiles are refused at synth.
+AGENT_MODEL ?=
+# Reserved concurrency for the agent function (its cost ceiling). Off by
+# default: a fresh account's Lambda quota of 10 refuses any reservation.
+AGENT_CONCURRENCY ?=
 
 CONTEXT = $(if $(wildcard $(AUDIO_PUB_KEY)),-c audio_public_key_file="$(abspath $(AUDIO_PUB_KEY))",) \
           $(if $(ALLOWED_ORIGINS),-c allowed_origins="$$ALLOWED_ORIGINS") \
-          $(if $(BEDROCK_MODEL),-c bedrock_model_id="$(BEDROCK_MODEL)")
+          $(if $(BEDROCK_MODEL),-c bedrock_model_id="$(BEDROCK_MODEL)") \
+          $(if $(AGENT_MODEL),-c agent_model_id="$(AGENT_MODEL)") \
+          $(if $(AGENT_CONCURRENCY),-c agent_reserved_concurrency="$(AGENT_CONCURRENCY)")
 
 .DEFAULT_GOAL := help
 .PHONY: help check lint test synth layers diff deploy upload-bgm fe-check fe-lint fe-test fe-build \
-        e2e e2e-ui e2e-install e2e-auth smoke dev
+        e2e e2e-ui e2e-install e2e-auth smoke dev dev-agent
 
 help: ## List the targets
 	@grep -hE '^[a-z0-9-]+:.*?## ' $(MAKEFILE_LIST) \
@@ -187,3 +195,6 @@ endif
 .PHONY: dev
 dev: ## Vite dev server on the port the API's CORS allow-list names
 	cd frontend && npm run dev -- --port 5173 --strictPort
+
+dev-agent: ## The companion runner on :8080 (needs TABLE_NAME, STATE_MACHINE_ARN, COGNITO_*, AWS_REGION)
+	cd backend && $(VENV)/uvicorn agent_runner.main:app --reload --port 8080

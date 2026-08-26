@@ -138,6 +138,32 @@ describe('ambient background music', () => {
     expect(ctx.close).not.toHaveBeenCalled()
   })
 
+  it('a stopAmbient that lands while the track is still loading wins', async () => {
+    // The race behind a refused start: Begin/Start began the fetch, the
+    // server said no a moment later, and the decode has not landed yet.
+    let release!: () => void
+    fetchMock.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          release = () => resolve({ ok: true, arrayBuffer: async () => new ArrayBuffer(8) })
+        }),
+    )
+    const mixer = new DualTrackMixer()
+    const pending = mixer.startAmbient('https://cdn/assets/bgm/default_bgm.mp3')
+    // The context resumes first; the fetch is in flight once fetch was called.
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1))
+
+    mixer.stopAmbient()
+    release()
+    await pending
+
+    expect(running()).toHaveLength(0)
+    // The decoded track is kept: the next Begin starts it without a refetch.
+    await mixer.startAmbient('https://cdn/assets/bgm/default_bgm.mp3')
+    expect(running()).toHaveLength(1)
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
+
   it('never throws without Web Audio or when the fetch fails', async () => {
     vi.stubGlobal('AudioContext', undefined)
     await expect(

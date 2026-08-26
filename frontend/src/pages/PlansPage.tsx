@@ -8,10 +8,19 @@
  * grants 20 sessions, and the copy says so.)
  */
 import { useEffect, useState } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { useNavigate, useSearchParams } from 'react-router-dom'
 import { createCheckout, getAccount } from '../api/client'
 
 const PLANS = [
+  {
+    // Pro: the monthly allowance plus the companion. Price is display copy
+    // (a placeholder until the Stripe product exists), as for the others.
+    key: 'plan_pro',
+    label: 'Pro',
+    note: '20 meditations a month · Companion — it remembers what helps you',
+    price: '$19/mo',
+    cta: 'Go Pro · $19/mo',
+  },
   {
     key: 'pack_10',
     label: '10 sessions',
@@ -30,7 +39,12 @@ const PLANS = [
 
 export default function PlansPage() {
   const navigate = useNavigate()
-  const [selected, setSelected] = useState(PLANS[0].key)
+  const [params] = useSearchParams()
+  // `?plan=plan_pro` arrives from the companion's locked entry and gate.
+  const requested = params.get('plan')
+  const [selected, setSelected] = useState(
+    PLANS.some((p) => p.key === requested) ? (requested as string) : 'pack_10',
+  )
   const [credits, setCredits] = useState<number | null>(null)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)

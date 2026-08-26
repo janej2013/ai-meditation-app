@@ -40,6 +40,7 @@ from constructs import Construct
 
 from stacks.paths import ASSETS_DIR, BACKEND_DIR, SHARED_LAYER_DIR
 
+from .bedrock import bedrock_invoke_resources
 from .data_stack import PICTURE_PREFIX, grant_job_sweep
 
 # Transport-level Lambda failures. Always worth retrying, never a code bug.
@@ -366,41 +367,14 @@ class PipelineStack(Stack):
         volcano_secret.grant_read(synthesize)
 
     def _bedrock_resources(self, model_id: str) -> list[str]:
-        """ARNs a Bedrock InvokeModel call needs.
+        """ARNs a Bedrock InvokeModel call needs; see ``stacks.bedrock``.
 
-        A cross-region inference profile requires permission on *both* the
-        profile ARN and the underlying foundation model in every region the
-        profile can route to -- granting only the profile fails at runtime with
-        an opaque AccessDenied. Profile ids are prefixed with their geo
-        ("au.", "apac.", "us.", "eu."); a bare model id needs only the model ARN.
-
-        An unrecognised prefix falls through to the bare-model branch, which
-        produces an ARN that names the whole profile id as a model and grants
-        nothing on the profile itself. Adding a geo here is part of changing
-        `bedrock_model_id` to a profile from a geo not already listed.
+        Kept as a method so the pipeline's tests read as before; the logic is
+        shared with the agent stack, which adds the residency refusal the
+        pipeline deliberately does not have (``-c bedrock_model_id`` may name
+        an ``apac.`` profile for capacity).
         """
-        geo, _, base_model = model_id.partition(".")
-        if geo not in ("au", "apac", "us", "eu"):
-            return [f"arn:aws:bedrock:{self.region}::foundation-model/{model_id}"]
-
-        regions = {
-            # Australia-only routing: Sydney and Melbourne.
-            "au": ["ap-southeast-2", "ap-southeast-4"],
-            "apac": [
-                "ap-southeast-1",
-                "ap-southeast-2",
-                "ap-northeast-1",
-                "ap-northeast-2",
-                "ap-south-1",
-            ],
-            "us": ["us-east-1", "us-east-2", "us-west-2"],
-            "eu": ["eu-central-1", "eu-west-1", "eu-west-3", "eu-north-1"],
-        }[geo]
-
-        return [
-            f"arn:aws:bedrock:{self.region}:{self.account}:inference-profile/{model_id}",
-            *[f"arn:aws:bedrock:{r}::foundation-model/{base_model}" for r in regions],
-        ]
+        return bedrock_invoke_resources(self.region, self.account, model_id, allow_offshore=True)
 
     # ------------------------------------------------------------------
     # State machine

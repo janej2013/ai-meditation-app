@@ -70,6 +70,16 @@ _DEFAULT_PRODUCTS: tuple[Product, ...] = (
         credits=20,
         plan="monthly",
     ),
+    # Pro: the same monthly allowance plus the companion agent, which the
+    # runner gates on plan == "pro" (agent_runner/settings.py). Price and
+    # credits are placeholders until the Stripe product exists.
+    Product(
+        key="plan_pro",
+        price_id="price_placeholder_plan_pro",
+        kind="subscription",
+        credits=20,
+        plan="pro",
+    ),
 )
 
 _catalogue: dict[str, Product] | None = None

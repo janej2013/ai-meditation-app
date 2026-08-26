@@ -31,6 +31,7 @@ infra/            CDK app. One stack per concern:
     pipeline_stack.py   Step Functions + step Lambdas
     billing_stack.py    Stripe webhook route + secrets wiring
     frontend_stack.py   S3 + CloudFront + Route53 + ACM (us-east-1 cert)
+    agent_stack.py      Companion agent Lambda (container, Function URL response streaming) + IAM
 backend/
   api/              FastAPI app (Mangum handler), routers/, deps.py, Dockerfile
   functions/        One folder per Step Functions task Lambda (zip):
@@ -39,6 +40,8 @@ backend/
                     describe_picture (picture machine, pre-job)
                     mix_audio/ is retained but NOT deployed (browser mixes
                     instead); init_user/ is a Cognito trigger, not a task
+  agent/            Companion agent: contract, tools, prompt, native engine (docs/agent-runner-plan.md)
+  agent_runner/     The agent's harness: FastAPI + SSE on Lambda Web Adapter (container)
   shared/           Shared package (Lambda layer): models.py, db.py, tts/
   tests/
 frontend/           React + Vite PWA
@@ -48,7 +51,7 @@ frontend/           React + Vite PWA
 ## Hard constraints (never violate)
 
 1. **All credit/entitlement mutations go through `backend/shared/db.py`.** Freeze, commit, and rollback are DynamoDB conditional updates within a single user partition. Never write raw `update_item` calls for credits elsewhere. All three operations must be idempotent (safe to retry with the same `job_id`).
-2. **Generation flow**: API Lambda only validates JWT + starts a Step Functions execution and returns an id. All heavy work (Bedrock, TTS, S3 upload) happens inside a state machine — the generation chain for a job, the one-task picture machine for reading an upload before any job exists. Never call Bedrock or TTS synchronously from the API Lambda. A picture session takes no mood text: the picture is the whole brief, and it is described (client polls `GET /pictures/{id}`) before Begin, which is the first moment a credit is frozen; every picture route requires a credit in hand because that read is uncompensated spend.
+2. **Generation flow**: API Lambda only validates JWT + starts a Step Functions execution and returns an id. All heavy work (Bedrock, TTS, S3 upload) happens inside a state machine — the generation chain for a job, the one-task picture machine for reading an upload before any job exists. Never call Bedrock or TTS synchronously from the API Lambda. A picture session takes no mood text: the picture is the whole brief, and it is described (client polls `GET /pictures/{id}`) before Begin, which is the first moment a credit is frozen; every picture route requires a credit in hand because that read is uncompensated spend. The companion agent's terminal tool is the second permitted starter; it goes through the same `shared/jobs.start_generation()` as `POST /generate`, and the credit is still frozen only inside the state machine.
 3. **State machine failure handling**: every task has a `Catch` routing to `rollback_credit`. The external TTS call additionally gets `Retry` with exponential backoff (2–3 attempts) before falling through to `Catch`.
 4. **Secrets** (Volcano TTS key, Stripe secret + webhook signing secret): Secrets Manager or SSM SecureString only. Never in code, `.env` committed files, plaintext Lambda env vars, or CDK context.
 5. **Stripe webhooks must verify the signature** before any state change. Entitlement updates from webhooks must be idempotent (key on Stripe event id).
@@ -66,6 +69,10 @@ frontend/           React + Vite PWA
   - `SK = SUB#<stripe_subscription_id>`
   - `SK = PICTURE#<picture_id>` — fields: `status` (PENDING | DESCRIBED | FAILED), `keywords`, `summary`, `expires_at` (TTL); written by `POST /pictures/upload` and the picture state machine, before any job exists
   - `SK = JOB#<job_id>` — fields: `status` (PENDING | FROZEN | GENERATING | DONE | FAILED | ROLLED_BACK | DELETED), `audio_key`, `mood_text` (words jobs) or `picture_key` / `picture_keywords` / `picture_summary` (picture jobs), timestamps
+  - `SK = AGENT#<session_id>` — companion session header: `status` (ACTIVE | FINALIZED | ABANDONED | FAILED), `turn` (committed turns; the fencing token), `engine`, `in_flight`, `usage_*`, `expires_at` (TTL)
+  - `SK = AGENT#<session_id>#T<nnnn>` — one checkpoint per turn: the user text, the assistant content and every tool round in Converse wire form. User content: never logged
+  - `SK = MEMORY` — insights the agent saved across sessions. User content; the user can view and clear it
+  - `SK = AGENTQUOTA#<yyyy-mm>` — monthly companion-session counter, `expires_at` (TTL)
 - Freeze: `available >= 1` condition → `available -= 1, frozen += 1`.
 - Commit: `frozen >= 1` condition → `frozen -= 1`.
 - Rollback: condition on job status not already committed → `frozen -= 1, available += 1`.

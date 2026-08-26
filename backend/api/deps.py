@@ -19,6 +19,7 @@ from typing import Annotated
 from fastapi import Depends, HTTPException, Request, status
 
 from shared.db import EntitlementStore
+from shared.jobs import GateOutcome, generation_gate
 from shared.models import Entitlement
 
 # Cognito sets token_use to distinguish its two token types. Access tokens carry
@@ -82,15 +83,20 @@ CurrentUserDep = Annotated[CurrentUser, Depends(get_current_user)]
 
 
 def require_credit(store: EntitlementStore, user_id: str) -> Entitlement:
-    """The one 402: a generation, and every picture route (whose vision call
-    is spent before anything is frozen), need a credit in hand."""
-    entitlement = store.get_entitlement(user_id)
-    if entitlement is None or entitlement.available < 1:
+    """The one 402: every picture route (whose vision call is spent before
+    anything is frozen) needs a credit in hand.
+
+    Only the credit half of ``shared.jobs.generation_gate``: a picture may be
+    read while another generation runs, so JOB_IN_FLIGHT passes here. The
+    generate route maps the whole gate itself.
+    """
+    gate = generation_gate(store, user_id)
+    if gate.outcome is GateOutcome.NO_CREDIT or gate.entitlement is None:
         raise HTTPException(
             status_code=status.HTTP_402_PAYMENT_REQUIRED,
             detail="No generations remaining. Add credits to continue.",
         )
-    return entitlement
+    return gate.entitlement
 
 
 StoreDep = Annotated[EntitlementStore, Depends(get_store)]

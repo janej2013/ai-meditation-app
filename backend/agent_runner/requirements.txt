@@ -1,0 +1,12 @@
+# Runtime deps for the companion agent's container image.
+# Kept in sync with the `agent-runner` extra in backend/pyproject.toml.
+fastapi>=0.115,<1
+# Serves the app inside the container; the Lambda Web Adapter talks to it
+# over localhost. The API image uses Mangum instead because it answers
+# synchronously; response streaming needs a real HTTP server.
+uvicorn>=0.30,<1
+# ID-token verification against the Cognito JWKS (api/deps.py relies on
+# the API Gateway authorizer for this; a Function URL has none).
+PyJWT[crypto]>=2.9,<3
+pydantic>=2.7,<3
+boto3>=1.34
