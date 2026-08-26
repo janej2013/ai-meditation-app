@@ -203,6 +203,13 @@ export default function AccountPage() {
         >
           Sign out
         </button>
+        <button
+          className="btn-ghost"
+          style={{ color: 'var(--text-dim)', fontSize: 13, minHeight: 44 }}
+          onClick={() => navigate('/privacy', { state: { from: '/account' } })}
+        >
+          Privacy
+        </button>
       </div>
 
       {forgetting && (

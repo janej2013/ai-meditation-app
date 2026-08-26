@@ -136,6 +136,15 @@ export default function SignupPage() {
             : 'New here? Create an account'}
         </button>
       </div>
+      <div style={{ marginTop: 4, textAlign: 'center' }}>
+        <button
+          className="btn-ghost"
+          style={{ color: 'var(--text-dim)', fontSize: 13, minHeight: 44 }}
+          onClick={() => navigate('/privacy', { state: { from: '/signup' } })}
+        >
+          Privacy
+        </button>
+      </div>
 
       <div
         style={{

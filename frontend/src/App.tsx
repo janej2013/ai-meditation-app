@@ -8,6 +8,7 @@ import GeneratingPage from './pages/GeneratingPage'
 import HomePage from './pages/HomePage'
 import PlansPage from './pages/PlansPage'
 import PlayerPage from './pages/PlayerPage'
+import PrivacyPage from './pages/PrivacyPage'
 import SignupPage from './pages/SignupPage'
 import VerifyPage from './pages/VerifyPage'
 import { SceneProvider } from './scene/SceneContext'
@@ -33,6 +34,7 @@ export default function App() {
               <Route path="/account" element={<AccountPage />} />
               <Route path="/dreamscapes" element={<DreamscapesPage />} />
               <Route path="/companion" element={<CompanionPage />} />
+              <Route path="/privacy" element={<PrivacyPage />} />
               {/* Stripe return URLs; success lands on the account with a banner. */}
               <Route
                 path="/billing/success"
